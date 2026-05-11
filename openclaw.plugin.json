@@ -1,6 +1,21 @@
 {
   "id": "wecom",
   "channels": ["wecom"],
+  "channelConfigs": {
+    "wecom": {
+      "label": "WeCom (企业微信)",
+      "description": "企业微信官方推荐三方插件，默认 Bot WebSocket 配置简单，支持加密媒体解密、Agent 主动发消息与多账号接入。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {}
+      },
+      "commands": {
+        "nativeCommandsAutoEnabled": false,
+        "nativeSkillsAutoEnabled": false
+      }
+    }
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

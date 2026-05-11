@@ -1,0 +1,37 @@
+# NOTE: Presence of this file makes npm IGNORE .gitignore for packing.
+# Combined with the package.json "files" whitelist, this guarantees that
+# the compiled dist/ output is always shipped to the registry, regardless
+# of how .gitignore is configured.
+
+# Source / tooling -- not needed at runtime (dist/ is the runtime entry).
+src/
+scripts/
+*.test.ts
+*.test.js
+*.tsbuildinfo
+tsconfig.json
+vitest.config.ts
+index.test.ts
+
+# Dev artifacts
+node_modules/
+coverage/
+.nyc_output/
+*.log
+
+# Repo metadata that doesn't belong in the npm package
+.github/
+.claude/
+.git/
+.gitignore
+.DS_Store
+.vscode/
+.idea/
+
+# Internal planning docs (keep README/LICENSE/changelog only)
+UPSTREAM_CONFIG.md
+UPSTREAM_PLAN.md
+GOVERNANCE.md
+SKILLS_CAL.md
+SKILLS_DOC.md
+compat-single-account.md

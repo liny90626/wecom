@@ -177,6 +177,33 @@ describe("createBotWsReplyHandle", () => {
     );
   });
 
+  it("does not duplicate cumulative block text when final repeats the full answer", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-cumulative-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const block1 = "第一段内容";
+    const block2 = `${block1}\n第二段内容`;
+    const final = `${block2}\n最终收尾`;
+
+    await handle.deliver({ text: block1, isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: block2, isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: final, isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-cumulative-final" } }),
+      expect.any(String),
+      final,
+      true,
+    );
+  });
+
   it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
@@ -452,6 +479,39 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
       markdown: { content: "A 的最终答案" },
+    });
+  });
+
+  it("matches superseded peer ids case-insensitively while keeping the original send target", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-superseded-case" },
+        body: { from: { userid: "Alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+    await handle.deliver({ text: "旧请求答案", isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-superseded-case" } }),
+      expect.any(String),
+      "已收到新消息，合并思考。✅",
+      true,
+    );
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("Alice", {
+      msgtype: "markdown",
+      markdown: { content: "旧请求答案" },
     });
   });
 

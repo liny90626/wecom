@@ -52,6 +52,9 @@ function status() {
     reply.includes("recentFinalDeliveriesByPeer") &&
     reply.includes("let finalDelivered = false") &&
     reply.includes("markFinalDelivered") &&
+    reply.includes("function mergeReplyText(") &&
+    reply.includes("accumulatedText = mergeReplyText(accumulatedText, text)") &&
+    reply.includes("mergeReplyText(accumulatedText, text)") &&
     reply.includes("deliverNormalFinalViaStream") &&
     reply.includes("await params.client.replyStream(params.frame, finalStreamId, markdownChunks[0] ?? \"\", true)") &&
     reply.includes("await params.client.sendMessage(peerId,") &&

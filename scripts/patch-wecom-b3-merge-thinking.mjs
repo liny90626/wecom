@@ -47,6 +47,7 @@ function status() {
     reply.includes("已收到新消息，合并思考。✅") &&
     reply.includes("supersededByNewInbound") &&
     reply.includes("supersedeByNewInbound: (meta)") &&
+    reply.includes("normalizePeerKey(meta.peerId) !== peerKeyId") &&
     reply.includes("closeSupersededPlaceholder") &&
     reply.includes("sendMarkdownChunksViaActivePush") &&
     reply.includes("reason: \"superseded-final\"") &&
@@ -55,8 +56,15 @@ function status() {
   const testReady =
     tests.includes("sends a merge notice when superseded") &&
     tests.includes("later pushes the old final without updating the old stream") &&
+    tests.includes("matches superseded peer ids case-insensitively") &&
     tests.includes("keeps the newer same-peer handle on the normal final stream path");
-  const ready = appReady && typeReady && replyReady && testReady && b2.ok && build.ok;
+  const accountRuntime = read(path.join(SRC, "app", "account-runtime.ts"));
+  const accountRuntimeTest = read(path.join(SRC, "app", "account-runtime.test.ts"));
+  const runtimeWrapperReady =
+    accountRuntime.includes("supersedeByNewInbound: (meta)") &&
+    accountRuntime.includes("replyHandle.supersedeByNewInbound?.(meta)") &&
+    accountRuntimeTest.includes("forwards supersedeByNewInbound through the runtime tracking wrapper");
+  const ready = appReady && typeReady && replyReady && testReady && runtimeWrapperReady && b2.ok && build.ok;
 
   return {
     id: "B3",
@@ -66,6 +74,7 @@ function status() {
     typeReady,
     replyReady,
     testReady,
+    runtimeWrapperReady,
     b2Ready: b2.ok,
     buildReady: build.ok,
     status: ready ? "READY" : "NOT_READY",

@@ -111,6 +111,9 @@ export class WecomAccountRuntime {
       markExternalActivity: () => {
         replyHandle.markExternalActivity?.();
       },
+      supersedeByNewInbound: (meta) => {
+        replyHandle.supersedeByNewInbound?.(meta);
+      },
     };
 
     try {

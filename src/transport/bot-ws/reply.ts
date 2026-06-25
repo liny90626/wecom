@@ -102,6 +102,27 @@ function shouldSkipRecentPeerFinal(key: string): boolean {
   return false;
 }
 
+function normalizePeerKey(peerId: string): string {
+  return peerId.trim().toLowerCase();
+}
+
+function mergeReplyText(previous: string, incoming: string): string {
+  const base = previous.trim();
+  const next = incoming.trim();
+  if (!base) return next;
+  if (!next) return base;
+  if (base === next || base.startsWith(next)) return base;
+  if (next.startsWith(base)) return next;
+
+  const maxOverlap = Math.min(base.length, next.length);
+  for (let overlap = maxOverlap; overlap >= 16; overlap -= 1) {
+    if (base.endsWith(next.slice(0, overlap))) {
+      return `${base}${next.slice(overlap)}`;
+    }
+  }
+  return `${base}\n${next}`;
+}
+
 function formatFallbackError(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -157,6 +178,7 @@ export function createBotWsReplyHandle(params: {
     (body?.chattype === "group" ? body?.chatid || body?.from?.userid : body?.from?.userid) ||
       "unknown",
   );
+  const peerKeyId = normalizePeerKey(peerId);
   const peerKind: "direct" | "group" = body?.chattype === "group" ? "group" : "direct";
   const reqId = params.frame.headers.req_id || "unknown";
 
@@ -176,7 +198,7 @@ export function createBotWsReplyHandle(params: {
     }
 
     // Remove from registry
-    const keepalives = activeKeepalivesByPeer.get(peerId);
+    const keepalives = activeKeepalivesByPeer.get(peerKeyId);
     if (keepalives) {
       for (const ka of keepalives) {
         if (ka.reqId === reqId) {
@@ -184,7 +206,7 @@ export function createBotWsReplyHandle(params: {
         }
       }
       if (keepalives.size === 0) {
-        activeKeepalivesByPeer.delete(peerId);
+        activeKeepalivesByPeer.delete(peerKeyId);
       }
     }
   };
@@ -216,7 +238,7 @@ export function createBotWsReplyHandle(params: {
     // A genuine reply or reasoning is happening on THIS handle.
     // It means the core SDK has chosen this handle to deliver the response.
     // We can safely terminate all other orphaned keepalives for this peer to prevent infinite loops.
-    const keepalives = activeKeepalivesByPeer.get(peerId);
+    const keepalives = activeKeepalivesByPeer.get(peerKeyId);
     if (keepalives) {
       for (const ka of keepalives) {
         if (ka.reqId !== reqId) {
@@ -372,10 +394,10 @@ export function createBotWsReplyHandle(params: {
     }, MAX_KEEPALIVE_MS);
 
     // Register keepalive
-    let keepalives = activeKeepalivesByPeer.get(peerId);
+    let keepalives = activeKeepalivesByPeer.get(peerKeyId);
     if (!keepalives) {
       keepalives = new Set();
-      activeKeepalivesByPeer.set(peerId, keepalives);
+      activeKeepalivesByPeer.set(peerKeyId, keepalives);
     }
     keepalives.add({ reqId, stop: stopPlaceholderKeepalive });
   }
@@ -424,16 +446,12 @@ export function createBotWsReplyHandle(params: {
         if (!text) {
           return;
         }
-        accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
+        accumulatedText = mergeReplyText(accumulatedText, text);
       }
 
       const outboundText =
         info.kind === "final"
-          ? accumulatedText
-            ? text
-              ? `${accumulatedText}\n${text}`
-              : accumulatedText
-            : text
+          ? mergeReplyText(accumulatedText, text)
           : accumulatedText || text;
 
       let finalText = outboundText;
@@ -486,7 +504,7 @@ export function createBotWsReplyHandle(params: {
           ? buildFinalDeliveryKey({
               accountId: params.accountId,
               peerKind,
-              peerId,
+              peerId: peerKeyId,
               text: finalText,
               mediaUrls,
             })
@@ -578,7 +596,11 @@ export function createBotWsReplyHandle(params: {
       stopPlaceholderKeepalive();
     },
     supersedeByNewInbound: (meta) => {
-      if (meta.accountId !== params.accountId || meta.peerKind !== peerKind || meta.peerId !== peerId) {
+      if (
+        meta.accountId !== params.accountId ||
+        meta.peerKind !== peerKind ||
+        normalizePeerKey(meta.peerId) !== peerKeyId
+      ) {
         return;
       }
       if (supersededByNewInbound) {

@@ -96,6 +96,12 @@ export type ReplyHandle = {
   deliver: (payload: ReplyPayload, info: ReplyDeliveryInfo) => Promise<void>;
   fail?: (error: unknown) => Promise<void>;
   markExternalActivity?: () => void;
+  supersedeByNewInbound?: (meta: {
+    accountId: string;
+    peerKind: "direct" | "group";
+    peerId: string;
+    reason: "new-inbound";
+  }) => void;
 };
 
 export type TransportSessionSnapshot = {

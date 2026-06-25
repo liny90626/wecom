@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import {
   generateReqId,
   type WsFrame,
@@ -7,13 +9,22 @@ import {
 } from "@wecom/aibot-node-sdk";
 import { formatErrorMessage } from "openclaw/plugin-sdk/infra-runtime";
 import { resolveWecomMediaMaxBytes, resolveWecomMergedMediaLocalRoots } from "../../config/index.js";
-import { getWecomRuntime } from "../../runtime.js";
+import { getBotWsPushHandle, getWecomRuntime } from "../../runtime.js";
 import type { ReplyHandle, ReplyPayload } from "../../types/index.js";
-import { toWeComMarkdownV2 } from "../../wecom_msg_adapter/markdown_adapter.js";
+import {
+  chunkWeComMarkdownV2,
+  previewWeComMarkdownV2,
+  toWeComMarkdownV2,
+} from "../../wecom_msg_adapter/markdown_adapter.js";
 import { uploadAndSendBotWsMedia } from "./media.js";
 
 const PLACEHOLDER_KEEPALIVE_MS = 3000;
 const MAX_KEEPALIVE_MS = 120 * 1000; // Force stop keepalive after 120s if ignored
+const B2_PEER_FINAL_DEDUP_TTL_MS = 120_000;
+const B3_SUPERSEDED_NOTICE_TEXT = "已收到新消息，合并思考。✅";
+const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
+
+const recentFinalDeliveriesByPeer = new Map<string, number>();
 
 function isInvalidReqIdError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
@@ -51,12 +62,70 @@ function formatMediaFailure(mediaUrl: string, error?: string, rejectReason?: str
   return `媒体发送失败：${mediaUrl} (${reason})`;
 }
 
+function pruneRecentFinalDeliveries(now = Date.now()): void {
+  for (const [key, expiresAt] of recentFinalDeliveriesByPeer) {
+    if (expiresAt <= now) {
+      recentFinalDeliveriesByPeer.delete(key);
+    }
+  }
+}
+
+function buildFinalDeliveryKey(params: {
+  accountId: string;
+  peerKind: "direct" | "group";
+  peerId: string;
+  text: string;
+  mediaUrls: readonly string[];
+}): string {
+  const { accountId, peerKind, peerId, text, mediaUrls } = params;
+  const digest = crypto
+    .createHash("sha256")
+    .update(text)
+    .update("\0")
+    .update(JSON.stringify(mediaUrls))
+    .digest("hex");
+  return [
+    accountId,
+    peerKind,
+    peerId,
+    digest,
+  ].join(":");
+}
+
+function shouldSkipRecentPeerFinal(key: string): boolean {
+  const now = Date.now();
+  pruneRecentFinalDeliveries(now);
+  if ((recentFinalDeliveriesByPeer.get(key) ?? 0) > now) {
+    return true;
+  }
+  recentFinalDeliveriesByPeer.set(key, now + B2_PEER_FINAL_DEDUP_TTL_MS);
+  return false;
+}
+
+function formatFallbackError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (error && typeof error === "object") {
+    const errcode = "errcode" in error ? String(error.errcode) : "";
+    const errmsg = "errmsg" in error ? String(error.errmsg ?? "") : "";
+    const combined = `${errcode} ${errmsg}`.trim();
+    if (combined) return combined;
+  }
+  return String(error);
+}
+
 // Global registry to track active keepalives by peerId
 interface ActiveKeepalive {
   reqId: string;
   stop: () => void;
 }
 const activeKeepalivesByPeer = new Map<string, Set<ActiveKeepalive>>();
+
+export function __resetBotWsReplyTestState(): void {
+  recentFinalDeliveriesByPeer.clear();
+  activeKeepalivesByPeer.clear();
+}
 
 export function createBotWsReplyHandle(params: {
   client: WSClient;
@@ -88,6 +157,7 @@ export function createBotWsReplyHandle(params: {
     (body?.chattype === "group" ? body?.chatid || body?.from?.userid : body?.from?.userid) ||
       "unknown",
   );
+  const peerKind: "direct" | "group" = body?.chattype === "group" ? "group" : "direct";
   const reqId = params.frame.headers.req_id || "unknown";
 
   const isEvent =
@@ -170,6 +240,125 @@ export function createBotWsReplyHandle(params: {
     return deferredMediaUrls;
   };
 
+  let finalDelivered = false;
+  let finalDeliveryKey = "";
+  let supersededByNewInbound = false;
+  let supersededNoticeSent = false;
+  let supersededAt: number | undefined;
+
+  const markFinalDelivered = (key: string): boolean => {
+    if (finalDelivered) {
+      if (key === finalDeliveryKey) {
+        console.info(
+          `[wecom-b3] final-skip already-delivered account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+        );
+      }
+      return false;
+    }
+    if (shouldSkipRecentPeerFinal(key)) {
+      finalDelivered = true;
+      finalDeliveryKey = key;
+      console.info(
+        `[wecom-b3] final-skip recent-peer account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+      );
+      return false;
+    }
+    finalDelivered = true;
+    finalDeliveryKey = key;
+    return true;
+  };
+
+  const sendMarkdownChunksViaActivePush = async (
+    textToSend: string,
+    options: { reason: "superseded-final" | "stream-fallback" },
+  ): Promise<void> => {
+    const markdownChunks = chunkWeComMarkdownV2(textToSend);
+    const pushHandle = getBotWsPushHandle(params.accountId);
+    if (pushHandle?.isConnected?.()) {
+      for (let i = 0; i < markdownChunks.length; i += 1) {
+        const chunk = markdownChunks[i] ?? "";
+        console.info(
+          `[wecom-b3] active-push account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${options.reason} chunk=${i + 1}/${markdownChunks.length}`,
+        );
+        await pushHandle.sendMarkdown(peerId, chunk);
+        if (i < markdownChunks.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        }
+      }
+      return;
+    }
+
+    for (let i = 0; i < markdownChunks.length; i += 1) {
+      const chunk = markdownChunks[i] ?? "";
+      console.info(
+        `[wecom-b3] client-push account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${options.reason} chunk=${i + 1}/${markdownChunks.length}`,
+      );
+      await params.client.sendMessage(peerId, {
+        msgtype: "markdown",
+        markdown: { content: chunk },
+      });
+      if (i < markdownChunks.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+    }
+  };
+
+  const deliverNormalFinalViaStream = async (finalText: string): Promise<void> => {
+    const markdownChunks = chunkWeComMarkdownV2(finalText);
+    const finalStreamId = resolveStreamId();
+    try {
+      console.info(
+        `[wecom-b3] stream-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} chunks=${markdownChunks.length}`,
+      );
+      await params.client.replyStream(params.frame, finalStreamId, markdownChunks[0] ?? "", true);
+    } catch (error) {
+      if (isTerminalReplyError(error)) {
+        params.onFail?.(error);
+        return;
+      }
+      console.warn(
+        `[wecom-b3] stream-final-fallback account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} error=${formatFallbackError(error)}`,
+      );
+      await sendMarkdownChunksViaActivePush(finalText, { reason: "stream-fallback" });
+      return;
+    }
+
+    if (markdownChunks.length > 1) {
+      for (let i = 1; i < markdownChunks.length; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        console.info(
+          `[wecom-b2] stream-remainder account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} chunk=${i + 1}/${markdownChunks.length}`,
+        );
+        await params.client.sendMessage(peerId, {
+          msgtype: "markdown",
+          markdown: { content: markdownChunks[i] ?? "" },
+        });
+      }
+    }
+  };
+
+  const closeSupersededPlaceholder = (): void => {
+    if (isEvent || supersededNoticeSent) return;
+    supersededNoticeSent = true;
+    const noticeStreamId = resolveStreamId();
+    void params.client
+      .replyStream(params.frame, noticeStreamId, B3_SUPERSEDED_NOTICE_TEXT, true)
+      .then(() => {
+        console.info(
+          `[wecom-b3] supersede-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${noticeStreamId}`,
+        );
+      })
+      .catch((error) => {
+        if (!isTerminalReplyError(error)) {
+          console.warn(
+            `[wecom-b3] supersede-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${noticeStreamId} error=${formatFallbackError(error)}`,
+          );
+          return;
+        }
+        params.onFail?.(error);
+      });
+  };
+
   if (params.autoSendPlaceholder !== false && !isEvent) {
     sendPlaceholder();
     placeholderKeepalive = setInterval(() => {
@@ -227,7 +416,7 @@ export function createBotWsReplyHandle(params: {
       }
       const mediaUrls =
         info.kind === "final" ? mergeDeferredMediaUrls(incomingMediaUrls) : incomingMediaUrls;
-      if (!text && mediaUrls.length === 0) {
+      if (info.kind !== "final" && !text && mediaUrls.length === 0) {
         return;
       }
 
@@ -292,30 +481,57 @@ export function createBotWsReplyHandle(params: {
         return;
       }
 
+      const currentFinalDeliveryKey =
+        info.kind === "final"
+          ? buildFinalDeliveryKey({
+              accountId: params.accountId,
+              peerKind,
+              peerId,
+              text: finalText,
+              mediaUrls,
+            })
+          : "";
+      if (info.kind === "final" && !markFinalDelivered(currentFinalDeliveryKey)) {
+        return;
+      }
+
       // Event frames do not support streaming chunks
       if (isEvent && info.kind !== "final") {
         return;
       }
 
-      settleStream();
       try {
         if (params.inboundKind === "welcome") {
+          settleStream();
           await params.client.replyWelcome(params.frame, {
             msgtype: "text",
             text: { content: finalText },
           });
         } else if (isEvent) {
+          settleStream();
           // Send push message for other events
           await params.client.sendMessage(peerId, {
             msgtype: "markdown",
             markdown: { content: toWeComMarkdownV2(finalText) },
           });
+        } else if (info.kind === "final" && supersededByNewInbound) {
+          settleStream();
+          const textToSend =
+            mediaUrls.length > 0 ? `${finalText}\n\n${B3_MEDIA_SUPERSEDED_NOTE}` : finalText;
+          console.info(
+            `[wecom-b3] superseded-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} supersededAt=${supersededAt ?? 0}`,
+          );
+          await sendMarkdownChunksViaActivePush(textToSend, { reason: "superseded-final" });
+        } else if (info.kind === "final") {
+          settleStream();
+          await deliverNormalFinalViaStream(finalText);
         } else {
+          stopPlaceholderKeepalive();
           await params.client.replyStream(
             params.frame,
             resolveStreamId(),
-            toWeComMarkdownV2(finalText),
-            info.kind === "final",
+            previewWeComMarkdownV2(finalText),
+            false,
           );
         }
       } catch (error) {
@@ -360,6 +576,21 @@ export function createBotWsReplyHandle(params: {
     markExternalActivity: () => {
       notifyPeerActive();
       stopPlaceholderKeepalive();
+    },
+    supersedeByNewInbound: (meta) => {
+      if (meta.accountId !== params.accountId || meta.peerKind !== peerKind || meta.peerId !== peerId) {
+        return;
+      }
+      if (supersededByNewInbound) {
+        return;
+      }
+      supersededByNewInbound = true;
+      supersededAt = Date.now();
+      stopPlaceholderKeepalive();
+      console.info(
+        `[wecom-b3] superseded account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${meta.reason}`,
+      );
+      closeSupersededPlaceholder();
     },
   };
 }

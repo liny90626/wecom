@@ -6,7 +6,7 @@
  * - 降级：代码块、图片、任务列表、分隔线、HTML、脚注、复杂语法
  * - 清理：多余空行、非法控制字符、过深嵌套
  */
-export function toWeComMarkdownV2(markdown: unknown, maxLength = 4096): string {
+export function toWeComMarkdownV2(markdown: unknown, maxLength: number | null = 4096): string {
   if (!markdown) return "";
 
   let text = String(markdown).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -33,6 +33,85 @@ export function toWeComMarkdownV2(markdown: unknown, maxLength = 4096): string {
   }
 
   return text;
+}
+
+export function chunkWeComMarkdownV2(
+  markdown: unknown,
+  maxChars = 3500,
+  maxBytes = 12000,
+): string[] {
+  const formatted = toWeComMarkdownV2(markdown, null);
+  const rawChunks = splitLongMarkdownCoreV2(formatted, maxChars, maxBytes);
+  if (rawChunks.length <= 1) return rawChunks;
+
+  const total = rawChunks.length;
+  return rawChunks.map((chunk, index) => {
+    const suffix = `\n\n【消息过长，分段发送：第${index + 1}/${total}段】`;
+    const allowedChars = Math.max(100, maxChars - suffix.length);
+    const allowedBytes = Math.max(256, maxBytes - utf8ByteLengthV2(suffix));
+    const body = splitLongMarkdownCoreV2(chunk, allowedChars, allowedBytes)[0] ?? "";
+    return `${body}${suffix}`;
+  });
+}
+
+export function previewWeComMarkdownV2(
+  markdown: unknown,
+  maxChars = 3500,
+  maxBytes = 12000,
+): string {
+  return chunkWeComMarkdownV2(markdown, maxChars, maxBytes)[0] ?? "";
+}
+
+function utf8ByteLengthV2(value: unknown): number {
+  return Buffer.byteLength(String(value ?? ""), "utf8");
+}
+
+function trimToUtf8BytesV2(value: unknown, maxBytes: number): string {
+  const text = String(value ?? "");
+  if (utf8ByteLengthV2(text) <= maxBytes) return text;
+  let out = "";
+  for (const ch of text) {
+    if (utf8ByteLengthV2(out + ch) > maxBytes) break;
+    out += ch;
+  }
+  return out;
+}
+
+function splitLongMarkdownCoreV2(markdown: unknown, maxChars: number, maxBytes: number): string[] {
+  const text = String(markdown ?? "");
+  if (!text) return [""];
+  const chunks: string[] = [];
+  const hardLimitChars = Math.max(200, Number(maxChars) || 3500);
+  const hardLimitBytes = Math.max(512, Number(maxBytes) || 12000);
+  const separators = ["\n\n", "\n", "。", "；", ";", "，", ",", " "];
+  let rest = text;
+
+  while (rest.length > 0) {
+    let take = "";
+    for (const ch of rest) {
+      const next = take + ch;
+      if (next.length > hardLimitChars || utf8ByteLengthV2(next) > hardLimitBytes) break;
+      take = next;
+    }
+    if (!take) take = trimToUtf8BytesV2(rest.slice(0, 1), hardLimitBytes);
+
+    if (take.length < rest.length) {
+      let cut = -1;
+      for (const sep of separators) {
+        const idx = take.lastIndexOf(sep);
+        if (idx > Math.floor(take.length * 0.45)) {
+          cut = idx + sep.length;
+          break;
+        }
+      }
+      if (cut > 0) take = take.slice(0, cut);
+    }
+
+    chunks.push(take);
+    rest = rest.slice(take.length);
+  }
+
+  return chunks.length > 0 ? chunks : [""];
 }
 
 const INLINE_CODE_PREFIX = "\uFFF0INLINECODE";
@@ -237,69 +316,16 @@ function normalizeTables(text: string): string {
     stitched.push(line);
   }
 
-  // Pass 2: convert each table block to plain text lines.
-  const out: string[] = [];
-  let i = 0;
-
-  while (i < stitched.length) {
-    if (looksLikeTableRow(stitched[i]!)) {
-      const tableBlock: string[] = [stitched[i]!];
-      let j = i + 1;
-
-      while (j < stitched.length && looksLikeTableRow(stitched[j]!)) {
-        tableBlock.push(stitched[j]!);
-        j += 1;
-      }
-
-      if (out.length > 0 && out[out.length - 1]?.trim() !== "") {
-        out.push("");
-      }
-
-      out.push(...tableToPlainText(tableBlock));
-
-      if (j < stitched.length && stitched[j]?.trim() !== "") {
-        out.push("");
-      }
-
-      i = j;
-    } else {
-      out.push(stitched[i]!);
-      i += 1;
-    }
-  }
-
-  return out.join("\n");
+  // Pass 2: keep Markdown table blocks intact after stitching.
+  // WeCom markdown_v2 renders standard pipe-table grammar more reliably than
+  // pipe-separated plain text, so do not drop separator rows or edge pipes.
+  return stitched.join("\n");
 }
 
 function looksLikeTableRow(line: string): boolean {
   const stripped = String(line).trim();
   if (!stripped.startsWith("|")) return false;
   return (stripped.match(/\|/g) || []).length >= 2;
-}
-
-function isTableSeparatorRow(row: string): boolean {
-  const inner = row.replace(/^\|/, "").replace(/\|$/, "");
-  return inner.split("|").every(c => /^[\s\-:]+$/.test(c) && c.includes("-"));
-}
-
-function extractTableCells(line: string): string[] {
-  const raw = line.trim();
-  const parts = raw.split("|");
-  const inner = raw.startsWith("|") ? parts.slice(1) : parts;
-  const cells = (raw.endsWith("|") ? inner.slice(0, -1) : inner).map(p => p.trim());
-  return cells.filter(c => c.length > 0);
-}
-
-function tableToPlainText(lines: string[]): string[] {
-  const result: string[] = [];
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    if (isTableSeparatorRow(line.trim())) continue;
-    const cells = extractTableCells(line);
-    if (cells.length === 0) continue;
-    result.push(cells.join(" | "));
-  }
-  return result;
 }
 
 function cleanupWhitespace(text: string): string {

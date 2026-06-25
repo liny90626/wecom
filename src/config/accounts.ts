@@ -16,7 +16,7 @@ import type {
 export const DEFAULT_ACCOUNT_ID = "default";
 
 export type WecomAccountConflict = {
-  type: "duplicate_bot_id" | "duplicate_agent_id";
+  type: "duplicate_bot_id" | "duplicate_bot_token" | "duplicate_bot_aibotid" | "duplicate_agent_id";
   accountId: string;
   ownerAccountId: string;
   message: string;
@@ -35,7 +35,10 @@ function resolveBotAccount(
 ): ResolvedBotAccount {
   const primaryTransport = config.primaryTransport ?? (config.ws ? "ws" : "webhook");
   const wsConfigured = Boolean(config.ws?.botId && config.ws?.secret);
-  const webhookConfigured = Boolean(config.webhook?.token && config.webhook?.encodingAESKey);
+  const webhookToken = config.webhook?.token ?? config.token ?? "";
+  const webhookEncodingAESKey = config.webhook?.encodingAESKey ?? config.encodingAESKey ?? "";
+  const webhookReceiveId = config.webhook?.receiveId ?? config.receiveId;
+  const webhookConfigured = Boolean(webhookToken && webhookEncodingAESKey);
   const configured = primaryTransport === "ws" ? wsConfigured : webhookConfigured;
   return {
     accountId,
@@ -51,16 +54,16 @@ function resolveBotAccount(
           secret: config.ws.secret,
         }
       : undefined,
-    webhook: config.webhook
+    webhook: webhookConfigured
       ? {
-          token: config.webhook.token,
-          encodingAESKey: config.webhook.encodingAESKey,
-          receiveId: config.webhook.receiveId?.trim() ?? "",
+          token: webhookToken,
+          encodingAESKey: webhookEncodingAESKey,
+          receiveId: webhookReceiveId?.trim() ?? "",
         }
       : undefined,
-    token: config.webhook?.token ?? "",
-    encodingAESKey: config.webhook?.encodingAESKey ?? "",
-    receiveId: config.webhook?.receiveId?.trim() ?? "",
+    token: webhookToken,
+    encodingAESKey: webhookEncodingAESKey,
+    receiveId: webhookReceiveId?.trim() ?? "",
     botId: config.ws?.botId ?? "",
     secret: config.ws?.secret ?? "",
   };
@@ -169,33 +172,74 @@ function normalizeKey(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function collectUniqueBotIdentity(params: {
+  owners: Map<string, string>;
+  conflicts: Map<string, WecomAccountConflict>;
+  accountId: string;
+  value: string | undefined;
+  type: "duplicate_bot_id" | "duplicate_bot_token" | "duplicate_bot_aibotid";
+  label: "botId" | "bot token" | "bot aibotid";
+}): void {
+  const value = params.value?.trim();
+  if (!value) return;
+  const key = normalizeKey(value);
+  const owner = params.owners.get(key);
+  if (owner && owner !== params.accountId) {
+    const displayLabel =
+      params.label === "bot token"
+        ? "bot token"
+        : params.label === "bot aibotid"
+          ? "bot aibotid"
+          : "botId";
+    params.conflicts.set(params.accountId, {
+      type: params.type,
+      accountId: params.accountId,
+      ownerAccountId: owner,
+      message:
+        `Duplicate WeCom ${displayLabel}: account "${params.accountId}" shares ${displayLabel} with account "${owner}". ` +
+        `Keep one owner account per ${displayLabel}.`,
+    });
+    return;
+  }
+  params.owners.set(key, params.accountId);
+}
+
 function collectWecomAccountConflicts(cfg: OpenClawConfig): Map<string, WecomAccountConflict> {
   const resolved = resolveWecomAccounts(cfg);
   const conflicts = new Map<string, WecomAccountConflict>();
-  const botOwners = new Map<string, string>();
+  const botIdOwners = new Map<string, string>();
+  const botTokenOwners = new Map<string, string>();
+  const botAibotIdOwners = new Map<string, string>();
   const agentOwners = new Map<string, string>();
 
   for (const accountId of Object.keys(resolved.accounts).sort((a, b) => a.localeCompare(b))) {
     const account = resolved.accounts[accountId];
     if (!account || account.enabled === false) continue;
 
-    const botId = account.bot?.botId?.trim();
-    if (botId) {
-      const key = normalizeKey(botId);
-      const owner = botOwners.get(key);
-      if (owner && owner !== accountId) {
-        conflicts.set(accountId, {
-          type: "duplicate_bot_id",
-          accountId,
-          ownerAccountId: owner,
-          message:
-            `Duplicate WeCom botId: account "${accountId}" shares botId with account "${owner}". ` +
-            "Keep one owner account per botId.",
-        });
-      } else {
-        botOwners.set(key, accountId);
-      }
-    }
+    collectUniqueBotIdentity({
+      owners: botIdOwners,
+      conflicts,
+      accountId,
+      value: account.bot?.botId,
+      type: "duplicate_bot_id",
+      label: "botId",
+    });
+    collectUniqueBotIdentity({
+      owners: botTokenOwners,
+      conflicts,
+      accountId,
+      value: account.bot?.token,
+      type: "duplicate_bot_token",
+      label: "bot token",
+    });
+    collectUniqueBotIdentity({
+      owners: botAibotIdOwners,
+      conflicts,
+      accountId,
+      value: account.bot?.config.aibotid,
+      type: "duplicate_bot_aibotid",
+      label: "bot aibotid",
+    });
 
     const corpId = account.agent?.corpId?.trim();
     const agentId = account.agent?.agentId;

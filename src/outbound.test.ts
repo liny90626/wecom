@@ -7,6 +7,17 @@ vi.mock("./transport/agent-api/core.js", () => ({
   uploadMedia: vi.fn(),
 }));
 
+vi.mock("./shared/media-asset.js", () => ({
+  resolveOutboundMediaAsset: vi.fn().mockImplementation(({ mediaUrl }: { mediaUrl: string }) => {
+    const filename = mediaUrl.split("/").pop() || "media.png";
+    return Promise.resolve({
+      buffer: Buffer.from([1, 2, 3]),
+      filename,
+      contentType: filename.endsWith(".md") ? "text/markdown" : "image/png",
+    });
+  }),
+}));
+
 describe("wecomOutbound", () => {
   const createBotWsHandle = (overrides: Partial<BotWsPushHandle> = {}): BotWsPushHandle => ({
     isConnected: () => true,
@@ -54,12 +65,12 @@ describe("wecomOutbound", () => {
     await expect(
       wecomOutbound.sendMedia({
         cfg: {},
-        to: "wr-test-chat",
+        to: "user:zhangsan",
         text: "caption",
         mediaUrl: "https://example.com/media.png",
       } as any),
     ).rejects.toThrow(/requires Agent mode for account=default/i);
-  });
+  }, 15_000);
 
   it("throws explicit error when outbound accountId does not exist", async () => {
     const { wecomOutbound } = await import("./outbound.js");

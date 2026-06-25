@@ -106,10 +106,17 @@ export function registerActiveBotWsReplyHandle(params: {
     );
   }
   if ((params.peerKind === "direct" || params.peerKind === "group") && peerId) {
-    activeBotWsReplyHandlesByPeer.set(
-      buildPeerHandleKey(accountId, params.peerKind, peerId),
-      params.handle,
-    );
+    const peerKey = buildPeerHandleKey(accountId, params.peerKind, peerId);
+    const previousPeerHandle = activeBotWsReplyHandlesByPeer.get(peerKey);
+    if (previousPeerHandle && previousPeerHandle !== params.handle) {
+      previousPeerHandle.supersedeByNewInbound?.({
+        accountId,
+        peerKind: params.peerKind,
+        peerId,
+        reason: "new-inbound",
+      });
+    }
+    activeBotWsReplyHandlesByPeer.set(peerKey, params.handle);
   }
 }
 

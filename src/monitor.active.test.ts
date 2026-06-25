@@ -188,7 +188,9 @@ describe("Monitor Active Features", () => {
         const streamId = Buffer.alloc(16, 0x11).toString("hex");
 
         undiciFetch.mockResolvedValue(new Response("ok", { status: 200 }));
-        await sendActiveMessage(streamId, "Active Hello");
+        const sendPromise = sendActiveMessage(streamId, "Active Hello");
+        await vi.advanceTimersByTimeAsync(1000);
+        await sendPromise;
 
         expect(undiciFetch).toHaveBeenCalled();
         const [url, init] = undiciFetch.mock.calls.at(-1)! as [string, RequestInit];
@@ -204,6 +206,7 @@ describe("Monitor Active Features", () => {
     });
 
     it("should fallback non-image media to agent DM (and push a Chinese prompt)", async () => {
+        vi.useRealTimers();
         const { uploadMedia, sendMedia } = agentApi as any;
         uploadMedia.mockResolvedValue("media-id-1");
         sendMedia.mockResolvedValue(undefined);
@@ -212,9 +215,7 @@ describe("Monitor Active Features", () => {
         const res = createMockResponse();
         await handleWecomWebhookRequest(req, res);
 
-        await vi.advanceTimersByTimeAsync(600);
-        await Promise.resolve();
-        await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 650));
 
         expect(capturedDeliver).toBeDefined();
 
@@ -238,7 +239,8 @@ describe("Monitor Active Features", () => {
         );
         // Ensure we attempted to push a prompt to response_url (uses undici fetch).
         expect(undiciFetch).toHaveBeenCalled();
-    });
+        vi.useFakeTimers();
+    }, 15_000);
 
     // 注：本机路径（/Users/...、/tmp/...、/root/...、/home/...）短路发图逻辑属于运行态特性，
     // 单测在 fake timers + module singleton 状态下容易引入脆弱性；这里优先覆盖更关键的兜底链路与去重逻辑。

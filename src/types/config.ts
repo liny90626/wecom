@@ -47,6 +47,9 @@ export type WecomBotConfig = {
    */
   aibotid?: string;
   botIds?: string[];
+  token?: string;
+  encodingAESKey?: string;
+  receiveId?: string;
   ws?: WecomBotWsConfig;
   webhook?: WecomBotWebhookConfig;
 };

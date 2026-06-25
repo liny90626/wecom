@@ -8,10 +8,11 @@ import {
 } from "openclaw/plugin-sdk";
 import { describe, expect, it, vi } from "vitest";
 
-import { createRuntimeEnv } from "../../test-utils/runtime-env.js";
+import { createRuntimeEnv } from "./test-utils/runtime-env.js";
 import { computeWecomMsgSignature, encryptWecomPlaintext } from "./crypto.js";
 import { wecomPlugin } from "./channel.js";
 import { handleWecomWebhookRequest } from "./monitor.js";
+import { setWecomRuntime } from "./runtime.js";
 import type { ResolvedWecomAccount } from "./types/index.js";
 
 function createMockRequest(params: {
@@ -72,12 +73,14 @@ function createCtx(params: {
     enabled: true,
     running: false,
   };
+  const runtime = createRuntimeEnv();
+  setWecomRuntime(runtime as any);
   const statusUpdates: Array<Partial<ChannelAccountSnapshot>> = [];
   return {
     cfg: params.cfg,
     accountId,
     account,
-    runtime: createRuntimeEnv(),
+    runtime: runtime as any,
     abortSignal: params.abortController.signal,
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     getStatus: () => snapshot,

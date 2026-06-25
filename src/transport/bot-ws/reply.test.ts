@@ -4,7 +4,7 @@ import type { WSClient } from "@wecom/aibot-node-sdk";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
 import { uploadAndSendBotWsMedia } from "./media.js";
-import { createBotWsReplyHandle } from "./reply.js";
+import { __resetBotWsReplyTestState, createBotWsReplyHandle } from "./reply.js";
 
 vi.mock("./media.js", () => ({
   uploadAndSendBotWsMedia: vi.fn(),
@@ -16,8 +16,15 @@ describe("createBotWsReplyHandle", () => {
   let mockClient: import("vitest").Mocked<WSClient>;
   const uploadAndSendBotWsMediaMock = vi.mocked(uploadAndSendBotWsMedia);
 
+  const flushPromises = async () => {
+    for (let i = 0; i < 10; i += 1) {
+      await Promise.resolve();
+    }
+  };
+
   beforeEach(async () => {
     vi.useFakeTimers();
+    __resetBotWsReplyTestState();
     vi.stubEnv("OPENCLAW_STATE_DIR", "/tmp/wecom-reply-state");
     mockClient = {
       replyStream: vi.fn(),
@@ -168,6 +175,40 @@ describe("createBotWsReplyHandle", () => {
       "第一段\n第二段\n收尾",
       true,
     );
+  });
+
+  it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-long-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const longText = `${"长内容。".repeat(1800)}END-B2`;
+
+    const deliverPromise = handle.deliver({ text: longText, isReasoning: false }, { kind: "final" });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(800);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(800);
+    await deliverPromise;
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-long-final" } }),
+      expect.any(String),
+      expect.stringContaining("第1/"),
+      true,
+    );
+    expect(mockClient.sendMessage).toHaveBeenCalled();
+    const pushedText = mockClient.sendMessage.mock.calls
+      .map((call) => (call[1] as any).markdown.content)
+      .join("\n");
+    expect(pushedText).toContain("END-B2");
   });
 
   it("streams block text even when media is deferred to final", async () => {
@@ -369,6 +410,94 @@ describe("createBotWsReplyHandle", () => {
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
     expect(onFail).toHaveBeenCalledWith(expiredError);
+  });
+
+  it("sends a merge notice when superseded and later pushes the old final without updating the old stream", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-superseded-a" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+    });
+
+    vi.advanceTimersByTime(3000);
+    await flushPromises();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.replyStream).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ headers: { req_id: "req-superseded-a" } }),
+      expect.any(String),
+      "已收到新消息，合并思考。✅",
+      true,
+    );
+
+    await handle.deliver({ text: "A 的最终答案", isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: { content: "A 的最终答案" },
+    });
+  });
+
+  it("keeps the newer same-peer handle on the normal final stream path", async () => {
+    const oldHandle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-a" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const newHandle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-b" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    oldHandle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+
+    await oldHandle.deliver({ text: "旧请求答案", isReasoning: false }, { kind: "final" });
+    await newHandle.deliver({ text: "新请求答案", isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: { content: "旧请求答案" },
+    });
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-b" } }),
+      expect.any(String),
+      "新请求答案",
+      true,
+    );
   });
 
   it.each([

@@ -19,7 +19,7 @@ import { getPeerUpstreamCorpId } from "./context-store.js";
 import { resolveWecomSourceSnapshot } from "./runtime/source-registry.js";
 import { resolveOutboundMediaAsset } from "./shared/media-asset.js";
 import { resolveScopedWecomTarget } from "./target.js";
-import { toWeComMarkdownV2 } from "./wecom_msg_adapter/markdown_adapter.js";
+import { chunkWeComMarkdownV2 } from "./wecom_msg_adapter/markdown_adapter.js";
 import { parseUpstreamAgentSessionTarget, createUpstreamAgentConfig, resolveUpstreamCorpConfig } from "./upstream/index.js";
 
 type WecomOutboundBaseContext = Parameters<NonNullable<ChannelOutboundAdapter["sendText"]>>[0];
@@ -386,11 +386,20 @@ async function sendTextViaBotWs(params: {
       `WeCom outbound account=${accountId} is configured for Bot WS active push, but the WS transport is not connected.`,
     );
   }
-  const markdownText = toWeComMarkdownV2(params.text);
+  const markdownChunks = chunkWeComMarkdownV2(params.text);
   console.log(
-    `[wecom-outbound] Sending Bot WS active message to target=${String(params.to ?? "")} chatId=${chatId} (len=${markdownText.length})`,
+    `[wecom-outbound] Sending Bot WS active message to target=${String(params.to ?? "")} chatId=${chatId} (chunks=${markdownChunks.length})`,
   );
-  await handle.sendMarkdown(chatId, markdownText);
+  for (let i = 0; i < markdownChunks.length; i += 1) {
+    const markdownText = markdownChunks[i] ?? "";
+    console.log(
+      `[wecom-outbound] Sending Bot WS active message chunk ${i + 1}/${markdownChunks.length} to chatId=${chatId} (len=${markdownText.length})`,
+    );
+    await handle.sendMarkdown(chatId, markdownText);
+    if (i < markdownChunks.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+  }
   markActiveBotWsReplyHandleActivity({
     accountId,
     sessionKey: params.sessionKey,

@@ -268,7 +268,7 @@ export function createBotWsReplyHandle(params: {
   let supersededNoticeSent = false;
   let supersededAt: number | undefined;
 
-  const markFinalDelivered = (key: string): boolean => {
+  const markFinalDelivered = (key: string, options: { peerDedup: boolean }): boolean => {
     if (finalDelivered) {
       if (key === finalDeliveryKey) {
         console.info(
@@ -277,7 +277,7 @@ export function createBotWsReplyHandle(params: {
       }
       return false;
     }
-    if (shouldSkipRecentPeerFinal(key)) {
+    if (options.peerDedup && shouldSkipRecentPeerFinal(key)) {
       finalDelivered = true;
       finalDeliveryKey = key;
       console.info(
@@ -447,6 +447,7 @@ export function createBotWsReplyHandle(params: {
           return;
         }
         accumulatedText = mergeReplyText(accumulatedText, text);
+        return;
       }
 
       const outboundText =
@@ -509,7 +510,10 @@ export function createBotWsReplyHandle(params: {
               mediaUrls,
             })
           : "";
-      if (info.kind === "final" && !markFinalDelivered(currentFinalDeliveryKey)) {
+      if (
+        info.kind === "final" &&
+        !markFinalDelivered(currentFinalDeliveryKey, { peerDedup: !supersededByNewInbound })
+      ) {
         return;
       }
 

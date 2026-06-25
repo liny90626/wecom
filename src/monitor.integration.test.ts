@@ -3,6 +3,7 @@ import { handleWecomWebhookRequest, registerWecomWebhookTarget } from "./monitor
 import { encryptWecomPlaintext, computeWecomMsgSignature, WECOM_PKCS7_BLOCK_SIZE } from "./crypto.js";
 import * as runtime from "./runtime.js";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 
@@ -36,6 +37,22 @@ function createMockResponse(): ServerResponse & { _getData: () => string, _getSt
     (res as any)._getData = () => data;
     (res as any)._getStatusCode = () => res.statusCode;
     return res as any;
+}
+
+async function waitForExpectation(assertion: () => void, timeoutMs = 3000): Promise<void> {
+    const startedAt = Date.now();
+    let lastError: unknown;
+    while (Date.now() - startedAt < timeoutMs) {
+        try {
+            assertion();
+            return;
+        } catch (error) {
+            lastError = error;
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+    }
+    if (lastError) throw lastError;
+    assertion();
 }
 
 // PKCS7 Pad Helper for manual encryption
@@ -118,7 +135,10 @@ describe("Monitor Integration: Inbound Image", () => {
     });
 
     // Mock media saving
-    const mockSaveMediaBuffer = vi.fn().mockResolvedValue({ path: "/tmp/saved-image.jpg", contentType: "image/jpeg" });
+    const mockSaveMediaBuffer = vi.fn().mockImplementation(async (buffer: Buffer) => {
+        await fs.promises.writeFile("/tmp/saved-image.jpg", buffer);
+        return { path: "/tmp/saved-image.jpg", contentType: "image/jpeg" };
+    });
     (mockCore.channel as any).media = { saveMediaBuffer: mockSaveMediaBuffer };
 
     it("should decrypt inbound image, save it, and inject into context", async () => {
@@ -171,12 +191,11 @@ describe("Monitor Integration: Inbound Image", () => {
 
         await handleWecomWebhookRequest(req, res);
 
-        // Wait for debounce timer to trigger agent (DEFAULT_DEBOUNCE_MS = 500ms)
-        await new Promise(resolve => setTimeout(resolve, 600));
-
         // 5. Verify
         // Check recordInboundSession was called with correct RawBody and Media Context
-        expect(mockCore.channel.session.recordInboundSession).toHaveBeenCalled();
+        await waitForExpectation(() => {
+            expect(mockCore.channel.session.recordInboundSession).toHaveBeenCalled();
+        });
         const recordCall = (mockCore.channel.session.recordInboundSession as any).mock.calls[0][0];
         const ctx = recordCall.ctx;
 

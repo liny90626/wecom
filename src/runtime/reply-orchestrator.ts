@@ -26,8 +26,9 @@ export async function dispatchRuntimeReply(params: {
   cfg: OpenClawConfig;
   session: PreparedSession;
   replyHandle: ReplyHandle;
+  abortSignal?: AbortSignal;
 }): Promise<void> {
-  const { core, cfg, session, replyHandle } = params;
+  const { core, cfg, session, replyHandle, abortSignal } = params;
   const result = await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: session.ctx,
     cfg,
@@ -36,8 +37,11 @@ export async function dispatchRuntimeReply(params: {
         ? {
             // WS bot replies should emit block updates instead of waiting for a final-only flush.
             disableBlockStreaming: false,
+            abortSignal,
           }
-        : undefined,
+        : abortSignal
+          ? { abortSignal }
+          : undefined,
     dispatcherOptions: {
       deliver: async (payload, info) => {
         await dispatchReplyPayload({

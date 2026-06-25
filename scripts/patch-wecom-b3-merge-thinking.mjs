@@ -48,6 +48,7 @@ function status() {
     reply.includes("supersededByNewInbound") &&
     reply.includes("supersedeByNewInbound: (meta)") &&
     reply.includes("normalizePeerKey(meta.peerId) !== peerKeyId") &&
+    reply.includes("markFinalDelivered(currentFinalDeliveryKey, { peerDedup: !supersededByNewInbound })") &&
     reply.includes("closeSupersededPlaceholder") &&
     reply.includes("sendMarkdownChunksViaActivePush") &&
     reply.includes("reason: \"superseded-final\"") &&
@@ -57,14 +58,31 @@ function status() {
     tests.includes("sends a merge notice when superseded") &&
     tests.includes("later pushes the old final without updating the old stream") &&
     tests.includes("matches superseded peer ids case-insensitively") &&
+    tests.includes("does not let a superseded old final dedupe the newer same-peer final") &&
     tests.includes("keeps the newer same-peer handle on the normal final stream path");
   const accountRuntime = read(path.join(SRC, "app", "account-runtime.ts"));
   const accountRuntimeTest = read(path.join(SRC, "app", "account-runtime.test.ts"));
+  const dispatcher = read(path.join(SRC, "runtime", "dispatcher.ts"));
+  const dispatcherTest = read(path.join(SRC, "runtime", "dispatcher.test.ts"));
   const runtimeWrapperReady =
     accountRuntime.includes("supersedeByNewInbound: (meta)") &&
     accountRuntime.includes("replyHandle.supersedeByNewInbound?.(meta)") &&
     accountRuntimeTest.includes("forwards supersedeByNewInbound through the runtime tracking wrapper");
-  const ready = appReady && typeReady && replyReady && testReady && runtimeWrapperReady && b2.ok && build.ok;
+  const dispatchTraceReady =
+    dispatcher.includes("dispatch-core-start") &&
+    dispatcher.includes("dispatch-core-done") &&
+    dispatcher.includes("dispatch-core-aborted") &&
+    dispatcher.includes("abortController.abort") &&
+    dispatcherTest.includes("aborts the superseded same-peer dispatch and still dispatches the newer message to OpenClaw");
+  const ready =
+    appReady &&
+    typeReady &&
+    replyReady &&
+    testReady &&
+    runtimeWrapperReady &&
+    dispatchTraceReady &&
+    b2.ok &&
+    build.ok;
 
   return {
     id: "B3",
@@ -75,6 +93,7 @@ function status() {
     replyReady,
     testReady,
     runtimeWrapperReady,
+    dispatchTraceReady,
     b2Ready: b2.ok,
     buildReady: build.ok,
     status: ready ? "READY" : "NOT_READY",

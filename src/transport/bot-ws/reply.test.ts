@@ -138,7 +138,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).not.toHaveBeenCalled();
   });
 
-  it("sends cumulative content for block streaming updates", async () => {
+  it("keeps block text hidden from WeCom and sends the accumulated final once", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -152,24 +152,12 @@ describe("createBotWsReplyHandle", () => {
 
     await handle.deliver({ text: "第一段", isReasoning: false }, { kind: "block" });
     await handle.deliver({ text: "第二段", isReasoning: false }, { kind: "block" });
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+
     await handle.deliver({ text: "收尾", isReasoning: false }, { kind: "final" });
 
-    expect(mockClient.replyStream).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ headers: { req_id: "req-blocks" } }),
-      expect.any(String),
-      "第一段",
-      false,
-    );
-    expect(mockClient.replyStream).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ headers: { req_id: "req-blocks" } }),
-      expect.any(String),
-      "第一段\n第二段",
-      false,
-    );
-    expect(mockClient.replyStream).toHaveBeenNthCalledWith(
-      3,
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { req_id: "req-blocks" } }),
       expect.any(String),
       "第一段\n第二段\n收尾",
@@ -238,7 +226,7 @@ describe("createBotWsReplyHandle", () => {
     expect(pushedText).toContain("END-B2");
   });
 
-  it("streams block text even when media is deferred to final", async () => {
+  it("keeps block text hidden even when media is deferred to final", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -259,12 +247,7 @@ describe("createBotWsReplyHandle", () => {
       { kind: "block" },
     );
 
-    expect(mockClient.replyStream).toHaveBeenCalledWith(
-      expect.objectContaining({ headers: { req_id: "req-block-media" } }),
-      expect.any(String),
-      "正文先发",
-      false,
-    );
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
   });
 
   it("includes default global media local roots for final media sends", async () => {
@@ -374,7 +357,7 @@ describe("createBotWsReplyHandle", () => {
     );
   });
 
-  it("stops placeholder keepalive when the first block contains media", async () => {
+  it("keeps placeholder alive for hidden blocks and stops after the final reply", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -403,13 +386,18 @@ describe("createBotWsReplyHandle", () => {
     for (let i = 0; i < 10; i++) await Promise.resolve();
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
-    expect(mockClient.replyStream).toHaveBeenNthCalledWith(
-      2,
+
+    await handle.deliver({ text: "最终正文", isReasoning: false }, { kind: "final" });
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { req_id: "req-placeholder-media" } }),
       expect.any(String),
-      "正文先发",
-      false,
+      "正文先发\n最终正文",
+      true,
     );
+
+    vi.advanceTimersByTime(6000);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(3);
   });
 
   it("swallows expired stream update errors during delivery", async () => {
@@ -556,6 +544,51 @@ describe("createBotWsReplyHandle", () => {
       expect.objectContaining({ headers: { req_id: "req-b" } }),
       expect.any(String),
       "新请求答案",
+      true,
+    );
+  });
+
+  it("does not let a superseded old final dedupe the newer same-peer final", async () => {
+    const oldHandle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-same-final-a" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const newHandle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-same-final-b" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    oldHandle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+
+    await oldHandle.deliver({ text: "相同答案", isReasoning: false }, { kind: "final" });
+    await newHandle.deliver({ text: "相同答案", isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: { content: "相同答案" },
+    });
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-same-final-b" } }),
+      expect.any(String),
+      "相同答案",
       true,
     );
   });

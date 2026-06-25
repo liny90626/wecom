@@ -55,6 +55,8 @@ function status() {
     reply.includes("function mergeReplyText(") &&
     reply.includes("accumulatedText = mergeReplyText(accumulatedText, text)") &&
     reply.includes("mergeReplyText(accumulatedText, text)") &&
+    reply.includes("if (info.kind === \"block\")") &&
+    reply.includes("return;\n      }\n\n      const outboundText") &&
     reply.includes("deliverNormalFinalViaStream") &&
     reply.includes("await params.client.replyStream(params.frame, finalStreamId, markdownChunks[0] ?? \"\", true)") &&
     reply.includes("await params.client.sendMessage(peerId,") &&

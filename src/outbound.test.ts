@@ -1,10 +1,42 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BotWsPushHandle } from "./app/index.js";
+import { wecomOutbound } from "./outbound.js";
+
+const agentApiMock = vi.hoisted(() => ({
+  sendText: vi.fn().mockResolvedValue(undefined),
+  sendMedia: vi.fn().mockResolvedValue(undefined),
+  uploadMedia: vi.fn().mockResolvedValue("media-1"),
+}));
 
 vi.mock("./transport/agent-api/core.js", () => ({
-  sendText: vi.fn(),
-  sendMedia: vi.fn(),
-  uploadMedia: vi.fn(),
+  sendText: agentApiMock.sendText,
+  sendMedia: agentApiMock.sendMedia,
+  uploadMedia: agentApiMock.uploadMedia,
+}));
+
+vi.mock("./transport/agent-api/delivery.js", () => ({
+  deliverAgentApiText: vi.fn().mockImplementation(({ agent, target, text }) =>
+    agentApiMock.sendText({
+      agent,
+      text,
+      toUser: target.touser,
+      toParty: target.toparty,
+      toTag: target.totag,
+      chatId: target.chatid,
+    }),
+  ),
+  deliverAgentApiMedia: vi.fn().mockImplementation(({ agent, target, buffer, filename, contentType }) =>
+    agentApiMock.sendMedia({
+      agent,
+      toUser: target.touser,
+      toParty: target.toparty,
+      toTag: target.totag,
+      chatId: target.chatid,
+      buffer,
+      filename,
+      contentType,
+    }),
+  ),
 }));
 
 vi.mock("./shared/media-asset.js", () => ({
@@ -61,7 +93,6 @@ describe("wecomOutbound", () => {
   });
 
   it("does not crash when called with core outbound params", async () => {
-    const { wecomOutbound } = await import("./outbound.js");
     await expect(
       wecomOutbound.sendMedia({
         cfg: {},
@@ -73,7 +104,6 @@ describe("wecomOutbound", () => {
   }, 15_000);
 
   it("throws explicit error when outbound accountId does not exist", async () => {
-    const { wecomOutbound } = await import("./outbound.js");
     const cfg = {
       channels: {
         wecom: {

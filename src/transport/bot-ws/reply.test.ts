@@ -470,6 +470,44 @@ describe("createBotWsReplyHandle", () => {
     });
   });
 
+  it("does not overwrite an already visible old stream with a superseded notice", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-visible-before-supersede" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "旧回复已输出", isReasoning: false }, { kind: "final" });
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-visible-before-supersede" } }),
+      expect.any(String),
+      "旧回复已输出",
+      true,
+    );
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).not.toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-visible-before-supersede" } }),
+      expect.any(String),
+      "已收到新消息，合并思考。✅",
+      true,
+    );
+  });
+
   it("matches superseded peer ids case-insensitively while keeping the original send target", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

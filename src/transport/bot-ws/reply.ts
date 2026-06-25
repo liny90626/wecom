@@ -267,6 +267,7 @@ export function createBotWsReplyHandle(params: {
   let supersededByNewInbound = false;
   let supersededNoticeSent = false;
   let supersededAt: number | undefined;
+  let visibleReplyStarted = false;
 
   const markFinalDelivered = (key: string, options: { peerDedup: boolean }): boolean => {
     if (finalDelivered) {
@@ -332,6 +333,7 @@ export function createBotWsReplyHandle(params: {
       console.info(
         `[wecom-b3] stream-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} chunks=${markdownChunks.length}`,
       );
+      visibleReplyStarted = true;
       await params.client.replyStream(params.frame, finalStreamId, markdownChunks[0] ?? "", true);
     } catch (error) {
       if (isTerminalReplyError(error)) {
@@ -360,7 +362,7 @@ export function createBotWsReplyHandle(params: {
   };
 
   const closeSupersededPlaceholder = (): void => {
-    if (isEvent || supersededNoticeSent) return;
+    if (isEvent || supersededNoticeSent || visibleReplyStarted || streamSettled) return;
     supersededNoticeSent = true;
     const noticeStreamId = resolveStreamId();
     void params.client
@@ -549,6 +551,7 @@ export function createBotWsReplyHandle(params: {
           await deliverNormalFinalViaStream(finalText);
         } else {
           stopPlaceholderKeepalive();
+          visibleReplyStarted = true;
           await params.client.replyStream(
             params.frame,
             resolveStreamId(),
@@ -587,6 +590,7 @@ export function createBotWsReplyHandle(params: {
             markdown: { content: text },
           });
         } else {
+          visibleReplyStarted = true;
           await params.client.replyStream(params.frame, resolveStreamId(), text, true);
         }
       } catch (sendError) {

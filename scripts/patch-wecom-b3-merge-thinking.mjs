@@ -48,6 +48,8 @@ function status() {
     reply.includes("supersededByNewInbound") &&
     reply.includes("supersedeByNewInbound: (meta)") &&
     reply.includes("normalizePeerKey(meta.peerId) !== peerKeyId") &&
+    reply.includes("visibleReplyStarted") &&
+    reply.includes("if (isEvent || supersededNoticeSent || visibleReplyStarted || streamSettled) return;") &&
     reply.includes("markFinalDelivered(currentFinalDeliveryKey, { peerDedup: !supersededByNewInbound })") &&
     reply.includes("closeSupersededPlaceholder") &&
     reply.includes("sendMarkdownChunksViaActivePush") &&
@@ -59,6 +61,7 @@ function status() {
     tests.includes("later pushes the old final without updating the old stream") &&
     tests.includes("matches superseded peer ids case-insensitively") &&
     tests.includes("does not let a superseded old final dedupe the newer same-peer final") &&
+    tests.includes("does not overwrite an already visible old stream with a superseded notice") &&
     tests.includes("keeps the newer same-peer handle on the normal final stream path");
   const accountRuntime = read(path.join(SRC, "app", "account-runtime.ts"));
   const accountRuntimeTest = read(path.join(SRC, "app", "account-runtime.test.ts"));

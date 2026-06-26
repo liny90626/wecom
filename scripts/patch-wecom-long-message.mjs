@@ -47,6 +47,12 @@ function status() {
     markdown.includes("export function chunkWeComMarkdownV2(") &&
     markdown.includes("export function previewWeComMarkdownV2(") &&
     markdown.includes("【消息过长，分段发送：第");
+  const finalStreamFirstChunkReady =
+    reply.includes("await params.client.replyStream(params.frame, finalStreamId, markdownChunks[0] ?? \"\", true)") ||
+    (
+      reply.includes("bodyText: markdownChunks[0] ?? \"\"") &&
+      reply.includes("await params.client.replyStream(params.frame, finalStreamId, firstStreamChunk, true)")
+    );
   const replyReady =
     reply.includes("chunkWeComMarkdownV2") &&
     reply.includes("previewWeComMarkdownV2") &&
@@ -68,7 +74,7 @@ function status() {
     reply.includes("if (info.kind === \"block\")") &&
     reply.includes("const outboundText") &&
     reply.includes("deliverNormalFinalViaStream") &&
-    reply.includes("await params.client.replyStream(params.frame, finalStreamId, markdownChunks[0] ?? \"\", true)") &&
+    finalStreamFirstChunkReady &&
     reply.includes("await params.client.sendMessage(peerId,") &&
     !reply.includes("toWeComMarkdownV2(finalText),\n            info.kind === \"final\"");
   const testReady =

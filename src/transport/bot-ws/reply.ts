@@ -21,10 +21,14 @@ import { uploadAndSendBotWsMedia } from "./media.js";
 const PLACEHOLDER_KEEPALIVE_MS = 3000;
 const MAX_KEEPALIVE_MS = 120 * 1000; // Force stop keepalive after 120s if ignored
 const B2_PEER_FINAL_DEDUP_TTL_MS = 120_000;
+const WECOM_STREAM_MAX_CHARS = 3_500;
+const WECOM_STREAM_MAX_BYTES = 12_000;
 const BLOCK_PREVIEW_MAX_MS = 300_000;
 const BLOCK_PREVIEW_MAX_CHARS = 3_000;
 const BLOCK_PREVIEW_MIN_UPDATE_MS = 1_500;
 const BLOCK_PREVIEW_STATUS_UPDATE_MS = 15_000;
+const THINKING_BLOCK_MAX_CHARS = 3_000;
+const THINKING_BLOCK_MAX_BYTES = 8_000;
 const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
 const LONG_FINAL_DEDUP_MIN_BLOCK_CHARS = 500;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
@@ -381,6 +385,60 @@ function formatElapsedStatus(elapsedMs: number): string {
   return `正在整理结果...${elapsedMinutes}m${String(remainingSeconds).padStart(2, "0")}s`;
 }
 
+function escapeThinkBlockText(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/<\/?think\b[^>]*>/gi, "")
+    .trim();
+}
+
+function trimToUtf8Bytes(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) {
+    return value;
+  }
+  let out = "";
+  for (const ch of value) {
+    if (Buffer.byteLength(out + ch, "utf8") > maxBytes) {
+      break;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function renderThinkBlock(text: string): string {
+  const escaped = trimToUtf8Bytes(
+    escapeThinkBlockText(text).slice(0, THINKING_BLOCK_MAX_CHARS),
+    THINKING_BLOCK_MAX_BYTES,
+  ).trim();
+  return escaped ? `<think>${escaped}</think>` : "";
+}
+
+function resolveThinkingAwareBodyLimits(thinkingText: string): {
+  thinkingBlock: string;
+  maxChars: number;
+  maxBytes: number;
+} {
+  const thinkingBlock = renderThinkBlock(thinkingText);
+  if (!thinkingBlock) {
+    return { thinkingBlock: "", maxChars: WECOM_STREAM_MAX_CHARS, maxBytes: WECOM_STREAM_MAX_BYTES };
+  }
+  const prefix = `${thinkingBlock}\n`;
+  return {
+    thinkingBlock,
+    maxChars: Math.max(200, WECOM_STREAM_MAX_CHARS - prefix.length),
+    maxBytes: Math.max(512, WECOM_STREAM_MAX_BYTES - Buffer.byteLength(prefix, "utf8")),
+  };
+}
+
+function composeStreamTextWithThinking(params: { thinkingBlock: string; bodyText: string }): string {
+  const thinkingBlock = params.thinkingBlock;
+  if (!thinkingBlock) {
+    return params.bodyText;
+  }
+  return params.bodyText ? `${thinkingBlock}\n${params.bodyText}` : thinkingBlock;
+}
+
 // Global registry to track active keepalives by peerId
 interface ActiveKeepalive {
   reqId: string;
@@ -405,6 +463,7 @@ export function createBotWsReplyHandle(params: {
 }): ReplyHandle {
   let streamId: string | undefined;
   let accumulatedText = "";
+  let accumulatedThinkingText = "";
   let deferredMediaUrls: string[] = [];
   const resolveStreamId = () => {
     streamId ||= generateReqId("stream");
@@ -624,14 +683,23 @@ export function createBotWsReplyHandle(params: {
   };
 
   const deliverNormalFinalViaStream = async (finalText: string): Promise<boolean> => {
-    const markdownChunks = chunkWeComMarkdownV2(finalText);
+    const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
+    const markdownChunks = chunkWeComMarkdownV2(
+      finalText,
+      thinkingLimits.maxChars,
+      thinkingLimits.maxBytes,
+    );
     const finalStreamId = resolveStreamId();
     const fallbackText = resolveStreamFallbackText(finalText);
+    const firstStreamChunk = composeStreamTextWithThinking({
+      thinkingBlock: thinkingLimits.thinkingBlock,
+      bodyText: markdownChunks[0] ?? "",
+    });
     try {
       console.info(
         `[wecom-b3] stream-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} chunks=${markdownChunks.length}`,
       );
-      await params.client.replyStream(params.frame, finalStreamId, markdownChunks[0] ?? "", true);
+      await params.client.replyStream(params.frame, finalStreamId, firstStreamChunk, true);
       visibleReplyStarted = true;
     } catch (error) {
       if (isTerminalReplyError(error)) {
@@ -679,18 +747,29 @@ export function createBotWsReplyHandle(params: {
     if (!text) {
       return "";
     }
+    const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
     previewStartedAt ??= now;
     const elapsedMs = now - previewStartedAt;
     if (!previewFrozen && (elapsedMs >= BLOCK_PREVIEW_MAX_MS || text.length >= BLOCK_PREVIEW_MAX_CHARS)) {
       previewFrozen = true;
       previewFrozenSourceText = text.slice(0, BLOCK_PREVIEW_MAX_CHARS);
-      previewFrozenText = previewWeComMarkdownV2(previewFrozenSourceText);
+      previewFrozenText = previewWeComMarkdownV2(
+        previewFrozenSourceText,
+        thinkingLimits.maxChars,
+        thinkingLimits.maxBytes,
+      );
     }
     if (previewFrozen) {
-      const frozen = previewFrozenText || previewWeComMarkdownV2(text.slice(0, BLOCK_PREVIEW_MAX_CHARS));
+      const frozen =
+        previewFrozenText ||
+        previewWeComMarkdownV2(
+          text.slice(0, BLOCK_PREVIEW_MAX_CHARS),
+          thinkingLimits.maxChars,
+          thinkingLimits.maxBytes,
+        );
       return `${frozen}\n\n${formatElapsedStatus(elapsedMs)}`;
     }
-    return previewWeComMarkdownV2(text);
+    return previewWeComMarkdownV2(text, thinkingLimits.maxChars, thinkingLimits.maxBytes);
   };
 
   const sendPreviewUpdate = async (previewText: string, now: number): Promise<boolean> => {
@@ -721,6 +800,14 @@ export function createBotWsReplyHandle(params: {
     return true;
   };
 
+  const renderPreviewStreamText = (bodyText: string): string => {
+    const thinkingBlock = renderThinkBlock(accumulatedThinkingText);
+    return composeStreamTextWithThinking({
+      thinkingBlock,
+      bodyText,
+    });
+  };
+
   const sendFrozenPreviewStatus = async (): Promise<void> => {
     if (
       streamSettled ||
@@ -736,7 +823,7 @@ export function createBotWsReplyHandle(params: {
     if (now - lastPreviewStatusAt < BLOCK_PREVIEW_STATUS_UPDATE_MS) {
       return;
     }
-    const previewText = renderPreviewText(accumulatedText || previewFrozenText, now);
+    const previewText = renderPreviewStreamText(renderPreviewText(accumulatedText || previewFrozenText, now));
     if (!previewText || previewText === lastPreviewText) {
       return;
     }
@@ -762,7 +849,7 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     const now = Date.now();
-    const previewText = renderPreviewText(accumulatedText, now);
+    const previewText = renderPreviewStreamText(renderPreviewText(accumulatedText, now));
     if (!previewFrozen || !previewText || previewText === lastPreviewText) {
       return;
     }
@@ -811,6 +898,16 @@ export function createBotWsReplyHandle(params: {
     return now - lastPreviewUpdateAt >= BLOCK_PREVIEW_MIN_UPDATE_MS;
   };
 
+  const shouldSendThinkingPreview = (previewText: string, now = Date.now()): boolean => {
+    if (!previewText || previewText === lastPreviewText) {
+      return false;
+    }
+    if (!lastPreviewText) {
+      return true;
+    }
+    return now - lastPreviewUpdateAt >= BLOCK_PREVIEW_MIN_UPDATE_MS;
+  };
+
   const deliverBlockPreview = async (text: string): Promise<void> => {
     if (isEvent || supersededByNewInbound || !text) {
       return;
@@ -819,7 +916,7 @@ export function createBotWsReplyHandle(params: {
     if (!shouldSendPreview(text, now)) {
       return;
     }
-    const previewText = renderPreviewText(text, now);
+    const previewText = renderPreviewStreamText(renderPreviewText(text, now));
     if (!previewText || previewText === lastPreviewText) {
       return;
     }
@@ -897,6 +994,16 @@ export function createBotWsReplyHandle(params: {
             stopPlaceholderKeepalive();
           }, MAX_KEEPALIVE_MS);
         }
+        const thinkingText = payload.text?.trim() || "";
+        if (isEvent || supersededByNewInbound || streamSettled || !thinkingText) {
+          return;
+        }
+        accumulatedThinkingText = mergeReplyText(accumulatedThinkingText, thinkingText);
+        const previewText = renderPreviewStreamText("");
+        if (!shouldSendThinkingPreview(previewText)) {
+          return;
+        }
+        await sendPreviewUpdate(previewText, Date.now());
         return;
       }
 
@@ -1043,7 +1150,7 @@ export function createBotWsReplyHandle(params: {
           await params.client.replyStream(
             params.frame,
             resolveStreamId(),
-            previewWeComMarkdownV2(finalText),
+            renderPreviewStreamText(previewWeComMarkdownV2(finalText)),
             false,
           );
         }

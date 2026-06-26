@@ -198,6 +198,89 @@ describe("createBotWsReplyHandle", () => {
     );
   });
 
+  it("renders reasoning in a think block and keeps final body separate", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-block" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "先分析需求", isReasoning: true }, { kind: "block" });
+    await handle.deliver({ text: "再核对约束", isReasoning: true }, { kind: "block" });
+    await handle.deliver({ text: "最终正文", isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.replyStream).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ headers: { req_id: "req-thinking-block" } }),
+      expect.any(String),
+      "<think>先分析需求</think>",
+      false,
+    );
+
+    const finalText = String(mockClient.replyStream.mock.calls[1]?.[2] ?? "");
+    expect(finalText).toContain("<think>先分析需求\n再核对约束</think>");
+    expect(finalText).toContain("最终正文");
+    expect(finalText.replace(/<think>[\s\S]*?<\/think>/g, "")).not.toContain("先分析需求");
+  });
+
+  it("keeps the think block when body preview updates later", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-body-preview" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "先拆解问题", isReasoning: true }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(1500);
+    await handle.deliver({ text: "正文预览", isReasoning: false }, { kind: "block" });
+
+    const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(previewText).toContain("<think>先拆解问题</think>");
+    expect(previewText).toContain("正文预览");
+  });
+
+  it("puts the think block only on the first long final chunk", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-long-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const longText = `${"正文很长。".repeat(1500)}END-THINK-B2`;
+
+    await handle.deliver({ text: "这是思考过程", isReasoning: true }, { kind: "block" });
+    const deliverPromise = handle.deliver({ text: longText, isReasoning: false }, { kind: "final" });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(800);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(800);
+    await deliverPromise;
+
+    const firstChunk = String(mockClient.replyStream.mock.calls[1]?.[2] ?? "");
+    const pushedText = mockClient.sendMessage.mock.calls
+      .map((call) => String((call[1] as any).markdown.content))
+      .join("\n");
+    expect(firstChunk).toContain("<think>这是思考过程</think>");
+    expect(firstChunk).toContain("第1/");
+    expect(pushedText).toContain("END-THINK-B2");
+    expect(pushedText).not.toContain("<think>");
+  });
+
   it("freezes long block previews and keeps updating only the status line", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

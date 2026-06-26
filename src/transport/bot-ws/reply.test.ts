@@ -229,6 +229,55 @@ describe("createBotWsReplyHandle", () => {
     expect(finalText.replace(/<think>[\s\S]*?<\/think>/g, "")).not.toContain("先分析需求");
   });
 
+  it("throttles thinking preview updates and keeps them on the same stream", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-throttle" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "第一段思考", isReasoning: true }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(2_999);
+    await handle.deliver({ text: "第二段思考", isReasoning: true }, { kind: "block" });
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await handle.deliver({ text: "第三段思考", isReasoning: true }, { kind: "block" });
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.replyStream.mock.calls[1]?.[1]).toBe(mockClient.replyStream.mock.calls[0]?.[1]);
+    expect(String(mockClient.replyStream.mock.calls[1]?.[2] ?? "")).toContain("第三段思考");
+  });
+
+  it("strips markup from thinking content before wrapping it in a think block", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-sanitize" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: "先<think>内部</think><script>alert(1)</script>结束", isReasoning: true },
+      { kind: "block" },
+    );
+    await handle.deliver({ text: "最终正文", isReasoning: false }, { kind: "final" });
+
+    const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalText).toContain("<think>先内部alert(1)结束</think>");
+    expect(finalText).not.toContain("<script>");
+    expect(finalText.match(/<think>/g)).toHaveLength(1);
+    expect(finalText.match(/<\/think>/g)).toHaveLength(1);
+  });
+
   it("keeps the think block when body preview updates later", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
@@ -242,7 +291,7 @@ describe("createBotWsReplyHandle", () => {
     });
 
     await handle.deliver({ text: "先拆解问题", isReasoning: true }, { kind: "block" });
-    await vi.advanceTimersByTimeAsync(1500);
+    await vi.advanceTimersByTimeAsync(3000);
     await handle.deliver({ text: "正文预览", isReasoning: false }, { kind: "block" });
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
@@ -420,6 +469,34 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("预览内容000。");
     expect(pushed).toContain("后续最终内容");
     expect(pushed).not.toContain("继续输出：");
+  });
+
+  it("does not leak think blocks into active push when stream final falls back", async () => {
+    const expiredError = {
+      headers: { req_id: "req-thinking-stream-fallback" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-stream-fallback" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "思考过程", isReasoning: true }, { kind: "block" });
+    await handle.deliver({ text: "最终正文", isReasoning: false }, { kind: "final" });
+
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("最终正文");
+    expect(pushed).not.toContain("<think>");
   });
 
   it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {

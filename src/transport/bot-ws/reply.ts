@@ -27,6 +27,7 @@ const BLOCK_PREVIEW_MAX_MS = 300_000;
 const BLOCK_PREVIEW_MAX_CHARS = 3_000;
 const BLOCK_PREVIEW_MIN_UPDATE_MS = 1_500;
 const BLOCK_PREVIEW_STATUS_UPDATE_MS = 15_000;
+const THINKING_PREVIEW_MIN_UPDATE_MS = 3_000;
 const THINKING_BLOCK_MAX_CHARS = 3_000;
 const THINKING_BLOCK_MAX_BYTES = 8_000;
 const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
@@ -388,7 +389,7 @@ function formatElapsedStatus(elapsedMs: number): string {
 function escapeThinkBlockText(text: string): string {
   return text
     .replace(/\r\n?/g, "\n")
-    .replace(/<\/?think\b[^>]*>/gi, "")
+    .replace(/<[^>\n]*>/g, "")
     .trim();
 }
 
@@ -905,7 +906,7 @@ export function createBotWsReplyHandle(params: {
     if (!lastPreviewText) {
       return true;
     }
-    return now - lastPreviewUpdateAt >= BLOCK_PREVIEW_MIN_UPDATE_MS;
+    return now - lastPreviewUpdateAt >= THINKING_PREVIEW_MIN_UPDATE_MS;
   };
 
   const deliverBlockPreview = async (text: string): Promise<void> => {

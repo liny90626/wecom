@@ -9,6 +9,7 @@ const FILES = {
   markdown: path.join(SRC, "wecom_msg_adapter", "markdown_adapter.ts"),
   reply: path.join(SRC, "transport", "bot-ws", "reply.ts"),
   outbound: path.join(SRC, "outbound.ts"),
+  tests: path.join(SRC, "transport", "bot-ws", "reply.test.ts"),
 };
 
 function read(file) {
@@ -36,6 +37,7 @@ function status() {
   const markdown = read(FILES.markdown);
   const reply = read(FILES.reply);
   const outbound = read(FILES.outbound);
+  const tests = read(FILES.tests);
   const b1 = run(process.execPath, ["scripts/patch-wecom-markdown-table.mjs", "--check"]);
   const build = syntaxOk();
 
@@ -53,6 +55,9 @@ function status() {
     reply.includes("const BLOCK_PREVIEW_MAX_CHARS = 3_000") &&
     reply.includes("dedupeLongFinalText(finalText, { previewFrozen })") &&
     reply.includes("function findRepeatedLongBlock(") &&
+    reply.includes("function findRepeatedHeadingTail(") &&
+    reply.includes("function collectStructuredDedupeMarkers(") &&
+    reply.includes("hasStructuredOverlapBeforeRepeatedTail(prior, tail)") &&
     reply.includes("recentFinalDeliveriesByPeer") &&
     reply.includes("let finalDelivered = false") &&
     reply.includes("markFinalDelivered") &&
@@ -66,11 +71,15 @@ function status() {
     reply.includes("await params.client.replyStream(params.frame, finalStreamId, markdownChunks[0] ?? \"\", true)") &&
     reply.includes("await params.client.sendMessage(peerId,") &&
     !reply.includes("toWeComMarkdownV2(finalText),\n            info.kind === \"final\"");
+  const testReady =
+    tests.includes("deduplicates repeated large blocks in long final text") &&
+    tests.includes("deduplicates repeated structured tails that restart from the same report heading") &&
+    tests.includes("does not deduplicate repeated markdown table blocks");
   const outboundReady =
     outbound.includes("chunkWeComMarkdownV2") &&
     outbound.includes("Sending Bot WS active message chunk") &&
     outbound.includes("setTimeout(resolve, 800)");
-  const ready = markdownReady && replyReady && outboundReady && b1.ok && build.ok;
+  const ready = markdownReady && replyReady && testReady && outboundReady && b1.ok && build.ok;
 
   return {
     id: "B2",
@@ -78,6 +87,7 @@ function status() {
     root: ROOT,
     markdownReady,
     replyReady,
+    testReady,
     outboundReady,
     b1Ready: b1.ok,
     buildReady: build.ok,

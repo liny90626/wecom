@@ -213,6 +213,11 @@ function dedupeLongFinalText(text: string, options: { previewFrozen: boolean }):
     deduped = `${deduped.slice(0, match.start)}${deduped.slice(match.end)}`.replace(/\n{3,}/g, "\n\n").trim();
     changed = true;
   }
+  const repeatedTail = findRepeatedHeadingTail(deduped);
+  if (repeatedTail) {
+    deduped = deduped.slice(0, repeatedTail.start).replace(/\n{3,}/g, "\n\n").trim();
+    changed = true;
+  }
 
   return changed ? deduped : text;
 }
@@ -244,6 +249,110 @@ function findRepeatedLongBlock(text: string): { start: number; end: number } | u
   }
 
   return undefined;
+}
+
+function findRepeatedHeadingTail(text: string): { start: number; end: number } | undefined {
+  const lines = text.split("\n");
+  const headings = new Map<string, Array<{ raw: string; start: number }>>();
+  let offset = 0;
+
+  for (const raw of lines) {
+    const normalized = normalizeHeadingLine(raw);
+    if (normalized) {
+      const entries = headings.get(normalized) ?? [];
+      entries.push({ raw, start: offset });
+      headings.set(normalized, entries);
+    }
+    offset += raw.length + 1;
+  }
+
+  for (const entries of headings.values()) {
+    if (entries.length < 2) {
+      continue;
+    }
+    const first = entries[0];
+    const second = entries[1];
+    if (!first || !second || second.start < Math.floor(text.length * 0.25)) {
+      continue;
+    }
+    const prior = text.slice(first.start, second.start);
+    const tail = text.slice(second.start);
+    if (
+      tail.length < LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS ||
+      !looksLikeStructuredRepeatedTail(tail) ||
+      !hasStructuredOverlapBeforeRepeatedTail(prior, tail)
+    ) {
+      continue;
+    }
+    return { start: second.start, end: text.length };
+  }
+
+  return undefined;
+}
+
+function normalizeHeadingLine(line: string): string {
+  const trimmed = line
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^[一二三四五六七八九十]+[、.．]\s*/, "")
+    .trim();
+  if (trimmed.length < 12 || trimmed.length > 80) {
+    return "";
+  }
+  if (/^\|.*\|$/.test(trimmed) || /^[·*-]/.test(trimmed)) {
+    return "";
+  }
+  const normalized = normalizeDedupText(trimmed.replace(/[（(]\d{4}[-/]\d{1,2}[-/]\d{1,2}[^）)]*[）)]/g, ""));
+  return normalized.length >= 8 ? normalized : "";
+}
+
+function looksLikeStructuredRepeatedTail(tail: string): boolean {
+  return collectStructuredDedupeMarkers(tail).size >= 2;
+}
+
+function hasStructuredOverlapBeforeRepeatedTail(prior: string, tail: string): boolean {
+  const priorMarkers = collectStructuredDedupeMarkers(prior);
+  if (priorMarkers.size < 2) {
+    return false;
+  }
+  let matches = 0;
+  for (const marker of collectStructuredDedupeMarkers(tail)) {
+    if (priorMarkers.has(marker)) {
+      matches += 1;
+      if (matches >= 2) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function collectStructuredDedupeMarkers(text: string): Set<string> {
+  const markers = new Set<string>();
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const trimmed = (lines[i] ?? "").trim().replace(/^#{1,6}\s+/, "");
+    if (!trimmed) {
+      continue;
+    }
+
+    const heading = trimmed.match(/^[一二三四五六七八九十]+[、.．]\s*(.{2,80})$/);
+    if (heading) {
+      const normalized = normalizeDedupText(heading[1] ?? "");
+      if (normalized.length >= 2) {
+        markers.add(`h:${normalized}`);
+      }
+      continue;
+    }
+
+    const next = (lines[i + 1] ?? "").trim();
+    if (/^\|.*\|$/.test(trimmed) && /^\|[-:\s|]+\|$/.test(next)) {
+      const normalized = normalizeDedupText(trimmed);
+      if (normalized.length >= 4) {
+        markers.add(`t:${normalized}`);
+      }
+    }
+  }
+  return markers;
 }
 
 function formatFallbackError(error: unknown): string {

@@ -398,6 +398,93 @@ describe("createBotWsReplyHandle", () => {
     expect(delivered.match(/重复观察00/g)?.length).toBe(1);
   });
 
+  it("deduplicates repeated structured tails that restart from the same report heading", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-long-final-heading-tail-dedup" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const firstReport = [
+      "今日活跃企微会话与定时任务汇总（2026-06-26 12:44）",
+      "",
+      "采集口径：",
+      "· 技能：SKILLS-COMMON-SYSTEM-SESSION-STATUS",
+      "· 今日活跃 Session：16 个，涉及 7 个 Agent",
+      "",
+      "一、今日活跃企微会话概览",
+      "",
+      "共 16 个活跃会话：",
+      "· main：1 个",
+      "· knowledge：5 个",
+      "",
+      "| 用户 | 最后活跃 | 交流主题 |",
+      "|---|---:|---|",
+      "| 林昱 | 12:43 | 系统配置/运维排查 |",
+      "| yaz | 12:34 | x912提供掌纹识别么R20K-2支持MD-06么？ |",
+      "",
+      "二、定时任务概览",
+      "",
+      "共 35 个任务，当前连续失败 1 个。",
+      "",
+      "| 任务名 | 模型 | LC | 上次执行 | 成功率 | 修复状态 |",
+      "|---|---|---|---|---:|---|",
+      "| 安全审查-全天（全团队） | it-server/gpt-5.5 | 默认 | 成功 | - |  |",
+      "| 每日AI日报-产品部（独立链路） | it-server/gpt-5.5 | 默认 | 失败 | - | 修复后仍失败 |",
+      "",
+      "三、异常与观察项",
+      "",
+      "· 当前连续失败：1 个",
+      "· 建议：可把该 cron 主模型临时切到 it-server/claude-opus-4-8，或增加延迟重试/错峰重跑策略。",
+    ].join("\n");
+    const secondReport = [
+      "今日活跃企微会话与定时任务汇总（2026-06-26 12:44）",
+      "",
+      "一、今日活跃企微会话概览",
+      "",
+      "共 16 个活跃会话：",
+      "· main：1 个",
+      "· knowledge：5 个",
+      "",
+      "| 用户 | 最后活跃 | 交流主题 |",
+      "|---|---:|---|",
+      "| 林昱 | 12:43 | 系统配置/运维排查 |",
+      "",
+      "二、定时任务概览",
+      "",
+      "| 任务名 | 模型 | LC | 上次执行 | 成功率 | 修复状态 |",
+      "|---|---|---|---|---:|---|",
+      "| 安全审查-全天（全团队） | it-server/gpt-5.5 | 默认 | 成功 | - |  |",
+      "",
+      "三、异常与观察项",
+      "",
+      "· 当前连续失败：1 个",
+    ].join("\n");
+    const filler = Array.from({ length: 70 }, (_, index) =>
+      `补充明细${String(index).padStart(2, "0")}：这是一段用于模拟长报告正文的内容，保证 final 触发长文本去重。`,
+    ).join("\n");
+    const finalText = `${firstReport}\n\n${filler}\n\n${secondReport}`;
+
+    const deliverPromise = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(800);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(800);
+    await deliverPromise;
+
+    const delivered = [
+      String(mockClient.replyStream.mock.calls[0]?.[2] ?? ""),
+      ...mockClient.sendMessage.mock.calls.map((call) => String((call[1] as any).markdown.content)),
+    ].join("\n");
+    expect(delivered).toContain("三、异常与观察项");
+    expect(delivered).toContain("补充明细69");
+    expect(delivered.match(/今日活跃企微会话与定时任务汇总/g)?.length).toBe(1);
+  });
+
   it("does not deduplicate repeated markdown table blocks", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

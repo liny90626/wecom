@@ -70,6 +70,7 @@ function status() {
     tests.includes("actively pushes the final reply when the original stream window has expired") &&
     tests.includes("pushes only the continuation when a frozen preview stream has expired") &&
     tests.includes("deduplicates repeated large blocks in long final text") &&
+    tests.includes("deduplicates repeated structured tails that restart from the same report heading") &&
     tests.includes("reports failure without marking delivery when stream and active push both fail") &&
     tests.includes("expect(onDeliver).toHaveBeenCalledTimes(1)") &&
     tests.includes("keeps the newer same-peer handle on the normal final stream path");

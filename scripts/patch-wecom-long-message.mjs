@@ -49,6 +49,10 @@ function status() {
     reply.includes("chunkWeComMarkdownV2") &&
     reply.includes("previewWeComMarkdownV2") &&
     reply.includes("const B2_PEER_FINAL_DEDUP_TTL_MS = 120_000") &&
+    reply.includes("const BLOCK_PREVIEW_MAX_MS = 300_000") &&
+    reply.includes("const BLOCK_PREVIEW_MAX_CHARS = 3_000") &&
+    reply.includes("dedupeLongFinalText(finalText, { previewFrozen })") &&
+    reply.includes("function findRepeatedLongBlock(") &&
     reply.includes("recentFinalDeliveriesByPeer") &&
     reply.includes("let finalDelivered = false") &&
     reply.includes("markFinalDelivered") &&

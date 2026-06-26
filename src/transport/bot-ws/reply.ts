@@ -21,10 +21,14 @@ import { uploadAndSendBotWsMedia } from "./media.js";
 const PLACEHOLDER_KEEPALIVE_MS = 3000;
 const MAX_KEEPALIVE_MS = 120 * 1000; // Force stop keepalive after 120s if ignored
 const B2_PEER_FINAL_DEDUP_TTL_MS = 120_000;
-const BLOCK_PREVIEW_MAX_MS = 60_000;
-const BLOCK_PREVIEW_MAX_CHARS = 2_000;
+const BLOCK_PREVIEW_MAX_MS = 300_000;
+const BLOCK_PREVIEW_MAX_CHARS = 3_000;
 const BLOCK_PREVIEW_MIN_UPDATE_MS = 1_500;
 const BLOCK_PREVIEW_STATUS_UPDATE_MS = 15_000;
+const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
+const LONG_FINAL_DEDUP_MIN_BLOCK_CHARS = 500;
+const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
+const LONG_FINAL_DEDUP_MAX_REMOVALS = 3;
 const B3_SUPERSEDED_NOTICE_TEXT = "已收到新消息，合并思考。✅";
 const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
 
@@ -125,6 +129,121 @@ function mergeReplyText(previous: string, incoming: string): string {
     }
   }
   return `${base}\n${next}`;
+}
+
+function normalizeDedupText(value: string): string {
+  return value
+    .replace(/【消息过长，分段发送：第\d+\/\d+段】/g, "")
+    .replace(/\s+/g, "")
+    .replace(/[，。；：、,.。;:]/g, "")
+    .toLowerCase();
+}
+
+function isDedupProtectedBlock(block: string): boolean {
+  const trimmed = block.trim();
+  if (!trimmed) return true;
+  if (/^\|.*\|$/m.test(trimmed)) return true;
+  if (/^```/.test(trimmed) || /```$/.test(trimmed)) return true;
+  return false;
+}
+
+function splitDedupBlocks(text: string): string[] {
+  const lines = text.split("\n");
+  const blocks: string[] = [];
+  let current: string[] = [];
+
+  const flush = () => {
+    if (current.length === 0) return;
+    blocks.push(current.join("\n"));
+    current = [];
+  };
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      flush();
+      blocks.push(line);
+      continue;
+    }
+    current.push(line);
+  }
+  flush();
+  return blocks;
+}
+
+function dedupeLongFinalText(text: string, options: { previewFrozen: boolean }): string {
+  if (!options.previewFrozen && text.length < LONG_FINAL_DEDUP_MIN_CHARS) {
+    return text;
+  }
+
+  const blocks = splitDedupBlocks(text);
+  const seen = new Map<string, number>();
+  let removed = 0;
+  let changed = false;
+  const out: string[] = [];
+
+  for (const block of blocks) {
+    const normalized = normalizeDedupText(block);
+    const duplicate =
+      removed < LONG_FINAL_DEDUP_MAX_REMOVALS &&
+      block.length >= LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS &&
+      normalized.length >= LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS &&
+      !isDedupProtectedBlock(block) &&
+      seen.has(normalized);
+
+    if (duplicate) {
+      removed += 1;
+      changed = true;
+      continue;
+    }
+
+    out.push(block);
+    if (
+      block.length >= LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS &&
+      normalized.length >= LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS &&
+      !isDedupProtectedBlock(block)
+    ) {
+      seen.set(normalized, out.length - 1);
+    }
+  }
+
+  let deduped = changed ? out.join("\n").replace(/\n{3,}/g, "\n\n").trim() : text;
+  for (let pass = removed; pass < LONG_FINAL_DEDUP_MAX_REMOVALS; pass += 1) {
+    const match = findRepeatedLongBlock(deduped);
+    if (!match) break;
+    deduped = `${deduped.slice(0, match.start)}${deduped.slice(match.end)}`.replace(/\n{3,}/g, "\n\n").trim();
+    changed = true;
+  }
+
+  return changed ? deduped : text;
+}
+
+function findRepeatedLongBlock(text: string): { start: number; end: number } | undefined {
+  const paragraphs = splitDedupBlocks(text);
+  const seen = new Map<string, string>();
+  let searchFrom = 0;
+
+  for (const paragraph of paragraphs) {
+    const start = text.indexOf(paragraph, searchFrom);
+    if (start < 0) {
+      continue;
+    }
+    const end = start + paragraph.length;
+    searchFrom = end;
+
+    if (paragraph.length < LONG_FINAL_DEDUP_MIN_BLOCK_CHARS || isDedupProtectedBlock(paragraph)) {
+      continue;
+    }
+    const normalized = normalizeDedupText(paragraph);
+    if (normalized.length < LONG_FINAL_DEDUP_MIN_BLOCK_CHARS) {
+      continue;
+    }
+    if (seen.has(normalized)) {
+      return { start, end };
+    }
+    seen.set(normalized, paragraph);
+  }
+
+  return undefined;
 }
 
 function formatFallbackError(error: unknown): string {
@@ -738,6 +857,9 @@ export function createBotWsReplyHandle(params: {
             : mediaNotes.join("\n");
         }
         deferredMediaUrls = [];
+      }
+      if (info.kind === "final") {
+        finalText = dedupeLongFinalText(finalText, { previewFrozen });
       }
       if (!finalText) {
         return;

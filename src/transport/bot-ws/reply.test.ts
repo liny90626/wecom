@@ -209,7 +209,7 @@ describe("createBotWsReplyHandle", () => {
       inboundKind: "text",
       autoSendPlaceholder: false,
     });
-    const longBlock = `${"预览内容。".repeat(500)}END-FROZEN`;
+    const longBlock = `${"预览内容。".repeat(700)}END-FROZEN`;
 
     await handle.deliver({ text: longBlock, isReasoning: false }, { kind: "block" });
 
@@ -250,14 +250,14 @@ describe("createBotWsReplyHandle", () => {
       false,
     );
 
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(300_000);
     await flushPromises();
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
     expect(mockClient.replyStream).toHaveBeenLastCalledWith(
       expect.objectContaining({ headers: { req_id: "req-preview-time-freeze" } }),
       expect.any(String),
-      "正在查询数据源\n\n正在整理结果...1m00s",
+      "正在查询数据源\n\n正在整理结果...5m00s",
       false,
     );
 
@@ -268,7 +268,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenLastCalledWith(
       expect.objectContaining({ headers: { req_id: "req-preview-time-freeze" } }),
       expect.any(String),
-      "正在查询数据源\n\n正在整理结果...1m15s",
+      "正在查询数据源\n\n正在整理结果...5m15s",
       false,
     );
   });
@@ -284,7 +284,7 @@ describe("createBotWsReplyHandle", () => {
       inboundKind: "text",
       autoSendPlaceholder: false,
     });
-    const longBlock = "预览内容。".repeat(500);
+    const longBlock = "预览内容。".repeat(620);
 
     await handle.deliver({ text: longBlock, isReasoning: false }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(15_000);
@@ -313,7 +313,7 @@ describe("createBotWsReplyHandle", () => {
     };
     mockClient.replyStream.mockRejectedValueOnce(previewError);
     mockClient.replyStream.mockRejectedValueOnce(expiredError);
-    const prefix = Array.from({ length: 260 }, (_, index) =>
+    const prefix = Array.from({ length: 420 }, (_, index) =>
       `预览内容${String(index).padStart(3, "0")}。`,
     ).join("");
     const final = `${prefix}\n\n后续最终内容`;
@@ -371,6 +371,65 @@ describe("createBotWsReplyHandle", () => {
       .map((call) => (call[1] as any).markdown.content)
       .join("\n");
     expect(pushedText).toContain("END-B2");
+  });
+
+  it("deduplicates repeated large blocks in long final text", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-long-final-dedup" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const repeatedBlock = Array.from({ length: 70 }, (_, index) =>
+      `重复观察${String(index).padStart(2, "0")}：这是同一段长任务过程输出，用来模拟 final 里重复带回的内容。`,
+    ).join("\n");
+    const finalText = `开头说明\n\n${repeatedBlock}\n\n中间过渡\n\n${repeatedBlock}\n\n结尾结论`;
+
+    await handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+
+    const delivered = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
+    expect(delivered).toContain("开头说明");
+    expect(delivered).toContain("中间过渡");
+    expect(delivered).toContain("结尾结论");
+    expect(delivered.match(/重复观察00/g)?.length).toBe(1);
+  });
+
+  it("does not deduplicate repeated markdown table blocks", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-long-final-table-dedup" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const table = [
+      "| 项目 | 状态 | 说明 |",
+      "| --- | --- | --- |",
+      ...Array.from({ length: 80 }, (_, index) =>
+        `| 任务${String(index).padStart(2, "0")} | OK | 表格行需要保留，避免误删 B1 表格内容 |`,
+      ),
+    ].join("\n");
+    const finalText = `表格一\n\n${table}\n\n表格二\n\n${table}\n\n收尾`;
+
+    const deliverPromise = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(800);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(800);
+    await deliverPromise;
+
+    const delivered = [
+      String(mockClient.replyStream.mock.calls[0]?.[2] ?? ""),
+      ...mockClient.sendMessage.mock.calls.map((call) => String((call[1] as any).markdown.content)),
+    ].join("\n");
+    expect(delivered.match(/任务00/g)?.length).toBe(2);
   });
 
   it("streams text preview while media is deferred to final", async () => {
@@ -591,7 +650,7 @@ describe("createBotWsReplyHandle", () => {
     };
     mockClient.replyStream.mockResolvedValueOnce({} as any);
     mockClient.replyStream.mockRejectedValueOnce(expiredError);
-    const prefix = Array.from({ length: 260 }, (_, index) =>
+    const prefix = Array.from({ length: 420 }, (_, index) =>
       `预览内容${String(index).padStart(3, "0")}。`,
     ).join("");
     const final = `${prefix}\n\n后续最终内容`;
@@ -615,11 +674,11 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("继续输出：");
     expect(pushed).toContain("后续最终内容");
     expect(pushed).not.toContain("预览内容000。");
-    expect(pushed).toContain("预览内容250。");
+    expect(pushed).toContain("预览内容390。");
   });
 
   it("pushes only the continuation when a frozen preview is later superseded", async () => {
-    const prefix = Array.from({ length: 260 }, (_, index) =>
+    const prefix = Array.from({ length: 420 }, (_, index) =>
       `预览内容${String(index).padStart(3, "0")}。`,
     ).join("");
     const final = `${prefix}\n\n后续最终内容`;
@@ -649,7 +708,7 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("继续输出：");
     expect(pushed).toContain("后续最终内容");
     expect(pushed).not.toContain("预览内容000。");
-    expect(pushed).toContain("预览内容250。");
+    expect(pushed).toContain("预览内容390。");
   });
 
   it("reports failure without marking delivery when stream and active push both fail", async () => {

@@ -50,7 +50,10 @@ function status() {
     reply.includes("normalizePeerKey(meta.peerId) !== peerKeyId") &&
     reply.includes("visibleReplyStarted") &&
     reply.includes("if (isEvent || supersededNoticeSent || visibleReplyStarted || streamSettled) return;") &&
-    reply.includes("markFinalDelivered(currentFinalDeliveryKey, { peerDedup: !supersededByNewInbound })") &&
+    reply.includes("stream-final-terminal-fallback") &&
+    reply.includes("await sendMarkdownChunksViaActivePush(finalText, { reason: \"stream-fallback\" })") &&
+    reply.includes("rollbackFinalDelivered(currentFinalDeliveryKey") &&
+    reply.includes("markFinalDelivered(currentFinalDeliveryKey, { peerDedup: currentFinalUsesPeerDedup })") &&
     reply.includes("closeSupersededPlaceholder") &&
     reply.includes("sendMarkdownChunksViaActivePush") &&
     reply.includes("reason: \"superseded-final\"") &&
@@ -62,6 +65,9 @@ function status() {
     tests.includes("matches superseded peer ids case-insensitively") &&
     tests.includes("does not let a superseded old final dedupe the newer same-peer final") &&
     tests.includes("does not overwrite an already visible old stream with a superseded notice") &&
+    tests.includes("actively pushes the final reply when the original stream window has expired") &&
+    tests.includes("reports failure without marking delivery when stream and active push both fail") &&
+    tests.includes("expect(onDeliver).toHaveBeenCalledTimes(1)") &&
     tests.includes("keeps the newer same-peer handle on the normal final stream path");
   const accountRuntime = read(path.join(SRC, "app", "account-runtime.ts"));
   const accountRuntimeTest = read(path.join(SRC, "app", "account-runtime.test.ts"));

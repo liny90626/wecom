@@ -291,6 +291,17 @@ export function createBotWsReplyHandle(params: {
     return true;
   };
 
+  const rollbackFinalDelivered = (key: string, options: { peerDedup: boolean }): void => {
+    if (finalDeliveryKey !== key) {
+      return;
+    }
+    finalDelivered = false;
+    finalDeliveryKey = "";
+    if (options.peerDedup) {
+      recentFinalDeliveriesByPeer.delete(key);
+    }
+  };
+
   const sendMarkdownChunksViaActivePush = async (
     textToSend: string,
     options: { reason: "superseded-final" | "stream-fallback" },
@@ -326,25 +337,40 @@ export function createBotWsReplyHandle(params: {
     }
   };
 
-  const deliverNormalFinalViaStream = async (finalText: string): Promise<void> => {
+  const deliverNormalFinalViaStream = async (finalText: string): Promise<boolean> => {
     const markdownChunks = chunkWeComMarkdownV2(finalText);
     const finalStreamId = resolveStreamId();
     try {
       console.info(
         `[wecom-b3] stream-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} chunks=${markdownChunks.length}`,
       );
-      visibleReplyStarted = true;
       await params.client.replyStream(params.frame, finalStreamId, markdownChunks[0] ?? "", true);
+      visibleReplyStarted = true;
     } catch (error) {
       if (isTerminalReplyError(error)) {
-        params.onFail?.(error);
-        return;
+        console.warn(
+          `[wecom-b3] stream-final-terminal-fallback account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} error=${formatFallbackError(error)}`,
+        );
+        try {
+          await sendMarkdownChunksViaActivePush(finalText, { reason: "stream-fallback" });
+          visibleReplyStarted = true;
+        } catch (fallbackError) {
+          params.onFail?.(fallbackError);
+          return false;
+        }
+        return true;
       }
       console.warn(
         `[wecom-b3] stream-final-fallback account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} error=${formatFallbackError(error)}`,
       );
-      await sendMarkdownChunksViaActivePush(finalText, { reason: "stream-fallback" });
-      return;
+      try {
+        await sendMarkdownChunksViaActivePush(finalText, { reason: "stream-fallback" });
+        visibleReplyStarted = true;
+      } catch (fallbackError) {
+        params.onFail?.(fallbackError);
+        return false;
+      }
+      return true;
     }
 
     if (markdownChunks.length > 1) {
@@ -359,6 +385,7 @@ export function createBotWsReplyHandle(params: {
         });
       }
     }
+    return true;
   };
 
   const closeSupersededPlaceholder = (): void => {
@@ -512,9 +539,10 @@ export function createBotWsReplyHandle(params: {
               mediaUrls,
             })
           : "";
+      const currentFinalUsesPeerDedup = info.kind === "final" && !supersededByNewInbound;
       if (
         info.kind === "final" &&
-        !markFinalDelivered(currentFinalDeliveryKey, { peerDedup: !supersededByNewInbound })
+        !markFinalDelivered(currentFinalDeliveryKey, { peerDedup: currentFinalUsesPeerDedup })
       ) {
         return;
       }
@@ -545,10 +573,22 @@ export function createBotWsReplyHandle(params: {
           console.info(
             `[wecom-b3] superseded-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} supersededAt=${supersededAt ?? 0}`,
           );
-          await sendMarkdownChunksViaActivePush(textToSend, { reason: "superseded-final" });
+          try {
+            await sendMarkdownChunksViaActivePush(textToSend, { reason: "superseded-final" });
+          } catch (error) {
+            rollbackFinalDelivered(currentFinalDeliveryKey, {
+              peerDedup: currentFinalUsesPeerDedup,
+            });
+            throw error;
+          }
         } else if (info.kind === "final") {
           settleStream();
-          await deliverNormalFinalViaStream(finalText);
+          if (!(await deliverNormalFinalViaStream(finalText))) {
+            rollbackFinalDelivered(currentFinalDeliveryKey, {
+              peerDedup: currentFinalUsesPeerDedup,
+            });
+            return;
+          }
         } else {
           stopPlaceholderKeepalive();
           visibleReplyStarted = true;

@@ -400,7 +400,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(3);
   });
 
-  it("swallows expired stream update errors during delivery", async () => {
+  it("actively pushes the final reply when the original stream window has expired", async () => {
     const expiredError = {
       headers: { req_id: "req-expired" },
       errcode: 846608,
@@ -424,7 +424,60 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "最终回复", isReasoning: false }, { kind: "final" });
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
-    expect(onFail).toHaveBeenCalledWith(expiredError);
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("unknown", {
+      msgtype: "markdown",
+      markdown: { content: "最终回复" },
+    });
+    expect(onFail).not.toHaveBeenCalled();
+  });
+
+  it("reports failure without marking delivery when stream and active push both fail", async () => {
+    const expiredError = {
+      headers: { req_id: "req-expired-push-fail" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const pushError = new Error("active push failed");
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    mockClient.sendMessage.mockRejectedValueOnce(pushError);
+    const onDeliver = vi.fn();
+    const onFail = vi.fn();
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-expired-push-fail" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      onDeliver,
+      onFail,
+    });
+
+    await handle.deliver({ text: "最终回复", isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: { content: "最终回复" },
+    });
+    expect(onFail).toHaveBeenCalledWith(pushError);
+    expect(onDeliver).not.toHaveBeenCalled();
+
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+
+    await handle.deliver({ text: "最终回复", isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+    expect(mockClient.sendMessage).toHaveBeenLastCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: { content: "最终回复" },
+    });
+    expect(onFail).toHaveBeenCalledTimes(1);
+    expect(onDeliver).toHaveBeenCalledTimes(1);
   });
 
   it("sends a merge notice when superseded and later pushes the old final without updating the old stream", async () => {

@@ -51,7 +51,8 @@ function status() {
     reply.includes("visibleReplyStarted") &&
     reply.includes("if (isEvent || supersededNoticeSent || visibleReplyStarted || streamSettled) return;") &&
     reply.includes("stream-final-terminal-fallback") &&
-    reply.includes("await sendMarkdownChunksViaActivePush(finalText, { reason: \"stream-fallback\" })") &&
+    reply.includes("resolveStreamFallbackText(finalText)") &&
+    reply.includes("await sendMarkdownChunksViaActivePush(fallbackText, { reason: \"stream-fallback\" })") &&
     reply.includes("rollbackFinalDelivered(currentFinalDeliveryKey") &&
     reply.includes("markFinalDelivered(currentFinalDeliveryKey, { peerDedup: currentFinalUsesPeerDedup })") &&
     reply.includes("closeSupersededPlaceholder") &&
@@ -66,6 +67,7 @@ function status() {
     tests.includes("does not let a superseded old final dedupe the newer same-peer final") &&
     tests.includes("does not overwrite an already visible old stream with a superseded notice") &&
     tests.includes("actively pushes the final reply when the original stream window has expired") &&
+    tests.includes("pushes only the continuation when a frozen preview stream has expired") &&
     tests.includes("reports failure without marking delivery when stream and active push both fail") &&
     tests.includes("expect(onDeliver).toHaveBeenCalledTimes(1)") &&
     tests.includes("keeps the newer same-peer handle on the normal final stream path");

@@ -138,7 +138,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).not.toHaveBeenCalled();
   });
 
-  it("keeps block text hidden from WeCom and sends the accumulated final once", async () => {
+  it("streams non-reasoning block previews and sends the accumulated final once", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -152,11 +152,17 @@ describe("createBotWsReplyHandle", () => {
 
     await handle.deliver({ text: "第一段", isReasoning: false }, { kind: "block" });
     await handle.deliver({ text: "第二段", isReasoning: false }, { kind: "block" });
-    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-blocks" } }),
+      expect.any(String),
+      "第一段",
+      false,
+    );
 
     await handle.deliver({ text: "收尾", isReasoning: false }, { kind: "final" });
 
-    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
     expect(mockClient.replyStream).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { req_id: "req-blocks" } }),
       expect.any(String),
@@ -190,6 +196,147 @@ describe("createBotWsReplyHandle", () => {
       final,
       true,
     );
+  });
+
+  it("freezes long block previews and keeps updating only the status line", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-preview-freeze" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const longBlock = `${"预览内容。".repeat(500)}END-FROZEN`;
+
+    await handle.deliver({ text: longBlock, isReasoning: false }, { kind: "block" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    const firstPreview = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
+    expect(firstPreview).toContain("预览内容。");
+    expect(firstPreview).not.toContain("END-FROZEN");
+    expect(firstPreview).toContain("正在思考中...0s");
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    const secondPreview = String(mockClient.replyStream.mock.calls[1]?.[2] ?? "");
+    expect(secondPreview).toContain("预览内容。");
+    expect(secondPreview).toContain("正在思考中...15s");
+    expect(secondPreview).not.toContain("END-FROZEN");
+  });
+
+  it("freezes short block previews by elapsed time and keeps the original text visible", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-preview-time-freeze" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "正在查询数据源", isReasoning: false }, { kind: "block" });
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-preview-time-freeze" } }),
+      expect.any(String),
+      "正在查询数据源",
+      false,
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushPromises();
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-preview-time-freeze" } }),
+      expect.any(String),
+      "正在查询数据源\n\n正在整理结果...1m00s",
+      false,
+    );
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(3);
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-preview-time-freeze" } }),
+      expect.any(String),
+      "正在查询数据源\n\n正在整理结果...1m15s",
+      false,
+    );
+  });
+
+  it("stops frozen preview status updates after the final reply", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-preview-final-stop" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const longBlock = "预览内容。".repeat(500);
+
+    await handle.deliver({ text: longBlock, isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+
+    await handle.deliver({ text: "最终正文", isReasoning: false }, { kind: "final" });
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-preview-final-stop" } }),
+      expect.any(String),
+      `${longBlock}\n最终正文`,
+      true,
+    );
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    await flushPromises();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(3);
+  });
+
+  it("falls back to the full final text if the frozen preview was not delivered", async () => {
+    const previewError = new Error("temporary preview failure");
+    const expiredError = {
+      headers: { req_id: "req-undelivered-preview-final" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockRejectedValueOnce(previewError);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    const prefix = Array.from({ length: 260 }, (_, index) =>
+      `预览内容${String(index).padStart(3, "0")}。`,
+    ).join("");
+    const final = `${prefix}\n\n后续最终内容`;
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-undelivered-preview-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: prefix, isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: final, isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("预览内容000。");
+    expect(pushed).toContain("后续最终内容");
+    expect(pushed).not.toContain("继续输出：");
   });
 
   it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {
@@ -226,7 +373,7 @@ describe("createBotWsReplyHandle", () => {
     expect(pushedText).toContain("END-B2");
   });
 
-  it("keeps block text hidden even when media is deferred to final", async () => {
+  it("streams text preview while media is deferred to final", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -247,7 +394,12 @@ describe("createBotWsReplyHandle", () => {
       { kind: "block" },
     );
 
-    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-block-media" } }),
+      expect.any(String),
+      "正文先发",
+      false,
+    );
   });
 
   it("includes default global media local roots for final media sends", async () => {
@@ -357,7 +509,7 @@ describe("createBotWsReplyHandle", () => {
     );
   });
 
-  it("keeps placeholder alive for hidden blocks and stops after the final reply", async () => {
+  it("stops placeholder keepalive after a visible block preview", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -429,6 +581,75 @@ describe("createBotWsReplyHandle", () => {
       markdown: { content: "最终回复" },
     });
     expect(onFail).not.toHaveBeenCalled();
+  });
+
+  it("pushes only the continuation when a frozen preview stream has expired", async () => {
+    const expiredError = {
+      headers: { req_id: "req-expired-after-preview" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    const prefix = Array.from({ length: 260 }, (_, index) =>
+      `预览内容${String(index).padStart(3, "0")}。`,
+    ).join("");
+    const final = `${prefix}\n\n后续最终内容`;
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-expired-after-preview" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: prefix, isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: final, isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("继续输出：");
+    expect(pushed).toContain("后续最终内容");
+    expect(pushed).not.toContain("预览内容000。");
+    expect(pushed).toContain("预览内容250。");
+  });
+
+  it("pushes only the continuation when a frozen preview is later superseded", async () => {
+    const prefix = Array.from({ length: 260 }, (_, index) =>
+      `预览内容${String(index).padStart(3, "0")}。`,
+    ).join("");
+    const final = `${prefix}\n\n后续最终内容`;
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-superseded-after-preview" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: prefix, isReasoning: false }, { kind: "block" });
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await handle.deliver({ text: final, isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("继续输出：");
+    expect(pushed).toContain("后续最终内容");
+    expect(pushed).not.toContain("预览内容000。");
+    expect(pushed).toContain("预览内容250。");
   });
 
   it("reports failure without marking delivery when stream and active push both fail", async () => {

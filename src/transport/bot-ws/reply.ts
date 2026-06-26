@@ -34,6 +34,7 @@ const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
 const LONG_FINAL_DEDUP_MIN_BLOCK_CHARS = 500;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const LONG_FINAL_DEDUP_MAX_REMOVALS = 3;
+const FINAL_COMPLETION_MARKER = "✅ 已处理完成";
 const B3_SUPERSEDED_NOTICE_TEXT = "已收到新消息，合并思考。✅";
 const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
 
@@ -386,6 +387,14 @@ function formatElapsedStatus(elapsedMs: number): string {
   return `正在整理结果...${elapsedMinutes}m${String(remainingSeconds).padStart(2, "0")}s`;
 }
 
+function appendFinalCompletionMarker(text: string): string {
+  const trimmed = text.trimEnd();
+  if (!trimmed || trimmed.endsWith(FINAL_COMPLETION_MARKER)) {
+    return trimmed;
+  }
+  return `${trimmed}\n\n${FINAL_COMPLETION_MARKER}`;
+}
+
 function escapeThinkBlockText(text: string): string {
   return text
     .replace(/\r\n?/g, "\n")
@@ -678,7 +687,10 @@ export function createBotWsReplyHandle(params: {
     }
     const remainder = finalText.slice(previewFrozenDeliveredSourceText.length).trimStart();
     if (!remainder) {
-      return "最终回复已完成，以上预览内容即为完整回复。";
+      return appendFinalCompletionMarker("最终回复已完成，以上预览内容即为完整回复。");
+    }
+    if (remainder === FINAL_COMPLETION_MARKER) {
+      return FINAL_COMPLETION_MARKER;
     }
     return `继续输出：\n\n${remainder}`;
   };
@@ -778,8 +790,10 @@ export function createBotWsReplyHandle(params: {
       await params.client.replyStream(params.frame, resolveStreamId(), previewText, false);
     } catch (error) {
       if (isTerminalReplyError(error)) {
+        console.warn(
+          `[wecom-preview] terminal-update-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+        );
         settleStream();
-        params.onFail?.(error);
         return false;
       }
       console.warn(
@@ -910,7 +924,7 @@ export function createBotWsReplyHandle(params: {
   };
 
   const deliverBlockPreview = async (text: string): Promise<void> => {
-    if (isEvent || supersededByNewInbound || !text) {
+    if (streamSettled || isEvent || supersededByNewInbound || !text) {
       return;
     }
     const now = Date.now();
@@ -1079,6 +1093,12 @@ export function createBotWsReplyHandle(params: {
       }
       if (info.kind === "final") {
         finalText = dedupeLongFinalText(finalText, { previewFrozen });
+        if (!isEvent) {
+          if (!finalText && accumulatedThinkingText) {
+            finalText = FINAL_COMPLETION_MARKER;
+          }
+          finalText = appendFinalCompletionMarker(finalText);
+        }
       }
       if (!finalText) {
         return;

@@ -1000,11 +1000,13 @@ export function createBotWsReplyHandle(params: {
           return;
         }
         accumulatedThinkingText = mergeReplyText(accumulatedThinkingText, thinkingText);
-        const previewText = renderPreviewStreamText("");
-        if (!shouldSendThinkingPreview(previewText)) {
+        const now = Date.now();
+        const bodyPreviewText = accumulatedText ? renderPreviewText(accumulatedText, now) : "";
+        const previewText = renderPreviewStreamText(bodyPreviewText);
+        if (!shouldSendThinkingPreview(previewText, now)) {
           return;
         }
-        await sendPreviewUpdate(previewText, Date.now());
+        await sendPreviewUpdate(previewText, now);
         return;
       }
 

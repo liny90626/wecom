@@ -299,6 +299,27 @@ describe("createBotWsReplyHandle", () => {
     expect(previewText).toContain("正文预览");
   });
 
+  it("keeps the body preview when thinking updates later", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-body-preview-then-thinking" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "正文预览", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(3000);
+    await handle.deliver({ text: "后续思考", isReasoning: true }, { kind: "block" });
+
+    const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(previewText).toContain("<think>后续思考</think>");
+    expect(previewText).toContain("正文预览");
+  });
+
   it("puts the think block only on the first long final chunk", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

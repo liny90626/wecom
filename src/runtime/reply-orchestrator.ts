@@ -29,16 +29,36 @@ export async function dispatchRuntimeReply(params: {
   abortSignal?: AbortSignal;
 }): Promise<void> {
   const { core, cfg, session, replyHandle, abortSignal } = params;
+  const botWsReplyOptions =
+    replyHandle.context.transport === "bot-ws"
+      ? ({
+          // WS bot replies should emit block updates instead of waiting for a final-only flush.
+          disableBlockStreaming: false,
+          // Newer OpenClaw builds gate reasoning preview behind this flag.
+          reasoningPreviewEnabled: true,
+          abortSignal,
+          onReasoningStream: async (payload: { text?: string }) => {
+            await dispatchReplyPayload({
+              replyHandle,
+              payload: { text: payload?.text ?? "", isReasoning: true },
+              kind: "block",
+            });
+          },
+          onReasoningEnd: async () => {
+            await dispatchReplyPayload({
+              replyHandle,
+              payload: { text: "", isReasoning: true },
+              kind: "block",
+            });
+          },
+        } as Record<string, unknown>)
+      : undefined;
   const result = await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: session.ctx,
     cfg,
     replyOptions:
       replyHandle.context.transport === "bot-ws"
-        ? {
-            // WS bot replies should emit block updates instead of waiting for a final-only flush.
-            disableBlockStreaming: false,
-            abortSignal,
-          }
+        ? botWsReplyOptions
         : abortSignal
           ? { abortSignal }
           : undefined,

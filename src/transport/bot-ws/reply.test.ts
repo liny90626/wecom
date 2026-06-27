@@ -12,9 +12,7 @@ vi.mock("./media.js", () => ({
 
 type ReplyHandleParams = Parameters<typeof createBotWsReplyHandle>[0];
 const FINAL_COMPLETION_MARKER = "（已完成）";
-const THINKING_DEBUG_INLINE_MARKER = "dbg-a";
-const THINKING_DEBUG_MULTILINE_MARKER = "dbg-b";
-const THINKING_DEBUG_SPLIT_MARKER = "dbg-c";
+const THINKING_PROGRESS_BODY_MARKER = "dbg-r";
 
 describe("createBotWsReplyHandle", () => {
   let mockClient: import("vitest").Mocked<WSClient>;
@@ -24,6 +22,14 @@ describe("createBotWsReplyHandle", () => {
     for (let i = 0; i < 10; i += 1) {
       await Promise.resolve();
     }
+  };
+
+  const drainChunkTimers = async (times = 8) => {
+    for (let i = 0; i < times; i += 1) {
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(800);
+    }
+    await flushPromises();
   };
 
   beforeEach(async () => {
@@ -223,7 +229,7 @@ describe("createBotWsReplyHandle", () => {
       1,
       expect.objectContaining({ headers: { req_id: "req-thinking-block" } }),
       expect.any(String),
-      `<think>${THINKING_DEBUG_INLINE_MARKER}\n先分析需求</think>\n${THINKING_DEBUG_INLINE_MARKER}`,
+      `<think>${THINKING_PROGRESS_BODY_MARKER}\n先分析需求</think>\n${THINKING_PROGRESS_BODY_MARKER}`,
       false,
     );
 
@@ -255,74 +261,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
     expect(mockClient.replyStream.mock.calls[1]?.[1]).toBe(mockClient.replyStream.mock.calls[0]?.[1]);
     expect(String(mockClient.replyStream.mock.calls[1]?.[2] ?? "")).toContain("第三段思考");
-    expect(String(mockClient.replyStream.mock.calls[1]?.[2] ?? "")).toContain(THINKING_DEBUG_INLINE_MARKER);
-  });
-
-  it("rotates debug probes across progress think formats", async () => {
-    const runReasoningPreview = async (reqId: string) => {
-      const handle = createBotWsReplyHandle({
-        client: mockClient,
-        frame: {
-          headers: { req_id: reqId },
-          body: { from: { userid: reqId }, chattype: "single" },
-        } as unknown as ReplyHandleParams["frame"],
-        accountId: "default",
-        inboundKind: "text",
-        autoSendPlaceholder: false,
-      });
-      await handle.deliver({ text: `思考-${reqId}`, isReasoning: true }, { kind: "block" });
-      return String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    };
-
-    const inline = await runReasoningPreview("req-probe-a");
-    const multiline = await runReasoningPreview("req-probe-b");
-    const splitOpen = await runReasoningPreview("req-probe-c");
-
-    expect(inline).toContain(`<think>${THINKING_DEBUG_INLINE_MARKER}\n思考-req-probe-a</think>\n${THINKING_DEBUG_INLINE_MARKER}`);
-    expect(multiline).toContain(`<think>\n${THINKING_DEBUG_MULTILINE_MARKER}\n思考-req-probe-b\n</think>\n${THINKING_DEBUG_MULTILINE_MARKER}`);
-    expect(splitOpen).toContain(`<think>${THINKING_DEBUG_SPLIT_MARKER}\n思考-req-probe-c`);
-    expect(splitOpen).not.toContain("</think>");
-  });
-
-  it("closes split debug probe on the next progress update", async () => {
-    await createBotWsReplyHandle({
-      client: mockClient,
-      frame: {
-        headers: { req_id: "req-probe-a-prime" },
-        body: { from: { userid: "a-prime" }, chattype: "single" },
-      } as unknown as ReplyHandleParams["frame"],
-      accountId: "default",
-      inboundKind: "text",
-      autoSendPlaceholder: false,
-    }).deliver({ text: "占位 A", isReasoning: true }, { kind: "block" });
-    await createBotWsReplyHandle({
-      client: mockClient,
-      frame: {
-        headers: { req_id: "req-probe-b-prime" },
-        body: { from: { userid: "b-prime" }, chattype: "single" },
-      } as unknown as ReplyHandleParams["frame"],
-      accountId: "default",
-      inboundKind: "text",
-      autoSendPlaceholder: false,
-    }).deliver({ text: "占位 B", isReasoning: true }, { kind: "block" });
-
-    const handle = createBotWsReplyHandle({
-      client: mockClient,
-      frame: {
-        headers: { req_id: "req-probe-c-close" },
-        body: { from: { userid: "c-close" }, chattype: "single" },
-      } as unknown as ReplyHandleParams["frame"],
-      accountId: "default",
-      inboundKind: "text",
-      autoSendPlaceholder: false,
-    });
-
-    await handle.deliver({ text: "先打开", isReasoning: true }, { kind: "block" });
-    await vi.advanceTimersByTimeAsync(3_000);
-    await handle.deliver({ text: "再闭合", isReasoning: true }, { kind: "block" });
-
-    const closeText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(closeText).toContain(`<think>${THINKING_DEBUG_SPLIT_MARKER}\n先打开\n再闭合</think>\n${THINKING_DEBUG_SPLIT_MARKER}`);
+    expect(String(mockClient.replyStream.mock.calls[1]?.[2] ?? "")).toContain(THINKING_PROGRESS_BODY_MARKER);
   });
 
   it("strips markup from thinking content before wrapping it in a progress think block", async () => {
@@ -345,7 +284,7 @@ describe("createBotWsReplyHandle", () => {
 
     const progressText = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
     const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(progressText).toContain(`<think>${THINKING_DEBUG_INLINE_MARKER}\n先内部alert(1)结束</think>`);
+    expect(progressText).toContain(`<think>${THINKING_PROGRESS_BODY_MARKER}\n先内部alert(1)结束</think>`);
     expect(progressText).not.toContain("<script>");
     expect(progressText.match(/<think>/g)).toHaveLength(1);
     expect(progressText.match(/<\/think>/g)).toHaveLength(1);
@@ -395,7 +334,7 @@ describe("createBotWsReplyHandle", () => {
     );
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(previewText).toContain(`<think>${THINKING_DEBUG_INLINE_MARKER}\n真实思考</think>`);
+    expect(previewText).toContain(`<think>${THINKING_PROGRESS_BODY_MARKER}\n真实思考</think>`);
     expect(previewText).toContain("`&lt;think&gt;不要折叠&lt;/think&gt;`");
     expect(previewText.match(/<think>/g)).toHaveLength(1);
     expect(previewText.match(/<\/think>/g)).toHaveLength(1);
@@ -418,8 +357,8 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "正文预览", isReasoning: false }, { kind: "block" });
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(previewText).toContain(`<think>${THINKING_DEBUG_INLINE_MARKER}\n先拆解问题</think>`);
-    expect(previewText).toContain(THINKING_DEBUG_INLINE_MARKER);
+    expect(previewText).toContain(`<think>${THINKING_PROGRESS_BODY_MARKER}\n先拆解问题</think>`);
+    expect(previewText).toContain(THINKING_PROGRESS_BODY_MARKER);
     expect(previewText).toContain("正文预览");
   });
 
@@ -440,8 +379,8 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "后续思考", isReasoning: true }, { kind: "block" });
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(previewText).toContain(`<think>${THINKING_DEBUG_INLINE_MARKER}\n后续思考</think>`);
-    expect(previewText).toContain(THINKING_DEBUG_INLINE_MARKER);
+    expect(previewText).toContain(`<think>${THINKING_PROGRESS_BODY_MARKER}\n后续思考</think>`);
+    expect(previewText).toContain(THINKING_PROGRESS_BODY_MARKER);
     expect(previewText).toContain("正文预览");
   });
 
@@ -460,10 +399,7 @@ describe("createBotWsReplyHandle", () => {
 
     await handle.deliver({ text: "这是思考过程", isReasoning: true }, { kind: "block" });
     const deliverPromise = handle.deliver({ text: longText, isReasoning: false }, { kind: "final" });
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(800);
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(800);
+    await drainChunkTimers();
     await deliverPromise;
 
     const firstChunk = String(mockClient.replyStream.mock.calls[1]?.[2] ?? "");
@@ -593,13 +529,21 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
 
-    await handle.deliver({ text: "最终正文", isReasoning: false }, { kind: "final" });
+    const deliverPromise = handle.deliver({ text: "最终正文", isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+    await deliverPromise;
     expect(mockClient.replyStream).toHaveBeenLastCalledWith(
       expect.objectContaining({ headers: { req_id: "req-preview-final-stop" } }),
       expect.any(String),
-      `${longBlock}\n最终正文\n\n${FINAL_COMPLETION_MARKER}`,
+      expect.stringContaining("第1/"),
       true,
     );
+    const delivered = [
+      String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? ""),
+      ...mockClient.sendMessage.mock.calls.map((call) => String((call[1] as any).markdown.content)),
+    ].join("\n");
+    expect(delivered).toContain("最终正文");
+    expect(delivered).toContain(FINAL_COMPLETION_MARKER);
 
     await vi.advanceTimersByTimeAsync(45_000);
     await flushPromises();
@@ -669,9 +613,7 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("最终正文");
     expect(pushed).toContain(FINAL_COMPLETION_MARKER);
     expect(pushed).not.toContain("<think>");
-    expect(pushed).not.toContain(THINKING_DEBUG_INLINE_MARKER);
-    expect(pushed).not.toContain(THINKING_DEBUG_MULTILINE_MARKER);
-    expect(pushed).not.toContain(THINKING_DEBUG_SPLIT_MARKER);
+    expect(pushed).not.toContain(THINKING_PROGRESS_BODY_MARKER);
   });
 
   it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {
@@ -688,10 +630,7 @@ describe("createBotWsReplyHandle", () => {
     const longText = `${"长内容。".repeat(1800)}END-B2`;
 
     const deliverPromise = handle.deliver({ text: longText, isReasoning: false }, { kind: "final" });
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(800);
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(800);
+    await drainChunkTimers();
     await deliverPromise;
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
@@ -706,6 +645,34 @@ describe("createBotWsReplyHandle", () => {
       .map((call) => (call[1] as any).markdown.content)
       .join("\n");
     expect(pushedText).toContain("END-B2");
+    expect(pushedText).toContain(FINAL_COMPLETION_MARKER);
+  });
+
+  it("splits medium Chinese final text before the WeCom stream bubble truncates it", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-medium-final-split" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const finalText = `${"这是一段中文长回复，用于验证企业微信 stream 气泡不会只显示首段。".repeat(140)}TAIL-MEDIUM-B2`;
+
+    const deliverPromise = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+    await deliverPromise;
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    const firstChunk = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
+    expect(firstChunk).toContain("第1/");
+    expect(firstChunk).not.toContain("TAIL-MEDIUM-B2");
+    const pushedText = mockClient.sendMessage.mock.calls
+      .map((call) => String((call[1] as any).markdown.content))
+      .join("\n");
+    expect(pushedText).toContain("TAIL-MEDIUM-B2");
     expect(pushedText).toContain(FINAL_COMPLETION_MARKER);
   });
 
@@ -725,9 +692,14 @@ describe("createBotWsReplyHandle", () => {
     ).join("\n");
     const finalText = `开头说明\n\n${repeatedBlock}\n\n中间过渡\n\n${repeatedBlock}\n\n结尾结论`;
 
-    await handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+    const deliverPromise = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+    await deliverPromise;
 
-    const delivered = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
+    const delivered = [
+      String(mockClient.replyStream.mock.calls[0]?.[2] ?? ""),
+      ...mockClient.sendMessage.mock.calls.map((call) => String((call[1] as any).markdown.content)),
+    ].join("\n");
     expect(delivered).toContain("开头说明");
     expect(delivered).toContain("中间过渡");
     expect(delivered).toContain("结尾结论");
@@ -806,10 +778,7 @@ describe("createBotWsReplyHandle", () => {
     const finalText = `${firstReport}\n\n${filler}\n\n${secondReport}`;
 
     const deliverPromise = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(800);
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(800);
+    await drainChunkTimers();
     await deliverPromise;
 
     const delivered = [
@@ -842,10 +811,7 @@ describe("createBotWsReplyHandle", () => {
     const finalText = `表格一\n\n${table}\n\n表格二\n\n${table}\n\n收尾`;
 
     const deliverPromise = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(800);
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(800);
+    await drainChunkTimers();
     await deliverPromise;
 
     const delivered = [

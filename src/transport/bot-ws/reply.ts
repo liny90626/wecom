@@ -35,12 +35,16 @@ const LONG_FINAL_DEDUP_MIN_BLOCK_CHARS = 500;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const LONG_FINAL_DEDUP_MAX_REMOVALS = 3;
 const FINAL_COMPLETION_MARKER = "（已完成）";
-const THINKING_DEBUG_THINK_MARKER = "[t]";
-const THINKING_DEBUG_AFTER_THINK_MARKER = "[/t]";
-const THINKING_DEBUG_BODY_MARKER = "[b]";
+const THINKING_DEBUG_INLINE_MARKER = "dbg-a";
+const THINKING_DEBUG_MULTILINE_MARKER = "dbg-b";
+const THINKING_DEBUG_SPLIT_MARKER = "dbg-c";
 const THINK_TAG_RE = /<\/?think>/gi;
 const B3_SUPERSEDED_NOTICE_TEXT = "已收到新消息，合并思考。✅";
 const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
+
+type ThinkingProgressProbe = "inline" | "multiline" | "split";
+const THINKING_PROGRESS_PROBES: ThinkingProgressProbe[] = ["inline", "multiline", "split"];
+let nextThinkingProgressProbeIndex = 0;
 
 const recentFinalDeliveriesByPeer = new Map<string, number>();
 
@@ -449,43 +453,86 @@ function addDebugMarker(text: string, marker: string): string {
   return text.startsWith(marker) ? text : `${marker}\n${text}`;
 }
 
-function renderThinkBlock(text: string): string {
-  const escaped = trimToUtf8Bytes(
+function addRequiredDebugMarker(text: string, marker: string): string {
+  return text ? addDebugMarker(text, marker) : marker;
+}
+
+function nextThinkingProgressProbe(): ThinkingProgressProbe {
+  const probe =
+    THINKING_PROGRESS_PROBES[nextThinkingProgressProbeIndex % THINKING_PROGRESS_PROBES.length] ??
+    "inline";
+  nextThinkingProgressProbeIndex += 1;
+  return probe;
+}
+
+function renderThinkContent(text: string, marker: string): string {
+  return trimToUtf8Bytes(
     addDebugMarker(
-      escapeThinkBlockText(text).slice(0, THINKING_BLOCK_MAX_CHARS),
-      THINKING_DEBUG_THINK_MARKER,
+      escapeThinkBlockText(text || "progress").slice(0, THINKING_BLOCK_MAX_CHARS),
+      marker,
     ),
     THINKING_BLOCK_MAX_BYTES,
   ).trim();
+}
+
+function renderInlineThinkBlock(text: string): string {
+  const escaped = renderThinkContent(text, THINKING_DEBUG_INLINE_MARKER);
+  return escaped ? `<think>${escaped}</think>` : "";
+}
+
+function renderMultilineThinkBlock(text: string): string {
+  const escaped = renderThinkContent(text, THINKING_DEBUG_MULTILINE_MARKER);
+  return escaped ? `<think>\n${escaped}\n</think>` : "";
+}
+
+function renderSplitOpenThinkBlock(text: string): string {
+  const escaped = renderThinkContent(text, THINKING_DEBUG_SPLIT_MARKER);
+  return escaped ? `<think>${escaped}` : "";
+}
+
+function renderSplitClosedThinkBlock(text: string): string {
+  const escaped = renderThinkContent(text, THINKING_DEBUG_SPLIT_MARKER);
   return escaped ? `<think>${escaped}</think>` : "";
 }
 
 function resolveThinkingAwareBodyLimits(thinkingText: string): {
-  thinkingBlock: string;
   maxChars: number;
   maxBytes: number;
 } {
-  const thinkingBlock = renderThinkBlock(thinkingText);
-  if (!thinkingBlock) {
-    return { thinkingBlock: "", maxChars: WECOM_STREAM_MAX_CHARS, maxBytes: WECOM_STREAM_MAX_BYTES };
+  const inlineBlock = renderInlineThinkBlock(thinkingText);
+  if (!inlineBlock) {
+    return { maxChars: WECOM_STREAM_MAX_CHARS, maxBytes: WECOM_STREAM_MAX_BYTES };
   }
-  const prefix = `${thinkingBlock}\n`;
+  const prefix = `${inlineBlock}\n${THINKING_DEBUG_INLINE_MARKER}\n`;
   return {
-    thinkingBlock,
     maxChars: Math.max(200, WECOM_STREAM_MAX_CHARS - prefix.length),
     maxBytes: Math.max(512, WECOM_STREAM_MAX_BYTES - Buffer.byteLength(prefix, "utf8")),
   };
 }
 
-function composeStreamTextWithThinking(params: { thinkingBlock: string; bodyText: string }): string {
-  const thinkingBlock = params.thinkingBlock;
+function composeProgressStreamTextWithThinking(params: {
+  probe: ThinkingProgressProbe;
+  thinkingText: string;
+  bodyText: string;
+  splitOpen: boolean;
+}): string {
   const safeBodyText = escapeLiteralThinkTags(params.bodyText);
-  if (!thinkingBlock) {
-    return safeBodyText;
+  if (params.probe === "multiline") {
+    const thinkingBlock = renderMultilineThinkBlock(params.thinkingText);
+    const bodyText = addRequiredDebugMarker(safeBodyText, THINKING_DEBUG_MULTILINE_MARKER);
+    return thinkingBlock ? `${thinkingBlock}\n${bodyText}` : bodyText;
   }
-  const bodyText = addDebugMarker(safeBodyText, THINKING_DEBUG_BODY_MARKER);
-  const closeMarker = THINKING_DEBUG_AFTER_THINK_MARKER;
-  return bodyText ? `${thinkingBlock}\n${closeMarker}\n${bodyText}` : `${thinkingBlock}\n${closeMarker}`;
+  if (params.probe === "split") {
+    if (params.splitOpen) {
+      return renderSplitOpenThinkBlock(params.thinkingText);
+    }
+    const thinkingBlock = renderSplitClosedThinkBlock(params.thinkingText);
+    const bodyText = addRequiredDebugMarker(safeBodyText, THINKING_DEBUG_SPLIT_MARKER);
+    return thinkingBlock ? `${thinkingBlock}\n${bodyText}` : bodyText;
+  }
+  const thinkingBlock = renderInlineThinkBlock(params.thinkingText);
+  const bodyText = addRequiredDebugMarker(safeBodyText, THINKING_DEBUG_INLINE_MARKER);
+  return thinkingBlock ? `${thinkingBlock}\n${bodyText}` : bodyText;
 }
 
 // Global registry to track active keepalives by peerId
@@ -498,6 +545,7 @@ const activeKeepalivesByPeer = new Map<string, Set<ActiveKeepalive>>();
 export function __resetBotWsReplyTestState(): void {
   recentFinalDeliveriesByPeer.clear();
   activeKeepalivesByPeer.clear();
+  nextThinkingProgressProbeIndex = 0;
 }
 
 export function createBotWsReplyHandle(params: {
@@ -649,6 +697,8 @@ export function createBotWsReplyHandle(params: {
   let lastPreviewText = "";
   let lastPreviewUpdateAt = 0;
   let lastPreviewStatusAt = 0;
+  let thinkingProgressProbe: ThinkingProgressProbe | undefined;
+  let thinkingSplitProbeOpen = false;
 
   const markFinalDelivered = (key: string, options: { peerDedup: boolean }): boolean => {
     if (finalDelivered) {
@@ -744,10 +794,7 @@ export function createBotWsReplyHandle(params: {
     ).map(escapeLiteralThinkTags);
     const finalStreamId = resolveStreamId();
     const fallbackText = appendFinalCompletionMarker(resolveStreamFallbackText(finalText));
-    const firstStreamChunk = composeStreamTextWithThinking({
-      thinkingBlock: thinkingLimits.thinkingBlock,
-      bodyText: markdownChunks[0] ?? "",
-    });
+    const firstStreamChunk = markdownChunks[0] ?? "";
     try {
       console.info(
         `[wecom-b3] stream-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} chunks=${markdownChunks.length}`,
@@ -856,10 +903,19 @@ export function createBotWsReplyHandle(params: {
   };
 
   const renderPreviewStreamText = (bodyText: string): string => {
-    const thinkingBlock = renderThinkBlock(accumulatedThinkingText);
-    return composeStreamTextWithThinking({
-      thinkingBlock,
+    if (!accumulatedThinkingText) {
+      return escapeLiteralThinkTags(bodyText);
+    }
+    thinkingProgressProbe ??= nextThinkingProgressProbe();
+    const splitOpen = thinkingProgressProbe === "split" && !thinkingSplitProbeOpen;
+    if (splitOpen) {
+      thinkingSplitProbeOpen = true;
+    }
+    return composeProgressStreamTextWithThinking({
+      probe: thinkingProgressProbe,
+      thinkingText: accumulatedThinkingText,
       bodyText,
+      splitOpen,
     });
   };
 

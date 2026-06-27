@@ -139,6 +139,24 @@ function mergeReplyText(previous: string, incoming: string): string {
   return `${base}\n${next}`;
 }
 
+function mergeFinalReplyText(previous: string, incoming: string): string {
+  const base = previous.trim();
+  const next = incoming.trim();
+  if (!base || !next) {
+    return mergeReplyText(base, next);
+  }
+
+  const normalizedNext = normalizeDedupText(next);
+  if (
+    normalizedNext.length >= LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS &&
+    normalizeDedupText(base).endsWith(normalizedNext)
+  ) {
+    return base;
+  }
+
+  return mergeReplyText(base, next);
+}
+
 function normalizeDedupText(value: string): string {
   return value
     .replace(/【消息过长，分段发送：第\d+\/\d+段】/g, "")
@@ -1081,7 +1099,7 @@ export function createBotWsReplyHandle(params: {
 
       const outboundText =
         info.kind === "final"
-          ? mergeReplyText(accumulatedText, text)
+          ? mergeFinalReplyText(accumulatedText, text)
           : accumulatedText || text;
 
       let finalText = outboundText;

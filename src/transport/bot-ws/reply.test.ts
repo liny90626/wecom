@@ -705,6 +705,48 @@ describe("createBotWsReplyHandle", () => {
     expect(delivered.match(/重复观察00/g)?.length).toBe(1);
   });
 
+  it("does not append a short final again when it already exists at the end of preview text", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-short-final-tail-dedup" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const finalText = [
+      "自检完了，结论很明确：",
+      "",
+      "WeCom 插件侧 reasoningPreviewEnabled: true，已打开，不是断点。",
+      "",
+      "| 层 | 状态 | 证据 |",
+      "|---|---|---|",
+      "| 1. it-server 到 GLM-5.2 | OK | 实测返回 reasoning_content |",
+      "| 2. OpenClaw transport | OK | 会 emit thinking_delta |",
+      "",
+      "你要不要现在清净地再试一次？发一个问题后别连续追加，给 GLM-5.2 足够时间把 reasoning stream 完整输出。",
+    ].join("\n");
+    const previewText = [
+      "好，我直接查 reasoningPreviewEnabled 在 wecom 插件源码里的取值逻辑和当前配置。",
+      "变量名被 minify 了，我直接搜更广的范围。",
+      finalText,
+    ].join("\n");
+
+    await handle.deliver({ text: "读取源码上下文", isReasoning: true }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(3_000);
+    await handle.deliver({ text: previewText, isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+
+    const delivered = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(delivered.match(/自检完了，结论很明确/g)?.length).toBe(1);
+    expect(delivered.match(/reasoningPreviewEnabled: true/g)?.length).toBe(1);
+    expect(delivered).toContain("变量名被 minify 了");
+    expect(delivered).toContain("GLM-5.2 足够时间");
+    expect(delivered).not.toContain("<think>");
+  });
+
   it("deduplicates repeated structured tails that restart from the same report heading", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

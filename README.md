@@ -1,16 +1,15 @@
 # OpenClaw 企业微信（WeCom）Channel 插件
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Original%20Project-YanHaidao-orange?style=for-the-badge&logo=github" alt="Original Project" />
-  <img src="https://img.shields.io/badge/License-ISC-blue?style=for-the-badge" alt="License" />
-</p>
+原作者：**YanHaidao**
+
+许可证：**ISC License**
 
 > [!WARNING]
 > **原创声明**：本项目涉及的“多账号隔离与矩阵路由架构”、“Bot+Agent双模融合架构”、“长任务超时接力逻辑”及“全自动媒体流转接”等核心设计均为作者 **YanHaidao** 独立思考与实践的原创成果。
 > 欢迎技术交流与合规引用，但严禁任何不经授权的“功能像素级抄袭”或删除原作者署名的代码搬运行为。
 
 > [!NOTE]
-> **Fork 说明**：本仓库基于原作者 **YanHaidao** 的开源仓库 [`YanHaidao/wecom`](https://github.com/YanHaidao/wecom) 进行个人学习与兼容性修复，保留原作者署名与许可证声明。当前 fork 仅用于个人学习、问题复现与修复验证，不代表原作者发布版本，也不提供任何形式的服务承诺。
+> **Fork 说明**：本仓库基于原作者 **YanHaidao** 的开源仓库 [`YanHaidao/wecom`](https://github.com/YanHaidao/wecom) 进行个人学习与兼容性修复，保留原作者署名、原创声明与许可证声明。当前 fork 仅用于个人学习、问题复现与修复验证，不代表原作者发布版本，也不提供任何形式的商业服务、技术支持或交付承诺。
 
 <p align="center">
   <strong>🚀 企业级多模式 AI 助手接入方案（统一运行时架构）</strong>
@@ -20,14 +19,30 @@
 
 ## Fork 修改说明
 
-本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，重点保持最小改动与行为兼容：
+本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-- 修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
-- 优化 Bot WebSocket 长文本回复投递，支持正文过长时分段发送，并减少流式过程与最终正文之间的重复内容。
-- 优化长任务和新消息合并场景，避免旧消息气泡覆盖已输出正文，并在原流式窗口失效时通过主动推送兜底交付最终结果。
-- 增加针对 B1/B2/B3 场景的源码自检脚本和回归测试，便于本 fork 后续维护。
+- B1：修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
+- B2：优化 Bot WebSocket 长文本回复投递。正文过长时会按企业微信限制分段发送，并对流式预览与最终正文之间的重复片段做去重处理，降低长文本重复和截断风险。
+- B3：优化长任务、新消息合并和流式窗口过期场景。旧消息已输出正文时不再被“合并思考”提示覆盖；原流式窗口失效时，会通过主动推送兜底交付最终结果。
+- Reasoning 预览实验：默认接入 OpenClaw reasoning stream，在 Bot WS 进度流中尝试使用企业微信客户端可识别的 `<think>...</think>` 结构展示思考块；最终正文仍保持普通正文路径，避免思考内容污染最终答复。
+- 重复正文防护：补充短文本、中等文本和长文本场景的 final/preview 去重逻辑，减少带思考块回复结束时再次输出正文的情况。
+- 自检与回归：增加并维护 B1/B2/B3、reasoning preview、长任务兜底、分段发送和去重相关测试，方便本 fork 后续迭代时快速发现回归。
 
-除上述修复外，本 fork 尽量保持原项目结构、配置方式和运行时行为不变。
+实验性能力仍受 OpenClaw 版本、模型服务是否透传 reasoning 内容、企业微信客户端渲染策略等外部因素影响。除上述修复外，本 fork 尽量保持原项目结构、配置方式和运行时行为不变。
+
+### 维护自检命令
+
+本 fork 在修改投递链路或打包前，建议至少执行：
+
+```bash
+node scripts/patch-wecom-markdown-table.mjs --check
+node scripts/patch-wecom-long-message.mjs --check
+node scripts/patch-wecom-b3-merge-thinking.mjs --check
+npm run build
+npx vitest run
+```
+
+如只改 README 等文档文件，可使用 `git diff --check` 做格式自检。
 
 ---
 
@@ -559,24 +574,22 @@ openclaw channels logs --channel wecom --lines 200
 
 ---
 
-## 四、🤝 项目协作者
+## 四、项目协作者
 
 感谢所有为本项目提交代码、测试、文档与反馈的协作者。
 
-<p align="center">
-  <a href="https://github.com/YanHaidao/wecom/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=YanHaidao/wecom" alt="WeCom contributors" />
-  </a>
-</p>
+原项目作者：**YanHaidao**
 
-如果头像墙没有立刻刷新，通常是 GitHub 统计或第三方缓存延迟，稍后再看即可。
+原仓库：[`YanHaidao/wecom`](https://github.com/YanHaidao/wecom)
+
+本 fork 只保留必要的项目说明、署名和许可证信息，不在 README 中放置二维码、商务联系、私域联系方式或第三方头像墙。本 fork 的修改仅用于个人学习、兼容性修复验证和问题复现。
 
 ---
 
 ## 五、署名与许可证协议指引
 
 ### 最后的话：关于开源及署名
-本项目遵循 **ISC License**。本 fork 基于原作者 **YanHaidao** 的开源仓库进行个人学习与兼容性修复，保留原作者署名、原创声明与许可证说明。
+本项目遵循 **ISC License**。本 fork 基于原作者 **YanHaidao** 的开源仓库进行个人学习与兼容性修复，保留原作者署名、原创声明与许可证说明，不代表原作者发布版本。
 
 开源不是拿来主义：
 在此明确强调，包括所谓的“Bot+Agent 保活接力超时融合机制”、“千人千面多账户切面”、“自动寻的路由下沉” 这背后全是作者无数个在企业真实现网撞墙实验出的架构结晶。**拒绝一切去除原作者署名、粗暴改名换姓占为己用的魔改上架行为。**

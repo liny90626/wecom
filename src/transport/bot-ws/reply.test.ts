@@ -12,7 +12,6 @@ vi.mock("./media.js", () => ({
 
 type ReplyHandleParams = Parameters<typeof createBotWsReplyHandle>[0];
 const FINAL_COMPLETION_MARKER = "（已完成）";
-const THINKING_PROGRESS_BODY_MARKER = "dbg-r";
 
 describe("createBotWsReplyHandle", () => {
   let mockClient: import("vitest").Mocked<WSClient>;
@@ -229,7 +228,7 @@ describe("createBotWsReplyHandle", () => {
       1,
       expect.objectContaining({ headers: { req_id: "req-thinking-block" } }),
       expect.any(String),
-      `<think>${THINKING_PROGRESS_BODY_MARKER}\n先分析需求</think>\n${THINKING_PROGRESS_BODY_MARKER}`,
+      "<think>先分析需求</think>\n",
       false,
     );
 
@@ -261,7 +260,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
     expect(mockClient.replyStream.mock.calls[1]?.[1]).toBe(mockClient.replyStream.mock.calls[0]?.[1]);
     expect(String(mockClient.replyStream.mock.calls[1]?.[2] ?? "")).toContain("第三段思考");
-    expect(String(mockClient.replyStream.mock.calls[1]?.[2] ?? "")).toContain(THINKING_PROGRESS_BODY_MARKER);
+    expect(String(mockClient.replyStream.mock.calls[1]?.[2] ?? "")).not.toContain("dbg-r");
   });
 
   it("strips markup from thinking content before wrapping it in a progress think block", async () => {
@@ -284,7 +283,7 @@ describe("createBotWsReplyHandle", () => {
 
     const progressText = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
     const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(progressText).toContain(`<think>${THINKING_PROGRESS_BODY_MARKER}\n先内部alert(1)结束</think>`);
+    expect(progressText).toContain("<think>先内部alert(1)结束</think>");
     expect(progressText).not.toContain("<script>");
     expect(progressText.match(/<think>/g)).toHaveLength(1);
     expect(progressText.match(/<\/think>/g)).toHaveLength(1);
@@ -334,7 +333,7 @@ describe("createBotWsReplyHandle", () => {
     );
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(previewText).toContain(`<think>${THINKING_PROGRESS_BODY_MARKER}\n真实思考</think>`);
+    expect(previewText).toContain("<think>真实思考</think>");
     expect(previewText).toContain("`&lt;think&gt;不要折叠&lt;/think&gt;`");
     expect(previewText.match(/<think>/g)).toHaveLength(1);
     expect(previewText.match(/<\/think>/g)).toHaveLength(1);
@@ -357,8 +356,8 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "正文预览", isReasoning: false }, { kind: "block" });
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(previewText).toContain(`<think>${THINKING_PROGRESS_BODY_MARKER}\n先拆解问题</think>`);
-    expect(previewText).toContain(THINKING_PROGRESS_BODY_MARKER);
+    expect(previewText).toContain("<think>先拆解问题</think>");
+    expect(previewText).not.toContain("dbg-r");
     expect(previewText).toContain("正文预览");
   });
 
@@ -379,8 +378,8 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "后续思考", isReasoning: true }, { kind: "block" });
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(previewText).toContain(`<think>${THINKING_PROGRESS_BODY_MARKER}\n后续思考</think>`);
-    expect(previewText).toContain(THINKING_PROGRESS_BODY_MARKER);
+    expect(previewText).toContain("<think>后续思考</think>");
+    expect(previewText).not.toContain("dbg-r");
     expect(previewText).toContain("正文预览");
   });
 
@@ -613,7 +612,7 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("最终正文");
     expect(pushed).toContain(FINAL_COMPLETION_MARKER);
     expect(pushed).not.toContain("<think>");
-    expect(pushed).not.toContain(THINKING_PROGRESS_BODY_MARKER);
+    expect(pushed).not.toContain("dbg-r");
   });
 
   it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {

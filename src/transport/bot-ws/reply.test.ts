@@ -11,9 +11,10 @@ vi.mock("./media.js", () => ({
 }));
 
 type ReplyHandleParams = Parameters<typeof createBotWsReplyHandle>[0];
-const FINAL_COMPLETION_MARKER = "✅ 已处理完成";
-const THINKING_DEBUG_THINK_MARKER = "〔t〕";
-const THINKING_DEBUG_BODY_MARKER = "〔b〕";
+const FINAL_COMPLETION_MARKER = "（已完成）";
+const THINKING_DEBUG_AFTER_THINK_MARKER = "[/t]";
+const THINKING_DEBUG_THINK_MARKER = "[t]";
+const THINKING_DEBUG_BODY_MARKER = "[b]";
 
 describe("createBotWsReplyHandle", () => {
   let mockClient: import("vitest").Mocked<WSClient>;
@@ -114,7 +115,7 @@ describe("createBotWsReplyHandle", () => {
         headers: { req_id: "req-keepalive" },
       }),
       expect.any(String),
-      `最终回复\n\n${FINAL_COMPLETION_MARKER}`,
+      "最终回复",
       true,
     );
 
@@ -169,7 +170,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { req_id: "req-blocks" } }),
       expect.any(String),
-      `第一段\n第二段\n收尾\n\n${FINAL_COMPLETION_MARKER}`,
+      "第一段\n第二段\n收尾",
       true,
     );
   });
@@ -196,7 +197,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenLastCalledWith(
       expect.objectContaining({ headers: { req_id: "req-cumulative-final" } }),
       expect.any(String),
-      `${final}\n\n${FINAL_COMPLETION_MARKER}`,
+      final,
       true,
     );
   });
@@ -222,12 +223,13 @@ describe("createBotWsReplyHandle", () => {
       1,
       expect.objectContaining({ headers: { req_id: "req-thinking-block" } }),
       expect.any(String),
-      `<think>${THINKING_DEBUG_THINK_MARKER}\n先分析需求</think>`,
+      `<think>${THINKING_DEBUG_THINK_MARKER}\n先分析需求</think>\n${THINKING_DEBUG_AFTER_THINK_MARKER}`,
       false,
     );
 
     const finalText = String(mockClient.replyStream.mock.calls[1]?.[2] ?? "");
     expect(finalText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n先分析需求\n再核对约束</think>`);
+    expect(finalText).toContain(THINKING_DEBUG_AFTER_THINK_MARKER);
     expect(finalText).toContain(THINKING_DEBUG_BODY_MARKER);
     expect(finalText).toContain("最终正文");
     expect(finalText.replace(/<think>[\s\S]*?<\/think>/g, "")).not.toContain("先分析需求");
@@ -277,6 +279,7 @@ describe("createBotWsReplyHandle", () => {
 
     const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(finalText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n先内部alert(1)结束</think>`);
+    expect(finalText).toContain(THINKING_DEBUG_AFTER_THINK_MARKER);
     expect(finalText).not.toContain("<script>");
     expect(finalText.match(/<think>/g)).toHaveLength(1);
     expect(finalText.match(/<\/think>/g)).toHaveLength(1);
@@ -300,6 +303,7 @@ describe("createBotWsReplyHandle", () => {
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(previewText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n先拆解问题</think>`);
+    expect(previewText).toContain(THINKING_DEBUG_AFTER_THINK_MARKER);
     expect(previewText).toContain(THINKING_DEBUG_BODY_MARKER);
     expect(previewText).toContain("正文预览");
   });
@@ -322,6 +326,7 @@ describe("createBotWsReplyHandle", () => {
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(previewText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n后续思考</think>`);
+    expect(previewText).toContain(THINKING_DEBUG_AFTER_THINK_MARKER);
     expect(previewText).toContain(THINKING_DEBUG_BODY_MARKER);
     expect(previewText).toContain("正文预览");
   });
@@ -352,6 +357,7 @@ describe("createBotWsReplyHandle", () => {
       .map((call) => String((call[1] as any).markdown.content))
       .join("\n");
     expect(firstChunk).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n这是思考过程</think>`);
+    expect(firstChunk).toContain(THINKING_DEBUG_AFTER_THINK_MARKER);
     expect(firstChunk).toContain(THINKING_DEBUG_BODY_MARKER);
     expect(firstChunk).toContain("第1/");
     expect(pushedText).toContain("END-THINK-B2");
@@ -376,6 +382,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
     const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(finalText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n只有思考过程</think>`);
+    expect(finalText).toContain(THINKING_DEBUG_AFTER_THINK_MARKER);
     expect(finalText).toContain(THINKING_DEBUG_BODY_MARKER);
     expect(finalText).toContain(FINAL_COMPLETION_MARKER);
     expect(mockClient.replyStream.mock.calls.at(-1)?.[3]).toBe(true);
@@ -811,7 +818,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { req_id: "req-final-media-roots" } }),
       expect.any(String),
-      `文件已发送。\n\n${FINAL_COMPLETION_MARKER}`,
+      "文件已发送。",
       true,
     );
   });
@@ -904,7 +911,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { req_id: "req-placeholder-media" } }),
       expect.any(String),
-      `正文先发\n最终正文\n\n${FINAL_COMPLETION_MARKER}`,
+      "正文先发\n最终正文",
       true,
     );
 
@@ -1205,7 +1212,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
-      markdown: { content: `A 的最终答案\n\n${FINAL_COMPLETION_MARKER}` },
+      markdown: { content: "A 的最终答案" },
     });
   });
 
@@ -1226,7 +1233,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { req_id: "req-visible-before-supersede" } }),
       expect.any(String),
-      `旧回复已输出\n\n${FINAL_COMPLETION_MARKER}`,
+      "旧回复已输出",
       true,
     );
 
@@ -1276,7 +1283,7 @@ describe("createBotWsReplyHandle", () => {
     );
     expect(mockClient.sendMessage).toHaveBeenCalledWith("Alice", {
       msgtype: "markdown",
-      markdown: { content: `旧请求答案\n\n${FINAL_COMPLETION_MARKER}` },
+      markdown: { content: "旧请求答案" },
     });
   });
 
@@ -1315,12 +1322,12 @@ describe("createBotWsReplyHandle", () => {
 
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
-      markdown: { content: `旧请求答案\n\n${FINAL_COMPLETION_MARKER}` },
+      markdown: { content: "旧请求答案" },
     });
     expect(mockClient.replyStream).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { req_id: "req-b" } }),
       expect.any(String),
-      `新请求答案\n\n${FINAL_COMPLETION_MARKER}`,
+      "新请求答案",
       true,
     );
   });
@@ -1360,12 +1367,12 @@ describe("createBotWsReplyHandle", () => {
 
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
-      markdown: { content: `相同答案\n\n${FINAL_COMPLETION_MARKER}` },
+      markdown: { content: "相同答案" },
     });
     expect(mockClient.replyStream).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { req_id: "req-same-final-b" } }),
       expect.any(String),
-      `相同答案\n\n${FINAL_COMPLETION_MARKER}`,
+      "相同答案",
       true,
     );
   });

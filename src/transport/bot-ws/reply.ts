@@ -34,9 +34,10 @@ const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
 const LONG_FINAL_DEDUP_MIN_BLOCK_CHARS = 500;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const LONG_FINAL_DEDUP_MAX_REMOVALS = 3;
-const FINAL_COMPLETION_MARKER = "✅ 已处理完成";
-const THINKING_DEBUG_THINK_MARKER = "〔t〕";
-const THINKING_DEBUG_BODY_MARKER = "〔b〕";
+const FINAL_COMPLETION_MARKER = "（已完成）";
+const THINKING_DEBUG_THINK_MARKER = "[t]";
+const THINKING_DEBUG_AFTER_THINK_MARKER = "[/t]";
+const THINKING_DEBUG_BODY_MARKER = "[b]";
 const B3_SUPERSEDED_NOTICE_TEXT = "已收到新消息，合并思考。✅";
 const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
 
@@ -397,6 +398,22 @@ function appendFinalCompletionMarker(text: string): string {
   return `${trimmed}\n\n${FINAL_COMPLETION_MARKER}`;
 }
 
+function isLikelyLongFinalText(text: string): boolean {
+  return text.length > WECOM_STREAM_MAX_CHARS || Buffer.byteLength(text, "utf8") > WECOM_STREAM_MAX_BYTES;
+}
+
+function shouldAppendStreamCompletionMarker(params: {
+  finalText: string;
+  previewFrozen: boolean;
+  reasoningOnly: boolean;
+}): boolean {
+  return (
+    params.reasoningOnly ||
+    params.previewFrozen ||
+    isLikelyLongFinalText(params.finalText)
+  );
+}
+
 function escapeThinkBlockText(text: string): string {
   return text
     .replace(/\r\n?/g, "\n")
@@ -459,7 +476,8 @@ function composeStreamTextWithThinking(params: { thinkingBlock: string; bodyText
     return params.bodyText;
   }
   const bodyText = addDebugMarker(params.bodyText, THINKING_DEBUG_BODY_MARKER);
-  return bodyText ? `${thinkingBlock}\n${bodyText}` : thinkingBlock;
+  const closeMarker = THINKING_DEBUG_AFTER_THINK_MARKER;
+  return bodyText ? `${thinkingBlock}\n${closeMarker}\n${bodyText}` : `${thinkingBlock}\n${closeMarker}`;
 }
 
 // Global registry to track active keepalives by peerId
@@ -717,7 +735,7 @@ export function createBotWsReplyHandle(params: {
       thinkingLimits.maxBytes,
     );
     const finalStreamId = resolveStreamId();
-    const fallbackText = resolveStreamFallbackText(finalText);
+    const fallbackText = appendFinalCompletionMarker(resolveStreamFallbackText(finalText));
     const firstStreamChunk = composeStreamTextWithThinking({
       thinkingBlock: thinkingLimits.thinkingBlock,
       bodyText: markdownChunks[0] ?? "",
@@ -1114,12 +1132,21 @@ export function createBotWsReplyHandle(params: {
         deferredMediaUrls = [];
       }
       if (info.kind === "final") {
+        const reasoningOnlyFinal = !finalText && !!accumulatedThinkingText;
         finalText = dedupeLongFinalText(finalText, { previewFrozen });
         if (!isEvent) {
-          if (!finalText && accumulatedThinkingText) {
+          if (!finalText && reasoningOnlyFinal) {
             finalText = FINAL_COMPLETION_MARKER;
           }
-          finalText = appendFinalCompletionMarker(finalText);
+          if (
+            shouldAppendStreamCompletionMarker({
+              finalText,
+              previewFrozen,
+              reasoningOnly: reasoningOnlyFinal,
+            })
+          ) {
+            finalText = appendFinalCompletionMarker(finalText);
+          }
         }
       }
       if (!finalText) {

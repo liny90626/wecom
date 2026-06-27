@@ -285,6 +285,55 @@ describe("createBotWsReplyHandle", () => {
     expect(finalText.match(/<\/think>/g)).toHaveLength(1);
   });
 
+  it("does not pass literal think tags through normal final body text", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-literal-think-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: "发送：`<think>这里只是示例</think>`这里是正文", isReasoning: false },
+      { kind: "final" },
+    );
+
+    const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalText).toContain("`&lt;think&gt;这里只是示例&lt;/think&gt;`这里是正文");
+    expect(finalText).not.toContain("<think>");
+    expect(finalText).not.toContain("</think>");
+  });
+
+  it("does not pass literal think tags through normal preview body while preserving real thinking block", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-literal-think-preview" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "真实思考", isReasoning: true }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(3000);
+    await handle.deliver(
+      { text: "正文示例 `<think>不要折叠</think>`", isReasoning: false },
+      { kind: "block" },
+    );
+
+    const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(previewText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n真实思考</think>`);
+    expect(previewText).toContain("`&lt;think&gt;不要折叠&lt;/think&gt;`");
+    expect(previewText.match(/<think>/g)).toHaveLength(1);
+    expect(previewText.match(/<\/think>/g)).toHaveLength(1);
+  });
+
   it("keeps the think block when body preview updates later", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

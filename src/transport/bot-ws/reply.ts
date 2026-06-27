@@ -38,6 +38,7 @@ const FINAL_COMPLETION_MARKER = "（已完成）";
 const THINKING_DEBUG_THINK_MARKER = "[t]";
 const THINKING_DEBUG_AFTER_THINK_MARKER = "[/t]";
 const THINKING_DEBUG_BODY_MARKER = "[b]";
+const THINK_TAG_RE = /<\/?think>/gi;
 const B3_SUPERSEDED_NOTICE_TEXT = "已收到新消息，合并思考。✅";
 const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
 
@@ -398,6 +399,12 @@ function appendFinalCompletionMarker(text: string): string {
   return `${trimmed}\n\n${FINAL_COMPLETION_MARKER}`;
 }
 
+function escapeLiteralThinkTags(text: string): string {
+  return text.replace(THINK_TAG_RE, (tag) =>
+    tag.startsWith("</") ? "&lt;/think&gt;" : "&lt;think&gt;",
+  );
+}
+
 function isLikelyLongFinalText(text: string): boolean {
   return text.length > WECOM_STREAM_MAX_CHARS || Buffer.byteLength(text, "utf8") > WECOM_STREAM_MAX_BYTES;
 }
@@ -472,10 +479,11 @@ function resolveThinkingAwareBodyLimits(thinkingText: string): {
 
 function composeStreamTextWithThinking(params: { thinkingBlock: string; bodyText: string }): string {
   const thinkingBlock = params.thinkingBlock;
+  const safeBodyText = escapeLiteralThinkTags(params.bodyText);
   if (!thinkingBlock) {
-    return params.bodyText;
+    return safeBodyText;
   }
-  const bodyText = addDebugMarker(params.bodyText, THINKING_DEBUG_BODY_MARKER);
+  const bodyText = addDebugMarker(safeBodyText, THINKING_DEBUG_BODY_MARKER);
   const closeMarker = THINKING_DEBUG_AFTER_THINK_MARKER;
   return bodyText ? `${thinkingBlock}\n${closeMarker}\n${bodyText}` : `${thinkingBlock}\n${closeMarker}`;
 }
@@ -679,7 +687,7 @@ export function createBotWsReplyHandle(params: {
     textToSend: string,
     options: { reason: "superseded-final" | "stream-fallback" },
   ): Promise<void> => {
-    const markdownChunks = chunkWeComMarkdownV2(textToSend);
+    const markdownChunks = chunkWeComMarkdownV2(textToSend).map(escapeLiteralThinkTags);
     const pushHandle = getBotWsPushHandle(params.accountId);
     if (pushHandle?.isConnected?.()) {
       for (let i = 0; i < markdownChunks.length; i += 1) {
@@ -733,7 +741,7 @@ export function createBotWsReplyHandle(params: {
       finalText,
       thinkingLimits.maxChars,
       thinkingLimits.maxBytes,
-    );
+    ).map(escapeLiteralThinkTags);
     const finalStreamId = resolveStreamId();
     const fallbackText = appendFinalCompletionMarker(resolveStreamFallbackText(finalText));
     const firstStreamChunk = composeStreamTextWithThinking({

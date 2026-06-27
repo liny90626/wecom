@@ -1,4 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import plugin from "./index.js";
 
@@ -34,5 +36,16 @@ describe("wecom plugin register", () => {
         match: "prefix",
       }),
     );
+  });
+
+  it("declares registered tools in the plugin manifest contracts", () => {
+    const manifestPath = path.resolve(process.cwd(), "openclaw.plugin.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+
+    expect(manifest.contracts?.tools).toEqual([
+      "wecom_doc",
+      "wecom_calendar",
+      "wecom_mcp",
+    ]);
   });
 });

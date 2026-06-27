@@ -195,6 +195,10 @@ npx vitest run
 
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 v2.5.110-115（2026-06-27，LinKy fork 维护版）
+- **[Manifest 修复] 声明运行时注册工具 contracts.tools** 🧩 `openclaw.plugin.json` 顶层补充 `contracts.tools`，覆盖 `wecom_doc`、`wecom_calendar`、`wecom_mcp`，适配新版 OpenClaw 插件诊断规范。
+- **[诊断清理] 消除 registerTool 未声明告警** 🧪 新增 manifest 回归测试，避免后续打包时运行时工具注册和 manifest 声明再次脱节。完整说明见 [`changelog/v2.5.110-115.md`](./changelog/v2.5.110-115.md)。
+
 #### 📌 v2.5.110-114（2026-06-27，LinKy fork 维护版）
 - **[长文本分段] 预览阶段不再显示伪分段标签** 📚 block/preview 只展示当前可见预览，不再出现 `【第1/n段】` 但后续段迟迟不来的体验错位；真正分段只在 final 正文完整到达后触发。
 - **[思考块兼容] thinking 不再挤占正文字符预算** 💭 思考块只按字节给 WeCom stream 留安全余量，正文预览保留正常字符长度，避免思考块较长时正文首段过短。
@@ -212,10 +216,6 @@ npx vitest run
 #### 📌 v2.5.110-111（2026-06-27，LinKy fork 维护版）
 - **[Reasoning 预览] 默认开启 Bot WS 思考块实验** 💭 接入 OpenClaw `onReasoningStream` / `onReasoningEnd`，在进度流中尝试用企业微信客户端可识别的 `<think>...</think>` 结构承载思考过程。
 - **[正文隔离] final 正文保持普通正文路径** 🧩 思考内容只进入进度流预览，主动推送、长文本余段和最终正文不携带思考块，降低思考块与正文互相污染风险。
-
-#### 📌 v2.5.110-110（2026-06-27，LinKy fork 维护版）
-- **[B3 长任务兜底] stream 过期后主动推送最终结果** ⏳ 当企业微信原 stream 窗口过期、ack timeout 或 req_id 失效时，最终结果走主动推送兜底，减少“后台已完成但企微没收到”的情况。
-- **[预览冻结] 长任务预览停止刷大段正文** 📌 默认 `5 分钟 / 3,000 字` 后冻结正文，只更新状态行，降低长任务期间重复刷新和重复正文风险。
 
 > B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
 

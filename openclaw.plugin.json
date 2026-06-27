@@ -1,6 +1,9 @@
 {
   "id": "wecom",
   "channels": ["wecom"],
+  "contracts": {
+    "tools": ["wecom_doc", "wecom_calendar", "wecom_mcp"]
+  },
   "channelConfigs": {
     "wecom": {
       "label": "WeCom (企业微信)",
@@ -22,4 +25,3 @@
     "properties": {}
   }
 }
-

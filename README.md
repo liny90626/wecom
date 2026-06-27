@@ -191,10 +191,9 @@ npx vitest run
 
 ---
 
-## 📋 最近更新 (Changelog摘要)
+## 📋 本 fork 最近更新
 
-> 项目保持高频迭代，全面对齐甚至超越企业真实业务诉求。
-> **为保持精简，以下仅展示近期 5 次重要更新，完整历史版本（含全部 `v2.2.x`）请前往 [changelog/ 目录](./changelog/) 查阅。**
+> 以下只展示本 fork 相较于原仓库的维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
 #### 📌 v2.5.110-113（2026-06-27，LinKy fork 维护版）
 - **[Reasoning 修复] 多段思考流不再混入正文** 💭 当 OpenClaw 把后续 `<think>...</think>` 片段混在普通 block/final 文本中送达时，插件会先抽取思考段并合并到思考块，只让标签外内容进入正文。
@@ -208,22 +207,7 @@ npx vitest run
 - **[实验] Reasoning 思考块预览** 💭 Bot WS 默认接入 OpenClaw reasoning stream，并在进度流里尝试使用企业微信客户端可识别的 `<think>...</think>` 结构展示思考块；最终正文仍走普通正文路径，避免思考内容污染答复。
 - **[维护] Fork 署名和验证链路补齐** 🧪 README、changelog 和验证文档补充 LinKy fork 维护说明、当前修复范围和回归命令。完整说明见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)。
 
-#### 📌 v2.5.11（2026-05-11）
-- **[关键修复] npm 包补齐 `dist/` 编译产物** 📦 修复发布包缺少 `dist/index.js` 时被 OpenClaw 校验器拒绝安装，并导致插件被自动禁用的问题。
-- **[发布保护] `prepack` 增加构建和产物检查** 🔒 打包前会执行 `npm run build && npm run verify-dist`，避免缺失运行时代码的包再次发布。
-- **[清单元信息] 补齐 `channelConfigs.wecom`** 🧭 消除新版 OpenClaw 对渠道配置元信息的诊断告警。
-
-#### 📌 v2.4.16（2026-04-16）
-- **[版本对齐] changelog 补齐到当时包版本** 🧾 `README` 摘要和 `changelog/` 目录直接对应当时 `package.json` 里的 `v2.4.16`。
-- **[展示修正] 最新版本入口切换到 `v2.4.16`** 🔖 减少发布说明和安装版本不一致的困惑。
-- **[维护优化] 变更追踪更直接** 📚 后续补充 `v2.4.16` 详细更新内容时可直接落在 `changelog/v2.4.16.md`。
-
-#### 📌 v2.3.27（2026-03-27）
-- **[重要修复] `channel add` 重新支持 WeCom guided setup** 🧭 之前有些环境下，`wecom` 虽然已经安装，却仍会在 OpenClaw 里显示成 “does not support guided setup yet”，导致无法直接通过交互式向导添加。现在插件已经对齐 OpenClaw 当前的 `setupWizard` 接口，`openclaw channels add` 会重新正常识别和进入配置流程。
-- **[重要修复] 修复 `installedCatalogById is not defined`** 🔧 部分用户在渠道添加或选择阶段会直接遇到 `ReferenceError: installedCatalogById is not defined`，表现上像是“选了渠道就报错”或“添加流程突然失效”。这一版已经修复对应的目录访问逻辑，添加流程恢复稳定。
-- **[升级兼容] 清理 OpenClaw 新版下失效的 SDK 旧入口** 📦 这次同步迁移了 `wecom` 插件里几处已经不再建议继续从 `openclaw/plugin-sdk` 根入口直接拿的旧接口，重点覆盖工具上下文、outbound 适配器和 Bot WS 媒体发送链路，升级 OpenClaw 后更不容易再出现“有的地方能跑、有的地方直接炸”的兼容问题。
-
-*(查看更早期关于“超时熔断代投、动态扩容矩阵”等功能的更新日志，请移步 [changelog/ 目录](./changelog/))*
+*(查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。)*
 
 ---
 

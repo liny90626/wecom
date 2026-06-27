@@ -12,6 +12,8 @@ vi.mock("./media.js", () => ({
 
 type ReplyHandleParams = Parameters<typeof createBotWsReplyHandle>[0];
 const FINAL_COMPLETION_MARKER = "✅ 已处理完成";
+const THINKING_DEBUG_THINK_MARKER = "〔t〕";
+const THINKING_DEBUG_BODY_MARKER = "〔b〕";
 
 describe("createBotWsReplyHandle", () => {
   let mockClient: import("vitest").Mocked<WSClient>;
@@ -220,12 +222,13 @@ describe("createBotWsReplyHandle", () => {
       1,
       expect.objectContaining({ headers: { req_id: "req-thinking-block" } }),
       expect.any(String),
-      "<think>先分析需求</think>",
+      `<think>${THINKING_DEBUG_THINK_MARKER}\n先分析需求</think>`,
       false,
     );
 
     const finalText = String(mockClient.replyStream.mock.calls[1]?.[2] ?? "");
-    expect(finalText).toContain("<think>先分析需求\n再核对约束</think>");
+    expect(finalText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n先分析需求\n再核对约束</think>`);
+    expect(finalText).toContain(THINKING_DEBUG_BODY_MARKER);
     expect(finalText).toContain("最终正文");
     expect(finalText.replace(/<think>[\s\S]*?<\/think>/g, "")).not.toContain("先分析需求");
   });
@@ -273,7 +276,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "最终正文", isReasoning: false }, { kind: "final" });
 
     const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(finalText).toContain("<think>先内部alert(1)结束</think>");
+    expect(finalText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n先内部alert(1)结束</think>`);
     expect(finalText).not.toContain("<script>");
     expect(finalText.match(/<think>/g)).toHaveLength(1);
     expect(finalText.match(/<\/think>/g)).toHaveLength(1);
@@ -296,7 +299,8 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "正文预览", isReasoning: false }, { kind: "block" });
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(previewText).toContain("<think>先拆解问题</think>");
+    expect(previewText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n先拆解问题</think>`);
+    expect(previewText).toContain(THINKING_DEBUG_BODY_MARKER);
     expect(previewText).toContain("正文预览");
   });
 
@@ -317,7 +321,8 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "后续思考", isReasoning: true }, { kind: "block" });
 
     const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(previewText).toContain("<think>后续思考</think>");
+    expect(previewText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n后续思考</think>`);
+    expect(previewText).toContain(THINKING_DEBUG_BODY_MARKER);
     expect(previewText).toContain("正文预览");
   });
 
@@ -346,7 +351,8 @@ describe("createBotWsReplyHandle", () => {
     const pushedText = mockClient.sendMessage.mock.calls
       .map((call) => String((call[1] as any).markdown.content))
       .join("\n");
-    expect(firstChunk).toContain("<think>这是思考过程</think>");
+    expect(firstChunk).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n这是思考过程</think>`);
+    expect(firstChunk).toContain(THINKING_DEBUG_BODY_MARKER);
     expect(firstChunk).toContain("第1/");
     expect(pushedText).toContain("END-THINK-B2");
     expect(pushedText).not.toContain("<think>");
@@ -369,7 +375,8 @@ describe("createBotWsReplyHandle", () => {
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
     const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(finalText).toContain("<think>只有思考过程</think>");
+    expect(finalText).toContain(`<think>${THINKING_DEBUG_THINK_MARKER}\n只有思考过程</think>`);
+    expect(finalText).toContain(THINKING_DEBUG_BODY_MARKER);
     expect(finalText).toContain(FINAL_COMPLETION_MARKER);
     expect(mockClient.replyStream.mock.calls.at(-1)?.[3]).toBe(true);
   });
@@ -543,6 +550,7 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("最终正文");
     expect(pushed).toContain(FINAL_COMPLETION_MARKER);
     expect(pushed).not.toContain("<think>");
+    expect(pushed).not.toContain(THINKING_DEBUG_BODY_MARKER);
   });
 
   it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {

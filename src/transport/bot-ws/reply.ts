@@ -35,6 +35,8 @@ const LONG_FINAL_DEDUP_MIN_BLOCK_CHARS = 500;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const LONG_FINAL_DEDUP_MAX_REMOVALS = 3;
 const FINAL_COMPLETION_MARKER = "✅ 已处理完成";
+const THINKING_DEBUG_THINK_MARKER = "〔t〕";
+const THINKING_DEBUG_BODY_MARKER = "〔b〕";
 const B3_SUPERSEDED_NOTICE_TEXT = "已收到新消息，合并思考。✅";
 const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
 
@@ -416,9 +418,19 @@ function trimToUtf8Bytes(value: string, maxBytes: number): string {
   return out;
 }
 
+function addDebugMarker(text: string, marker: string): string {
+  if (!text) {
+    return "";
+  }
+  return text.startsWith(marker) ? text : `${marker}\n${text}`;
+}
+
 function renderThinkBlock(text: string): string {
   const escaped = trimToUtf8Bytes(
-    escapeThinkBlockText(text).slice(0, THINKING_BLOCK_MAX_CHARS),
+    addDebugMarker(
+      escapeThinkBlockText(text).slice(0, THINKING_BLOCK_MAX_CHARS),
+      THINKING_DEBUG_THINK_MARKER,
+    ),
     THINKING_BLOCK_MAX_BYTES,
   ).trim();
   return escaped ? `<think>${escaped}</think>` : "";
@@ -446,7 +458,8 @@ function composeStreamTextWithThinking(params: { thinkingBlock: string; bodyText
   if (!thinkingBlock) {
     return params.bodyText;
   }
-  return params.bodyText ? `${thinkingBlock}\n${params.bodyText}` : thinkingBlock;
+  const bodyText = addDebugMarker(params.bodyText, THINKING_DEBUG_BODY_MARKER);
+  return bodyText ? `${thinkingBlock}\n${bodyText}` : thinkingBlock;
 }
 
 // Global registry to track active keepalives by peerId

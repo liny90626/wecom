@@ -698,8 +698,10 @@ export function createBotWsReplyHandle(params: {
       await params.client.replyStream(params.frame, resolveStreamId(), previewText, false);
     } catch (error) {
       if (isTerminalReplyError(error)) {
+        console.warn(
+          `[wecom-preview] terminal-update-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+        );
         settleStream();
-        params.onFail?.(error);
         return false;
       }
       console.warn(
@@ -812,7 +814,7 @@ export function createBotWsReplyHandle(params: {
   };
 
   const deliverBlockPreview = async (text: string): Promise<void> => {
-    if (isEvent || supersededByNewInbound || !text) {
+    if (streamSettled || isEvent || supersededByNewInbound || !text) {
       return;
     }
     const now = Date.now();

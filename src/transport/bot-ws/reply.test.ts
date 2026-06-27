@@ -729,6 +729,43 @@ describe("createBotWsReplyHandle", () => {
     expect(onFail).not.toHaveBeenCalled();
   });
 
+  it("keeps long tasks alive when frozen status updates expire before final delivery", async () => {
+    const expiredError = {
+      headers: { req_id: "req-long-task-status-expired" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    const onFail = vi.fn();
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-long-task-status-expired" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      onFail,
+    });
+
+    await handle.deliver({ text: "正在执行压测", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(300_000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+    await handle.deliver({ text: "压测结果完成", isReasoning: false }, { kind: "final" });
+
+    expect(onFail).not.toHaveBeenCalled();
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("继续输出：");
+    expect(pushed).toContain("压测结果完成");
+  });
+
   it("pushes only the continuation when a frozen preview stream has expired", async () => {
     const expiredError = {
       headers: { req_id: "req-expired-after-preview" },

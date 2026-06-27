@@ -1055,7 +1055,7 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("预览内容390。");
   });
 
-  it("pushes only the continuation when a frozen preview is later superseded", async () => {
+  it("skips the old final push when a visible frozen preview is later superseded", async () => {
     const prefix = Array.from({ length: 420 }, (_, index) =>
       `预览内容${String(index).padStart(3, "0")}。`,
     ).join("");
@@ -1082,11 +1082,39 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: final, isReasoning: false }, { kind: "final" });
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
-    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
-    expect(pushed).toContain("继续输出：");
-    expect(pushed).toContain("后续最终内容");
-    expect(pushed).not.toContain("预览内容000。");
-    expect(pushed).toContain("预览内容390。");
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not actively push a superseded old final after visible text was streaming", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-superseded-after-visible-text" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "旧回复正在逐步输出", isReasoning: false }, { kind: "block" });
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+    await handle.deliver({ text: "旧回复最终答案", isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-superseded-after-visible-text" } }),
+      expect.any(String),
+      "旧回复正在逐步输出",
+      false,
+    );
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
   });
 
   it("reports failure without marking delivery when stream and active push both fail", async () => {

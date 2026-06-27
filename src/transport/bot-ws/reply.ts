@@ -611,6 +611,7 @@ export function createBotWsReplyHandle(params: {
   let finalDelivered = false;
   let finalDeliveryKey = "";
   let supersededByNewInbound = false;
+  let suppressSupersededFinalPush = false;
   let supersededNoticeSent = false;
   let supersededAt: number | undefined;
   let visibleReplyStarted = false;
@@ -1058,6 +1059,14 @@ export function createBotWsReplyHandle(params: {
         return;
       }
 
+      if (info.kind === "final" && supersededByNewInbound && suppressSupersededFinalPush) {
+        settleStream();
+        console.info(
+          `[wecom-b3] superseded-final-skip-visible account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} supersededAt=${supersededAt ?? 0}`,
+        );
+        return;
+      }
+
       const outboundText =
         info.kind === "final"
           ? mergeReplyText(accumulatedText, text)
@@ -1248,6 +1257,7 @@ export function createBotWsReplyHandle(params: {
         return;
       }
       supersededByNewInbound = true;
+      suppressSupersededFinalPush = visibleReplyStarted;
       supersededAt = Date.now();
       stopPlaceholderKeepalive();
       stopPreviewFreezeTimeout();

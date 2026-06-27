@@ -49,6 +49,8 @@ function status() {
     reply.includes("supersedeByNewInbound: (meta)") &&
     reply.includes("normalizePeerKey(meta.peerId) !== peerKeyId") &&
     reply.includes("visibleReplyStarted") &&
+    reply.includes("suppressSupersededFinalPush") &&
+    reply.includes("superseded-final-skip-visible") &&
     reply.includes("if (isEvent || supersededNoticeSent || visibleReplyStarted || streamSettled) return;") &&
     reply.includes("stream-final-terminal-fallback") &&
     reply.includes("resolveStreamFallbackText(finalText)") &&
@@ -69,6 +71,8 @@ function status() {
     tests.includes("does not overwrite an already visible old stream with a superseded notice") &&
     tests.includes("actively pushes the final reply when the original stream window has expired") &&
     tests.includes("pushes only the continuation when a frozen preview stream has expired") &&
+    tests.includes("does not actively push a superseded old final after visible text was streaming") &&
+    tests.includes("skips the old final push when a visible frozen preview is later superseded") &&
     tests.includes("deduplicates repeated large blocks in long final text") &&
     tests.includes("deduplicates repeated structured tails that restart from the same report heading") &&
     tests.includes("reports failure without marking delivery when stream and active push both fail") &&

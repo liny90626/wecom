@@ -37,6 +37,8 @@ const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const LONG_FINAL_DEDUP_MAX_REMOVALS = 3;
 const FINAL_COMPLETION_MARKER = "（已完成）";
 const THINK_TAG_RE = /<\/?think>/gi;
+const OPEN_THINK_TAG_RE = /<think>/gi;
+const CLOSE_THINK_TAG_RE = /<\/think>/gi;
 const B3_SUPERSEDED_NOTICE_TEXT = "已收到新消息，合并思考。✅";
 const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
 
@@ -419,6 +421,89 @@ function escapeLiteralThinkTags(text: string): string {
   return text.replace(THINK_TAG_RE, (tag) =>
     tag.startsWith("</") ? "&lt;/think&gt;" : "&lt;think&gt;",
   );
+}
+
+function collectMarkdownCodeRanges(text: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  const fenceRe = /(^|\n)(`{3,}|~{3,})[^\n]*(?:\n[\s\S]*?(?:\n\2(?=\n|$)|$)|$)/g;
+  for (const match of text.matchAll(fenceRe)) {
+    ranges.push({ start: match.index ?? 0, end: (match.index ?? 0) + match[0].length });
+  }
+  const inlineCodeRe = /`[^`\n]*`/g;
+  for (const match of text.matchAll(inlineCodeRe)) {
+    const start = match.index ?? 0;
+    if (!isInsideProtectedRange(start, ranges)) {
+      ranges.push({ start, end: start + match[0].length });
+    }
+  }
+  return ranges.sort((a, b) => a.start - b.start);
+}
+
+function isInsideProtectedRange(index: number, ranges: Array<{ start: number; end: number }>): boolean {
+  return ranges.some((range) => index >= range.start && index < range.end);
+}
+
+function findThinkTagOutsideCode(params: {
+  text: string;
+  tagRe: RegExp;
+  from: number;
+  protectedRanges: Array<{ start: number; end: number }>;
+}): { start: number; end: number } | undefined {
+  const tagRe = new RegExp(params.tagRe.source, params.tagRe.flags);
+  tagRe.lastIndex = params.from;
+  let match: RegExpExecArray | null;
+  while ((match = tagRe.exec(params.text))) {
+    if (!isInsideProtectedRange(match.index, params.protectedRanges)) {
+      return { start: match.index, end: match.index + match[0].length };
+    }
+  }
+  return undefined;
+}
+
+function extractInlineThinkBlocks(text: string): { bodyText: string; thinkingText: string } {
+  if (!THINK_TAG_RE.test(text)) {
+    return { bodyText: text, thinkingText: "" };
+  }
+  THINK_TAG_RE.lastIndex = 0;
+  const protectedRanges = collectMarkdownCodeRanges(text);
+  const bodyParts: string[] = [];
+  const thinkingParts: string[] = [];
+  let cursor = 0;
+  let searchFrom = 0;
+
+  while (searchFrom < text.length) {
+    const openTag = findThinkTagOutsideCode({
+      text,
+      tagRe: OPEN_THINK_TAG_RE,
+      from: searchFrom,
+      protectedRanges,
+    });
+    if (!openTag) {
+      break;
+    }
+    const closeTag = findThinkTagOutsideCode({
+      text,
+      tagRe: CLOSE_THINK_TAG_RE,
+      from: openTag.end,
+      protectedRanges,
+    });
+    if (!closeTag) {
+      break;
+    }
+    bodyParts.push(text.slice(cursor, openTag.start));
+    const thinkingText = text.slice(openTag.end, closeTag.start).trim();
+    if (thinkingText) {
+      thinkingParts.push(thinkingText);
+    }
+    cursor = closeTag.end;
+    searchFrom = closeTag.end;
+  }
+
+  bodyParts.push(text.slice(cursor));
+  return {
+    bodyText: bodyParts.join("").trim(),
+    thinkingText: thinkingParts.join("\n\n").trim(),
+  };
 }
 
 function isLikelyLongFinalText(text: string): boolean {
@@ -967,6 +1052,19 @@ export function createBotWsReplyHandle(params: {
     return now - lastPreviewUpdateAt >= THINKING_PREVIEW_MIN_UPDATE_MS;
   };
 
+  const sendThinkingSnapshot = async (params?: { force?: boolean }): Promise<void> => {
+    if (isEvent || supersededByNewInbound || streamSettled || !accumulatedThinkingText) {
+      return;
+    }
+    const now = Date.now();
+    const bodyPreviewText = accumulatedText ? renderPreviewText(accumulatedText, now) : "";
+    const previewText = renderPreviewStreamText(bodyPreviewText);
+    if (!params?.force && !shouldSendThinkingPreview(previewText, now)) {
+      return;
+    }
+    await sendPreviewUpdate(previewText, now);
+  };
+
   const deliverBlockPreview = async (text: string): Promise<void> => {
     if (streamSettled || isEvent || supersededByNewInbound || !text) {
       return;
@@ -1058,17 +1156,19 @@ export function createBotWsReplyHandle(params: {
           return;
         }
         accumulatedThinkingText = mergeReplyText(accumulatedThinkingText, thinkingText);
-        const now = Date.now();
-        const bodyPreviewText = accumulatedText ? renderPreviewText(accumulatedText, now) : "";
-        const previewText = renderPreviewStreamText(bodyPreviewText);
-        if (!shouldSendThinkingPreview(previewText, now)) {
-          return;
-        }
-        await sendPreviewUpdate(previewText, now);
+        await sendThinkingSnapshot();
         return;
       }
 
-      const text = payload.text?.trim() || "";
+      const rawText = payload.text?.trim() || "";
+      const extracted = extractInlineThinkBlocks(rawText);
+      if (extracted.thinkingText && !isEvent && !supersededByNewInbound && !streamSettled) {
+        accumulatedThinkingText = mergeReplyText(accumulatedThinkingText, extracted.thinkingText);
+        if (info.kind === "final") {
+          await sendThinkingSnapshot({ force: true });
+        }
+      }
+      const text = extracted.bodyText;
       const incomingMediaUrls = payload.mediaUrls || (payload.mediaUrl ? [payload.mediaUrl] : []);
       const hasIncomingMedia = incomingMediaUrls.length > 0;
       if (info.kind !== "final" && hasIncomingMedia) {

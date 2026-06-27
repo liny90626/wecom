@@ -383,6 +383,84 @@ describe("createBotWsReplyHandle", () => {
     expect(previewText).toContain("正文预览");
   });
 
+  it("extracts later inline think blocks from ordinary block text", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-inline-think-block" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "第一段正文", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(3000);
+    await handle.deliver(
+      { text: "<think>第二轮思考</think>\n第二段正文", isReasoning: false },
+      { kind: "block" },
+    );
+
+    const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(previewText).toContain("<think>第二轮思考</think>");
+    expect(previewText).toContain("第一段正文");
+    expect(previewText).toContain("第二段正文");
+    expect(previewText).not.toContain("&lt;think&gt;第二轮思考");
+    expect(previewText.match(/<think>/g)).toHaveLength(1);
+    expect(previewText.match(/<\/think>/g)).toHaveLength(1);
+  });
+
+  it("extracts inline think blocks from final text without leaking them into final body", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-inline-think-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "正文预览", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(3000);
+    await handle.deliver(
+      { text: "<think>最终前思考</think>\n最终正文", isReasoning: false },
+      { kind: "final" },
+    );
+
+    const progressText = String(mockClient.replyStream.mock.calls.at(-2)?.[2] ?? "");
+    const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(progressText).toContain("<think>最终前思考</think>");
+    expect(finalText).toContain("正文预览");
+    expect(finalText).toContain("最终正文");
+    expect(finalText).not.toContain("<think>");
+    expect(finalText).not.toContain("最终前思考");
+  });
+
+  it("keeps literal think tags inside code as normal body text", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-inline-think-code" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: "正文示例 `<think>不要折叠</think>`", isReasoning: false },
+      { kind: "block" },
+    );
+
+    const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(previewText).toContain("`&lt;think&gt;不要折叠&lt;/think&gt;`");
+    expect(previewText).not.toContain("<think>不要折叠</think>");
+  });
+
   it("puts the think block only on the first long final chunk", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

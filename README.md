@@ -196,6 +196,11 @@ npx vitest run
 > 项目保持高频迭代，全面对齐甚至超越企业真实业务诉求。
 > **为保持精简，以下仅展示近期 5 次重要更新，完整历史版本（含全部 `v2.2.x`）请前往 [changelog/ 目录](./changelog/) 查阅。**
 
+#### 📌 v2.5.110-113（2026-06-27，LinKy fork 维护版）
+- **[Reasoning 修复] 多段思考流不再混入正文** 💭 当 OpenClaw 把后续 `<think>...</think>` 片段混在普通 block/final 文本中送达时，插件会先抽取思考段并合并到思考块，只让标签外内容进入正文。
+- **[正文保护] 代码里的 `<think>` 示例不会被误折叠** 🧩 行内代码和 fenced code block 中的字面量 `<think>` 仍按普通正文转义展示，避免文档、示例或调试文本被误判为思考块。
+- **[回归补强] 新增 inline think block 场景测试** 🧪 覆盖普通 block、final 和代码文本三种路径，保护 B1/B2/B3 既有行为不被 reasoning 修复污染。完整说明见 [`changelog/v2.5.110-113.md`](./changelog/v2.5.110-113.md)。
+
 #### 📌 v2.5.110-112（2026-06-27，LinKy fork 维护版）
 - **[B1] Markdown 表格渲染修复** 🧾 企业微信侧 Markdown 表格恢复为结构化展示，避免表格退化成普通文本；该能力已纳入静态自检脚本保护。
 - **[B2] 长文本分段与去重** 📚 Bot WS 最终正文超过企业微信流式气泡限制时，会关闭首段 stream 气泡，再通过主动推送发送后续分段；同时对流式预览和 final 正文之间的重复片段做去重，降低长文本重复和截断风险。
@@ -217,12 +222,6 @@ npx vitest run
 - **[重要修复] `channel add` 重新支持 WeCom guided setup** 🧭 之前有些环境下，`wecom` 虽然已经安装，却仍会在 OpenClaw 里显示成 “does not support guided setup yet”，导致无法直接通过交互式向导添加。现在插件已经对齐 OpenClaw 当前的 `setupWizard` 接口，`openclaw channels add` 会重新正常识别和进入配置流程。
 - **[重要修复] 修复 `installedCatalogById is not defined`** 🔧 部分用户在渠道添加或选择阶段会直接遇到 `ReferenceError: installedCatalogById is not defined`，表现上像是“选了渠道就报错”或“添加流程突然失效”。这一版已经修复对应的目录访问逻辑，添加流程恢复稳定。
 - **[升级兼容] 清理 OpenClaw 新版下失效的 SDK 旧入口** 📦 这次同步迁移了 `wecom` 插件里几处已经不再建议继续从 `openclaw/plugin-sdk` 根入口直接拿的旧接口，重点覆盖工具上下文、outbound 适配器和 Bot WS 媒体发送链路，升级 OpenClaw 后更不容易再出现“有的地方能跑、有的地方直接炸”的兼容问题。
-
-#### 📌 v2.3.26（2026-03-26）
-- **[重要修复] 升级 OpenClaw 后不再乱报错** 🔧 修复了新版 OpenClaw 下 `wecom` 插件容易出现的 `is not a function` 一类启动/运行错误。
-- **[回复更稳] Agent 和 Bot WS 不再乱串** ↔️ 现在是谁收到消息，就尽量由谁来回复，不再容易出现“在 Agent 里说话，结果 Bot WS 回你”的情况。
-- **[体验修复] Bot WS 发图后不再多冒一条 `Done...`** 🖼 之前常见表现是：`正在思考` -> 图片 -> 又多一条完成提示。现在最终收尾会尽量接回原来的回复链路。
-- **[占位符修复] 不会一直卡在“正在思考...”** ⏳ 如果图片或文本已经发出去了，占位符会更自然地结束，不会继续无意义地刷屏。
 
 *(查看更早期关于“超时熔断代投、动态扩容矩阵”等功能的更新日志，请移步 [changelog/ 目录](./changelog/))*
 

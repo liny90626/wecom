@@ -4,11 +4,11 @@
 
 ## 本 fork 最近 5 个维护版本
 
+- [`v2.5.110-114`](./v2.5.110-114.md)：修复 thinking 预览与长文本分段叠加时的伪分段、正文首段过短和完成标记位置问题。
 - [`v2.5.110-113`](./v2.5.110-113.md)：修复多段 OpenClaw reasoning/正文交错时，后续 `<think>...</think>` 混入正文的问题；同时保护代码示例里的字面量 think 标签。
 - [`v2.5.110-112`](./v2.5.110-112.md)：修复带思考块的普通长度回复在 final 阶段重复整段正文的问题，并补齐 fork 维护版 changelog 与 README 说明。
 - `v2.5.110-111`：移除思考块调试标记，保留默认开启的 reasoning preview 能力，降低正式回复中的调试噪声。
 - `v2.5.110-110`：默认开启 Bot WS reasoning preview，接入 OpenClaw `onReasoningStream` / `onReasoningEnd`，让思考内容优先进入 progress stream。
-- `v2.5.110-109`：轮转 progress think 调试探针，用于验证企业微信客户端对 `<think>...</think>` 在中间态 stream 中的渲染边界。
 
 > B1 Markdown 表格、B2 长文本分段/去重、B3 长任务与新消息合并等较早 fork 修复，已统一归档在 [`v2.5.110-112`](./v2.5.110-112.md)。
 

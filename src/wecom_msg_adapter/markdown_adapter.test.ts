@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { chunkWeComMarkdownV2, toWeComMarkdownV2 } from "./markdown_adapter.js";
+import {
+  chunkWeComMarkdownV2,
+  previewWeComMarkdownV2,
+  toWeComMarkdownV2,
+} from "./markdown_adapter.js";
 
 describe("toWeComMarkdownV2", () => {
   it("keeps markdown table grammar intact", () => {
@@ -58,5 +62,25 @@ describe("toWeComMarkdownV2", () => {
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.join("\n")).toContain("|---|---|");
     expect(chunks.join("\n")).toContain("| 表格 | 保留 |");
+  });
+
+  it("uses compact chunk markers and preserves all chunk text", () => {
+    const input = "长文本。".repeat(260);
+    const formatted = toWeComMarkdownV2(input, null);
+    const chunks = chunkWeComMarkdownV2(input, 120, 480);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks[0]).toContain("【第1/");
+    expect(chunks.join("\n")).not.toContain("消息过长");
+    const restored = chunks.join("").replace(/\n\n【第\d+\/\d+段】/g, "");
+    expect(restored).toBe(formatted);
+  });
+
+  it("keeps preview text free of chunk markers", () => {
+    const preview = previewWeComMarkdownV2("预览内容。".repeat(260), 120, 480);
+
+    expect(preview).toContain("预览内容。");
+    expect(preview).not.toContain("【第");
+    expect(preview).not.toContain("消息过长");
   });
 });

@@ -41,16 +41,28 @@ export function chunkWeComMarkdownV2(
   maxBytes = 12000,
 ): string[] {
   const formatted = toWeComMarkdownV2(markdown, null);
-  const rawChunks = splitLongMarkdownCoreV2(formatted, maxChars, maxBytes);
+  const firstPassChunks = splitLongMarkdownCoreV2(formatted, maxChars, maxBytes);
+  if (firstPassChunks.length <= 1) return firstPassChunks;
+
+  let totalGuess = firstPassChunks.length;
+  let rawChunks = firstPassChunks;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const suffix = `\n\n${segmentMarkerV2(totalGuess, totalGuess)}`;
+    rawChunks = splitLongMarkdownCoreV2(
+      formatted,
+      Math.max(100, maxChars - suffix.length),
+      Math.max(256, maxBytes - utf8ByteLengthV2(suffix)),
+    );
+    if (String(rawChunks.length).length === String(totalGuess).length) {
+      break;
+    }
+    totalGuess = rawChunks.length;
+  }
   if (rawChunks.length <= 1) return rawChunks;
 
   const total = rawChunks.length;
   return rawChunks.map((chunk, index) => {
-    const suffix = `\n\n【消息过长，分段发送：第${index + 1}/${total}段】`;
-    const allowedChars = Math.max(100, maxChars - suffix.length);
-    const allowedBytes = Math.max(256, maxBytes - utf8ByteLengthV2(suffix));
-    const body = splitLongMarkdownCoreV2(chunk, allowedChars, allowedBytes)[0] ?? "";
-    return `${body}${suffix}`;
+    return `${chunk}\n\n${segmentMarkerV2(index + 1, total)}`;
   });
 }
 
@@ -59,7 +71,12 @@ export function previewWeComMarkdownV2(
   maxChars = 3500,
   maxBytes = 12000,
 ): string {
-  return chunkWeComMarkdownV2(markdown, maxChars, maxBytes)[0] ?? "";
+  const formatted = toWeComMarkdownV2(markdown, null);
+  return splitLongMarkdownCoreV2(formatted, maxChars, maxBytes)[0] ?? "";
+}
+
+function segmentMarkerV2(index: number, total: number | string): string {
+  return `【第${index}/${total}段】`;
 }
 
 function utf8ByteLengthV2(value: unknown): number {

@@ -54,15 +54,17 @@ function status() {
     reply.includes("if (isEvent || supersededNoticeSent || visibleReplyStarted || streamSettled) return;") &&
     reply.includes("stream-final-terminal-fallback") &&
     reply.includes("resolveStreamFallbackText(finalText)") &&
-    reply.includes("await sendMarkdownChunksViaActivePush(fallbackText, { reason: \"stream-fallback\" })") &&
+    reply.includes("await sendMarkdownChunksViaActivePush(fallbackText, {") &&
+    reply.includes("reason: \"stream-fallback\"") &&
+    reply.includes("appendCompletionMarker: true") &&
     reply.includes("dedupeLongFinalText(finalText, { previewFrozen })") &&
     reply.includes("rollbackFinalDelivered(currentFinalDeliveryKey") &&
     reply.includes("markFinalDelivered(currentFinalDeliveryKey, { peerDedup: currentFinalUsesPeerDedup })") &&
     reply.includes("closeSupersededPlaceholder") &&
     reply.includes("sendMarkdownChunksViaActivePush") &&
     reply.includes("reason: \"superseded-final\"") &&
-    reply.includes("deliverNormalFinalViaStream(finalText)") &&
-    reply.indexOf("supersededByNewInbound") < reply.indexOf("deliverNormalFinalViaStream(finalText)");
+    reply.includes("deliverNormalFinalViaStream(finalText, {") &&
+    reply.indexOf("supersededByNewInbound") < reply.indexOf("deliverNormalFinalViaStream(finalText, {");
   const testReady =
     tests.includes("sends a merge notice when superseded") &&
     tests.includes("later pushes the old final without updating the old stream") &&

@@ -161,7 +161,7 @@ function mergeFinalReplyText(previous: string, incoming: string): string {
 
 function normalizeDedupText(value: string): string {
   return value
-    .replace(/【消息过长，分段发送：第\d+\/\d+段】/g, "")
+    .replace(/【(?:消息过长，分段发送：)?第\d+\/\d+段】/g, "")
     .replace(/\s+/g, "")
     .replace(/[，。；：、,.。;:]/g, "")
     .toLowerCase();
@@ -417,6 +417,16 @@ function appendFinalCompletionMarker(text: string): string {
   return `${trimmed}\n\n${FINAL_COMPLETION_MARKER}`;
 }
 
+function withOptionalCompletionMarker(chunks: string[], enabled: boolean): string[] {
+  if (!enabled || chunks.length === 0) {
+    return chunks;
+  }
+  const out = [...chunks];
+  const lastIndex = out.length - 1;
+  out[lastIndex] = appendFinalCompletionMarker(out[lastIndex] ?? "");
+  return out;
+}
+
 function escapeLiteralThinkTags(text: string): string {
   return text.replace(THINK_TAG_RE, (tag) =>
     tag.startsWith("</") ? "&lt;/think&gt;" : "&lt;think&gt;",
@@ -565,7 +575,7 @@ function resolveThinkingAwareBodyLimits(thinkingText: string): {
   }
   const prefix = `${inlineBlock}\n`;
   return {
-    maxChars: Math.max(200, WECOM_STREAM_MAX_CHARS - prefix.length),
+    maxChars: WECOM_STREAM_MAX_CHARS,
     maxBytes: Math.max(512, WECOM_STREAM_MAX_BYTES - Buffer.byteLength(prefix, "utf8")),
   };
 }
@@ -776,9 +786,15 @@ export function createBotWsReplyHandle(params: {
 
   const sendMarkdownChunksViaActivePush = async (
     textToSend: string,
-    options: { reason: "superseded-final" | "stream-fallback" },
+    options: {
+      reason: "superseded-final" | "stream-fallback";
+      appendCompletionMarker?: boolean;
+    },
   ): Promise<void> => {
-    const markdownChunks = chunkWeComMarkdownV2(textToSend).map(escapeLiteralThinkTags);
+    const markdownChunks = withOptionalCompletionMarker(
+      chunkWeComMarkdownV2(textToSend).map(escapeLiteralThinkTags),
+      options.appendCompletionMarker === true,
+    );
     const pushHandle = getBotWsPushHandle(params.accountId);
     if (pushHandle?.isConnected?.()) {
       for (let i = 0; i < markdownChunks.length; i += 1) {
@@ -818,7 +834,7 @@ export function createBotWsReplyHandle(params: {
     }
     const remainder = finalText.slice(previewFrozenDeliveredSourceText.length).trimStart();
     if (!remainder) {
-      return appendFinalCompletionMarker("最终回复已完成，以上预览内容即为完整回复。");
+      return "最终回复已完成，以上预览内容即为完整回复。";
     }
     if (remainder === FINAL_COMPLETION_MARKER) {
       return FINAL_COMPLETION_MARKER;
@@ -826,14 +842,20 @@ export function createBotWsReplyHandle(params: {
     return `继续输出：\n\n${remainder}`;
   };
 
-  const deliverNormalFinalViaStream = async (finalText: string): Promise<boolean> => {
-    const markdownChunks = chunkWeComMarkdownV2(
-      finalText,
-      WECOM_STREAM_FINAL_MAX_CHARS,
-      WECOM_STREAM_MAX_BYTES,
-    ).map(escapeLiteralThinkTags);
+  const deliverNormalFinalViaStream = async (
+    finalText: string,
+    options: { appendCompletionMarker: boolean },
+  ): Promise<boolean> => {
+    const markdownChunks = withOptionalCompletionMarker(
+      chunkWeComMarkdownV2(
+        finalText,
+        WECOM_STREAM_FINAL_MAX_CHARS,
+        WECOM_STREAM_MAX_BYTES,
+      ).map(escapeLiteralThinkTags),
+      options.appendCompletionMarker,
+    );
     const finalStreamId = resolveStreamId();
-    const fallbackText = appendFinalCompletionMarker(resolveStreamFallbackText(finalText));
+    const fallbackText = resolveStreamFallbackText(finalText);
     const firstStreamChunk = markdownChunks[0] ?? "";
     try {
       console.info(
@@ -847,7 +869,10 @@ export function createBotWsReplyHandle(params: {
           `[wecom-b3] stream-final-terminal-fallback account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} error=${formatFallbackError(error)}`,
         );
         try {
-          await sendMarkdownChunksViaActivePush(fallbackText, { reason: "stream-fallback" });
+          await sendMarkdownChunksViaActivePush(fallbackText, {
+            reason: "stream-fallback",
+            appendCompletionMarker: true,
+          });
           visibleReplyStarted = true;
         } catch (fallbackError) {
           params.onFail?.(fallbackError);
@@ -859,7 +884,10 @@ export function createBotWsReplyHandle(params: {
         `[wecom-b3] stream-final-fallback account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} error=${formatFallbackError(error)}`,
       );
       try {
-        await sendMarkdownChunksViaActivePush(fallbackText, { reason: "stream-fallback" });
+        await sendMarkdownChunksViaActivePush(fallbackText, {
+          reason: "stream-fallback",
+          appendCompletionMarker: true,
+        });
         visibleReplyStarted = true;
       } catch (fallbackError) {
         params.onFail?.(fallbackError);
@@ -1203,6 +1231,7 @@ export function createBotWsReplyHandle(params: {
           : accumulatedText || text;
 
       let finalText = outboundText;
+      let finalAppendCompletionMarker = false;
       if (info.kind === "final" && mediaUrls.length > 0) {
         const cfg = getWecomRuntime().config.loadConfig();
         const mediaLocalRoots = resolveWecomMergedMediaLocalRoots({ cfg });
@@ -1246,18 +1275,16 @@ export function createBotWsReplyHandle(params: {
       if (info.kind === "final") {
         const reasoningOnlyFinal = !finalText && !!accumulatedThinkingText;
         finalText = dedupeLongFinalText(finalText, { previewFrozen });
+        finalAppendCompletionMarker =
+          !isEvent &&
+          shouldAppendStreamCompletionMarker({
+            finalText,
+            previewFrozen,
+            reasoningOnly: reasoningOnlyFinal,
+          });
         if (!isEvent) {
           if (!finalText && reasoningOnlyFinal) {
             finalText = FINAL_COMPLETION_MARKER;
-          }
-          if (
-            shouldAppendStreamCompletionMarker({
-              finalText,
-              previewFrozen,
-              reasoningOnly: reasoningOnlyFinal,
-            })
-          ) {
-            finalText = appendFinalCompletionMarker(finalText);
           }
         }
       }
@@ -1313,7 +1340,10 @@ export function createBotWsReplyHandle(params: {
             `[wecom-b3] superseded-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} supersededAt=${supersededAt ?? 0}`,
           );
           try {
-            await sendMarkdownChunksViaActivePush(textToSend, { reason: "superseded-final" });
+            await sendMarkdownChunksViaActivePush(textToSend, {
+              reason: "superseded-final",
+              appendCompletionMarker: finalAppendCompletionMarker,
+            });
           } catch (error) {
             rollbackFinalDelivered(currentFinalDeliveryKey, {
               peerDedup: currentFinalUsesPeerDedup,
@@ -1322,7 +1352,11 @@ export function createBotWsReplyHandle(params: {
           }
         } else if (info.kind === "final") {
           settleStream();
-          if (!(await deliverNormalFinalViaStream(finalText))) {
+          if (
+            !(await deliverNormalFinalViaStream(finalText, {
+              appendCompletionMarker: finalAppendCompletionMarker,
+            }))
+          ) {
             rollbackFinalDelivered(currentFinalDeliveryKey, {
               peerDedup: currentFinalUsesPeerDedup,
             });

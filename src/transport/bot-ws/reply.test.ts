@@ -486,8 +486,54 @@ describe("createBotWsReplyHandle", () => {
     expect(firstChunk).not.toContain("<think>");
     expect(firstChunk).not.toContain("这是思考过程");
     expect(firstChunk).toContain("第1/");
+    expect(firstChunk).not.toContain("消息过长");
     expect(pushedText).toContain("END-THINK-B2");
     expect(pushedText).not.toContain("<think>");
+  });
+
+  it("does not show chunk markers in thinking previews before the final text is complete", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-preview-no-chunk-marker" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "思考过程。".repeat(900), isReasoning: true }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(3_000);
+    await handle.deliver({ text: "正文预览。".repeat(700), isReasoning: false }, { kind: "block" });
+
+    const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(previewText).toContain("<think>");
+    expect(previewText).toContain("正文预览。");
+    expect(previewText).not.toContain("【第");
+    expect(previewText).not.toContain("消息过长");
+  });
+
+  it("keeps enough body room when thinking preview is long", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-long-thinking-body-room" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "思考内容。".repeat(900), isReasoning: true }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(3_000);
+    await handle.deliver({ text: `${"正文内容。".repeat(480)}BODY-PREVIEW-END`, isReasoning: false }, { kind: "block" });
+
+    const previewText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(previewText).toContain("<think>");
+    expect(previewText).toContain("正文内容。".repeat(120));
+    expect(previewText).not.toContain("【第");
   });
 
   it("closes reasoning-only streams with a completion marker", async () => {
@@ -718,11 +764,14 @@ describe("createBotWsReplyHandle", () => {
       true,
     );
     expect(mockClient.sendMessage).toHaveBeenCalled();
+    const firstChunk = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
+    expect(firstChunk).toContain("【第1/");
+    expect(firstChunk).not.toContain("消息过长");
     const pushedText = mockClient.sendMessage.mock.calls
       .map((call) => (call[1] as any).markdown.content)
       .join("\n");
     expect(pushedText).toContain("END-B2");
-    expect(pushedText).toContain(FINAL_COMPLETION_MARKER);
+    expect(pushedText).toMatch(/【第\d+\/\d+段】\n\n（已完成）$/);
   });
 
   it("splits medium Chinese final text before the WeCom stream bubble truncates it", async () => {
@@ -745,12 +794,13 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
     const firstChunk = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
     expect(firstChunk).toContain("第1/");
+    expect(firstChunk).not.toContain("消息过长");
     expect(firstChunk).not.toContain("TAIL-MEDIUM-B2");
     const pushedText = mockClient.sendMessage.mock.calls
       .map((call) => String((call[1] as any).markdown.content))
       .join("\n");
     expect(pushedText).toContain("TAIL-MEDIUM-B2");
-    expect(pushedText).toContain(FINAL_COMPLETION_MARKER);
+    expect(pushedText).toMatch(/【第\d+\/\d+段】\n\n（已完成）$/);
   });
 
   it("deduplicates repeated large blocks in long final text", async () => {

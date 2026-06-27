@@ -46,7 +46,9 @@ function status() {
     markdown.includes("return stitched.join(\"\\n\");") &&
     markdown.includes("export function chunkWeComMarkdownV2(") &&
     markdown.includes("export function previewWeComMarkdownV2(") &&
-    markdown.includes("【消息过长，分段发送：第");
+    markdown.includes("segmentMarkerV2") &&
+    markdown.includes("【第${index}/${total}段】") &&
+    markdown.includes("splitLongMarkdownCoreV2(formatted, maxChars, maxBytes)[0] ?? \"\"");
   const finalStreamFirstChunkReady =
     reply.includes("await params.client.replyStream(params.frame, finalStreamId, markdownChunks[0] ?? \"\", true)") ||
     (
@@ -63,6 +65,8 @@ function status() {
     reply.includes("const B2_PEER_FINAL_DEDUP_TTL_MS = 120_000") &&
     reply.includes("const BLOCK_PREVIEW_MAX_MS = 300_000") &&
     reply.includes("const BLOCK_PREVIEW_MAX_CHARS = 3_000") &&
+    reply.includes("withOptionalCompletionMarker") &&
+    reply.includes("finalAppendCompletionMarker") &&
     reply.includes("dedupeLongFinalText(finalText, { previewFrozen })") &&
     reply.includes("function findRepeatedLongBlock(") &&
     reply.includes("function findRepeatedHeadingTail(") &&
@@ -84,7 +88,9 @@ function status() {
   const testReady =
     tests.includes("deduplicates repeated large blocks in long final text") &&
     tests.includes("deduplicates repeated structured tails that restart from the same report heading") &&
-    tests.includes("does not deduplicate repeated markdown table blocks");
+    tests.includes("does not deduplicate repeated markdown table blocks") &&
+    tests.includes("does not show chunk markers in thinking previews before the final text is complete") &&
+    tests.includes("keeps enough body room when thinking preview is long");
   const outboundReady =
     outbound.includes("chunkWeComMarkdownV2") &&
     outbound.includes("Sending Bot WS active message chunk") &&

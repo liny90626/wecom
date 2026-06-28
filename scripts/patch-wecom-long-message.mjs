@@ -56,6 +56,12 @@ function status() {
       reply.includes("await params.client.replyStream(params.frame, finalStreamId, firstStreamChunk, true)")
     ) ||
     (
+      reply.includes("const firstStreamChunk = markdownChunks[0] ?? \"\"") &&
+      reply.includes("withReplySendTimeout(") &&
+      reply.includes("params.client.replyStream(params.frame, finalStreamId, firstStreamChunk, true)") &&
+      reply.includes("\"stream final\"")
+    ) ||
+    (
       reply.includes("bodyText: markdownChunks[0] ?? \"\"") &&
       reply.includes("await params.client.replyStream(params.frame, finalStreamId, firstStreamChunk, true)")
     );

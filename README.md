@@ -195,6 +195,10 @@ npx vitest run
 
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 v2.5.110-116（2026-06-28，LinKy fork 维护版）
+- **[Bot WS 可靠性] 出站 stream 更新增加本地超时兜底** 🛡️ 当企业微信 SDK 的 `replyStream` 偶发长期 pending 时，插件不再一直卡住后续 final，而是标记当前 stream 不可靠并在 final 阶段主动续发剩余正文。
+- **[完成标识] `（已完成）` 调整为 `（回复完毕）`** 🧾 降低“任务已完成”和“本次回复输出结束”的语义混淆。完整说明见 [`changelog/v2.5.110-116.md`](./changelog/v2.5.110-116.md)。
+
 #### 📌 v2.5.110-115（2026-06-27，LinKy fork 维护版）
 - **[Manifest 修复] 声明运行时注册工具 contracts.tools** 🧩 `openclaw.plugin.json` 顶层补充 `contracts.tools`，覆盖 `wecom_doc`、`wecom_calendar`、`wecom_mcp`，适配新版 OpenClaw 插件诊断规范。
 - **[诊断清理] 消除 registerTool 未声明告警** 🧪 新增 manifest 回归测试，避免后续打包时运行时工具注册和 manifest 声明再次脱节。完整说明见 [`changelog/v2.5.110-115.md`](./changelog/v2.5.110-115.md)。
@@ -202,7 +206,7 @@ npx vitest run
 #### 📌 v2.5.110-114（2026-06-27，LinKy fork 维护版）
 - **[长文本分段] 预览阶段不再显示伪分段标签** 📚 block/preview 只展示当前可见预览，不再出现 `【第1/n段】` 但后续段迟迟不来的体验错位；真正分段只在 final 正文完整到达后触发。
 - **[思考块兼容] thinking 不再挤占正文字符预算** 💭 思考块只按字节给 WeCom stream 留安全余量，正文预览保留正常字符长度，避免思考块较长时正文首段过短。
-- **[段标优化] 长文本段标改为 `【第x/n段】`** 🧾 移除“消息过长，分段发送”长提示；长文本最后一段会在段标后追加 `（已完成）`。完整说明见 [`changelog/v2.5.110-114.md`](./changelog/v2.5.110-114.md)。
+- **[段标优化] 长文本段标改为 `【第x/n段】`** 🧾 移除“消息过长，分段发送”长提示；长文本最后一段会在段标后追加完成标识。完整说明见 [`changelog/v2.5.110-114.md`](./changelog/v2.5.110-114.md)。
 
 #### 📌 v2.5.110-113（2026-06-27，LinKy fork 维护版）
 - **[Reasoning 修复] 多段思考流不再混入正文** 💭 当 OpenClaw 把后续 `<think>...</think>` 片段混在普通 block/final 文本中送达时，插件会先抽取思考段并合并到思考块，只让标签外内容进入正文。
@@ -212,10 +216,6 @@ npx vitest run
 #### 📌 v2.5.110-112（2026-06-27，LinKy fork 维护版）
 - **[短文本去重] final 与 preview 尾段重复时不再二次输出** 🔁 修复带思考块的普通长度回复在 final 阶段重复整段正文的问题。
 - **[版本整理] 维护版更新到 `2.5.110-112`** 🧾 changelog 和 README 补齐到当前维护版本，确保包版本、说明和验证记录一致。
-
-#### 📌 v2.5.110-111（2026-06-27，LinKy fork 维护版）
-- **[Reasoning 预览] 默认开启 Bot WS 思考块实验** 💭 接入 OpenClaw `onReasoningStream` / `onReasoningEnd`，在进度流中尝试用企业微信客户端可识别的 `<think>...</think>` 结构承载思考过程。
-- **[正文隔离] final 正文保持普通正文路径** 🧩 思考内容只进入进度流预览，主动推送、长文本余段和最终正文不携带思考块，降低思考块与正文互相污染风险。
 
 > B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
 

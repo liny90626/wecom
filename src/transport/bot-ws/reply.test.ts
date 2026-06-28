@@ -11,7 +11,7 @@ vi.mock("./media.js", () => ({
 }));
 
 type ReplyHandleParams = Parameters<typeof createBotWsReplyHandle>[0];
-const FINAL_COMPLETION_MARKER = "（已完成）";
+const FINAL_COMPLETION_MARKER = "（回复完毕）";
 
 describe("createBotWsReplyHandle", () => {
   let mockClient: import("vitest").Mocked<WSClient>;
@@ -771,7 +771,7 @@ describe("createBotWsReplyHandle", () => {
       .map((call) => (call[1] as any).markdown.content)
       .join("\n");
     expect(pushedText).toContain("END-B2");
-    expect(pushedText).toMatch(/【第\d+\/\d+段】\n\n（已完成）$/);
+    expect(pushedText).toMatch(/【第\d+\/\d+段】\n\n（回复完毕）$/);
   });
 
   it("splits medium Chinese final text before the WeCom stream bubble truncates it", async () => {
@@ -800,7 +800,7 @@ describe("createBotWsReplyHandle", () => {
       .map((call) => String((call[1] as any).markdown.content))
       .join("\n");
     expect(pushedText).toContain("TAIL-MEDIUM-B2");
-    expect(pushedText).toMatch(/【第\d+\/\d+段】\n\n（已完成）$/);
+    expect(pushedText).toMatch(/【第\d+\/\d+段】\n\n（回复完毕）$/);
   });
 
   it("deduplicates repeated large blocks in long final text", async () => {
@@ -1309,6 +1309,84 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("后续最终内容");
     expect(pushed).not.toContain("预览内容000。");
     expect(pushed).toContain("预览内容390。");
+  });
+
+  it("actively pushes the continuation when a visible short preview update hangs", async () => {
+    let releaseSecondPreview: (() => void) | undefined;
+    mockClient.replyStream
+      .mockResolvedValueOnce({} as any)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseSecondPreview = () => resolve({} as any);
+          }) as any,
+      );
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-short-preview-hang" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "已经显示的前半段", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(1_500);
+    const secondPreview = handle.deliver(
+      { text: "已经显示的前半段 后续预览", isReasoning: false },
+      { kind: "block" },
+    );
+
+    await vi.advanceTimersByTimeAsync(8_000);
+    await secondPreview;
+    await handle.deliver(
+      { text: "已经显示的前半段 后续预览 最终结论", isReasoning: false },
+      { kind: "final" },
+    );
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: expect.objectContaining({
+        content: expect.stringContaining("继续输出："),
+      }),
+    });
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("后续预览 最终结论");
+    expect(pushed).not.toContain("已经显示的前半段");
+    expect(pushed).toContain(FINAL_COMPLETION_MARKER);
+
+    releaseSecondPreview?.();
+  });
+
+  it("falls back to active push when the final stream update hangs", async () => {
+    mockClient.replyStream.mockImplementationOnce(
+      () => new Promise(() => undefined) as any,
+    );
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-final-hang" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const delivery = handle.deliver({ text: "最终短回复", isReasoning: false }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(8_000);
+    await delivery;
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: { content: `最终短回复\n\n${FINAL_COMPLETION_MARKER}` },
+    });
   });
 
   it("skips the old final push when a visible frozen preview is later superseded", async () => {

@@ -722,10 +722,21 @@ export function createBotWsReplyHandle(params: {
   const sendPlaceholder = () => {
     if (streamSettled || placeholderInFlight || isEvent) return;
     placeholderInFlight = true;
-    params.client
-      .replyStream(params.frame, resolveStreamId(), placeholderText, false)
+    withReplySendTimeout(
+      params.client.replyStream(params.frame, resolveStreamId(), placeholderText, false),
+      "stream placeholder",
+    )
       .catch((error) => {
+        if (isLocalReplyTimeoutError(error)) {
+          console.warn(
+            `[wecom-preview] placeholder-timeout account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+          );
+          return;
+        }
         if (!isTerminalReplyError(error)) {
+          console.warn(
+            `[wecom-preview] placeholder-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+          );
           return;
         }
         settleStream();
@@ -1201,21 +1212,19 @@ export function createBotWsReplyHandle(params: {
     if (isEvent || supersededNoticeSent || visibleReplyStarted || streamSettled) return;
     supersededNoticeSent = true;
     const noticeStreamId = resolveStreamId();
-    void params.client
-      .replyStream(params.frame, noticeStreamId, B3_SUPERSEDED_NOTICE_TEXT, true)
+    void withReplySendTimeout(
+      params.client.replyStream(params.frame, noticeStreamId, B3_SUPERSEDED_NOTICE_TEXT, true),
+      "supersede notice",
+    )
       .then(() => {
         console.info(
           `[wecom-b3] supersede-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${noticeStreamId}`,
         );
       })
       .catch((error) => {
-        if (!isTerminalReplyError(error)) {
-          console.warn(
-            `[wecom-b3] supersede-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${noticeStreamId} error=${formatFallbackError(error)}`,
-          );
-          return;
-        }
-        params.onFail?.(error);
+        console.warn(
+          `[wecom-b3] supersede-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${noticeStreamId} error=${formatFallbackError(error)}`,
+        );
       });
   };
 
@@ -1404,17 +1413,23 @@ export function createBotWsReplyHandle(params: {
       try {
         if (params.inboundKind === "welcome") {
           settleStream();
-          await params.client.replyWelcome(params.frame, {
-            msgtype: "text",
-            text: { content: finalText },
-          });
+          await withReplySendTimeout(
+            params.client.replyWelcome(params.frame, {
+              msgtype: "text",
+              text: { content: finalText },
+            }),
+            "welcome reply",
+          );
         } else if (isEvent) {
           settleStream();
           // Send push message for other events
-          await params.client.sendMessage(peerId, {
-            msgtype: "markdown",
-            markdown: { content: toWeComMarkdownV2(finalText) },
-          });
+          await withReplySendTimeout(
+            params.client.sendMessage(peerId, {
+              msgtype: "markdown",
+              markdown: { content: toWeComMarkdownV2(finalText) },
+            }),
+            "event markdown push",
+          );
         } else if (info.kind === "final" && supersededByNewInbound) {
           settleStream();
           const fallbackText = resolveStreamFallbackText(finalText);
@@ -1451,11 +1466,14 @@ export function createBotWsReplyHandle(params: {
         } else {
           stopPlaceholderKeepalive();
           visibleReplyStarted = true;
-          await params.client.replyStream(
-            params.frame,
-            resolveStreamId(),
-            renderPreviewStreamText(previewWeComMarkdownV2(finalText)),
-            false,
+          await withReplySendTimeout(
+            params.client.replyStream(
+              params.frame,
+              resolveStreamId(),
+              renderPreviewStreamText(previewWeComMarkdownV2(finalText)),
+              false,
+            ),
+            "direct block stream",
           );
         }
       } catch (error) {
@@ -1479,18 +1497,27 @@ export function createBotWsReplyHandle(params: {
 
       try {
         if (params.inboundKind === "welcome") {
-          await params.client.replyWelcome(params.frame, {
-            msgtype: "text",
-            text: { content: text },
-          });
+          await withReplySendTimeout(
+            params.client.replyWelcome(params.frame, {
+              msgtype: "text",
+              text: { content: text },
+            }),
+            "welcome error reply",
+          );
         } else if (isEvent) {
-          await params.client.sendMessage(peerId, {
-            msgtype: "markdown",
-            markdown: { content: text },
-          });
+          await withReplySendTimeout(
+            params.client.sendMessage(peerId, {
+              msgtype: "markdown",
+              markdown: { content: text },
+            }),
+            "event error markdown push",
+          );
         } else {
           visibleReplyStarted = true;
-          await params.client.replyStream(params.frame, resolveStreamId(), text, true);
+          await withReplySendTimeout(
+            params.client.replyStream(params.frame, resolveStreamId(), text, true),
+            "stream error reply",
+          );
         }
       } catch (sendError) {
         params.onFail?.(sendError);

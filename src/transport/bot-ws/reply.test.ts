@@ -130,6 +130,43 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(3);
   });
 
+  it("soft-times out hanging placeholders and allows the next keepalive attempt", async () => {
+    mockClient.replyStream
+      .mockImplementationOnce(() => new Promise(() => undefined) as any)
+      .mockResolvedValue({} as any);
+    const onFail = vi.fn();
+    createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-placeholder-timeout" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+      onFail,
+    });
+
+    vi.advanceTimersByTime(3000);
+    await flushPromises();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(8_000);
+    await flushPromises();
+    expect(onFail).not.toHaveBeenCalled();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+
+    vi.advanceTimersByTime(3000);
+    await flushPromises();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(3);
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-placeholder-timeout" } }),
+      expect.any(String),
+      "正在思考...",
+      false,
+    );
+  });
+
   it("does not auto-send placeholder when disabled", async () => {
     createBotWsReplyHandle({
       client: mockClient,
@@ -1543,6 +1580,42 @@ describe("createBotWsReplyHandle", () => {
     });
   });
 
+  it("soft-times out superseded notices and still delivers the old final by active push", async () => {
+    mockClient.replyStream.mockImplementationOnce(
+      () => new Promise(() => undefined) as any,
+    );
+    const onFail = vi.fn();
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-supersede-notice-timeout" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      onFail,
+    });
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await vi.advanceTimersByTimeAsync(8_000);
+    await flushPromises();
+
+    expect(onFail).not.toHaveBeenCalled();
+
+    await handle.deliver({ text: "旧回复最终答案", isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: { content: "旧回复最终答案" },
+    });
+  });
+
   it("does not overwrite an already visible old stream with a superseded notice", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
@@ -1758,6 +1831,30 @@ describe("createBotWsReplyHandle", () => {
     });
   });
 
+  it("returns from event replies when active push hangs", async () => {
+    mockClient.sendMessage.mockImplementationOnce(
+      () => new Promise(() => undefined) as any,
+    );
+    const onFail = vi.fn();
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "event_timeout_req" },
+        body: { chattype: "single", from: { userid: "alice" } },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "event",
+      onFail,
+    });
+
+    const delivery = handle.deliver({ text: "Event Reply", isReasoning: false }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(8_000);
+    await delivery;
+
+    expect(onFail).toHaveBeenCalledTimes(1);
+    expect(onFail.mock.calls[0]?.[0]).toMatchObject({ name: "WeComReplyTimeoutError" });
+  });
+
   it("sends replyWelcome for welcome events", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
@@ -1779,5 +1876,29 @@ describe("createBotWsReplyHandle", () => {
         text: { content: "Hello Bob" },
       },
     );
+  });
+
+  it("returns from welcome replies when replyWelcome hangs", async () => {
+    mockClient.replyWelcome.mockImplementationOnce(
+      () => new Promise(() => undefined) as any,
+    );
+    const onFail = vi.fn();
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "welcome_timeout_req" },
+        body: { chattype: "single", from: { userid: "bob" } },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "welcome",
+      onFail,
+    });
+
+    const delivery = handle.deliver({ text: "Hello Bob", isReasoning: false }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(8_000);
+    await delivery;
+
+    expect(onFail).toHaveBeenCalledTimes(1);
+    expect(onFail.mock.calls[0]?.[0]).toMatchObject({ name: "WeComReplyTimeoutError" });
   });
 });

@@ -65,6 +65,13 @@ function status() {
       reply.includes("bodyText: markdownChunks[0] ?? \"\"") &&
       reply.includes("await params.client.replyStream(params.frame, finalStreamId, firstStreamChunk, true)")
     );
+  const remainderPushReady =
+    reply.includes("await params.client.sendMessage(peerId,") ||
+    (
+      reply.includes("withReplySendTimeout(") &&
+      reply.includes("params.client.sendMessage(peerId,") &&
+      reply.includes("\"stream remainder push\"")
+    );
   const replyReady =
     reply.includes("chunkWeComMarkdownV2") &&
     reply.includes("previewWeComMarkdownV2") &&
@@ -89,7 +96,7 @@ function status() {
     reply.includes("const outboundText") &&
     reply.includes("deliverNormalFinalViaStream") &&
     finalStreamFirstChunkReady &&
-    reply.includes("await params.client.sendMessage(peerId,") &&
+    remainderPushReady &&
     !reply.includes("toWeComMarkdownV2(finalText),\n            info.kind === \"final\"");
   const testReady =
     tests.includes("deduplicates repeated large blocks in long final text") &&

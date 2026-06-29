@@ -30,6 +30,8 @@ const BLOCK_PREVIEW_MIN_UPDATE_MS = 1_500;
 const BLOCK_PREVIEW_STATUS_UPDATE_MS = 15_000;
 const THINKING_PREVIEW_MIN_UPDATE_MS = 3_000;
 const WECOM_REPLY_SEND_TIMEOUT_MS = 8_000;
+const WECOM_PENDING_ACK_GRACE_MS = 5_500;
+const WECOM_PENDING_ACK_POLL_MS = 100;
 const THINKING_BLOCK_MAX_CHARS = 3_000;
 const THINKING_BLOCK_MAX_BYTES = 8_000;
 const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
@@ -102,6 +104,62 @@ function withReplySendTimeout<T>(
       timeout = undefined;
     }
   });
+}
+
+type NonBlockingReplyStreamClient = WSClient & {
+  hasPendingReplyAck?: (frame: WsFrame<BaseMessage | EventMessage>) => boolean;
+  replyStreamNonBlocking?: (
+    frame: WsFrame<BaseMessage | EventMessage>,
+    streamId: string,
+    content: string,
+    finish?: boolean,
+  ) => Promise<unknown>;
+};
+
+function sendNonFinalStreamUpdate(params: {
+  client: WSClient;
+  frame: WsFrame<BaseMessage | EventMessage>;
+  streamId: string;
+  content: string;
+}): Promise<unknown> {
+  const client = params.client as NonBlockingReplyStreamClient;
+  if (typeof client.replyStreamNonBlocking === "function") {
+    return client.replyStreamNonBlocking(params.frame, params.streamId, params.content, false);
+  }
+  return params.client.replyStream(params.frame, params.streamId, params.content, false);
+}
+
+function hasPendingReplyAck(client: WSClient, frame: WsFrame<BaseMessage | EventMessage>): boolean {
+  const candidate = client as NonBlockingReplyStreamClient;
+  if (typeof candidate.hasPendingReplyAck !== "function") {
+    return false;
+  }
+  try {
+    return candidate.hasPendingReplyAck(frame);
+  } catch {
+    return false;
+  }
+}
+
+async function waitForPendingReplyAckToClear(params: {
+  client: WSClient;
+  frame: WsFrame<BaseMessage | EventMessage>;
+  timeoutMs?: number;
+}): Promise<boolean> {
+  if (!hasPendingReplyAck(params.client, params.frame)) {
+    return true;
+  }
+  const deadline = Date.now() + (params.timeoutMs ?? WECOM_PENDING_ACK_GRACE_MS);
+  while (hasPendingReplyAck(params.client, params.frame)) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      return false;
+    }
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(WECOM_PENDING_ACK_POLL_MS, remainingMs)),
+    );
+  }
+  return true;
 }
 
 function formatMediaFailure(mediaUrl: string, error?: string, rejectReason?: string): string {
@@ -915,6 +973,27 @@ export function createBotWsReplyHandle(params: {
     const finalStreamId = resolveStreamId();
     const fallbackText = resolveStreamFallbackText(finalText);
     const firstStreamChunk = markdownChunks[0] ?? "";
+    if (
+      !(await waitForPendingReplyAckToClear({
+        client: params.client,
+        frame: params.frame,
+      }))
+    ) {
+      console.warn(
+        `[wecom-b3] stream-final-skip-pending-ack account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId}`,
+      );
+      try {
+        await sendMarkdownChunksViaActivePush(fallbackText, {
+          reason: "stream-fallback",
+          appendCompletionMarker: true,
+        });
+        visibleReplyStarted = true;
+      } catch (fallbackError) {
+        params.onFail?.(fallbackError);
+        return false;
+      }
+      return true;
+    }
     if (streamUpdateUnreliable) {
       console.warn(
         `[wecom-b3] stream-final-skip-unreliable account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId}`,
@@ -1026,15 +1105,29 @@ export function createBotWsReplyHandle(params: {
     now: number,
     options?: { bodySourceText?: string },
   ): Promise<boolean> => {
+    const previewStreamId = resolveStreamId();
     try {
-      await withReplySendTimeout(
-        params.client.replyStream(params.frame, resolveStreamId(), previewText, false),
+      const result = await withReplySendTimeout(
+        sendNonFinalStreamUpdate({
+          client: params.client,
+          frame: params.frame,
+          streamId: previewStreamId,
+          content: previewText,
+        }),
         "stream preview",
       );
+      if (result === "skipped") {
+        console.info(
+          `[wecom-preview] update-skipped-pending account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
+        );
+        lastPreviewText = previewText;
+        lastPreviewUpdateAt = now;
+        return false;
+      }
     } catch (error) {
       if (isTerminalReplyError(error)) {
         console.warn(
-          `[wecom-preview] terminal-update-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+          `[wecom-preview] terminal-update-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
         );
         streamUpdateUnreliable = true;
         stopPreviewFreezeTimeout();
@@ -1042,7 +1135,7 @@ export function createBotWsReplyHandle(params: {
         return false;
       }
       console.warn(
-        `[wecom-preview] update-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+        `[wecom-preview] update-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
       );
       return false;
     }
@@ -1467,12 +1560,12 @@ export function createBotWsReplyHandle(params: {
           stopPlaceholderKeepalive();
           visibleReplyStarted = true;
           await withReplySendTimeout(
-            params.client.replyStream(
-              params.frame,
-              resolveStreamId(),
-              renderPreviewStreamText(previewWeComMarkdownV2(finalText)),
-              false,
-            ),
+            sendNonFinalStreamUpdate({
+              client: params.client,
+              frame: params.frame,
+              streamId: resolveStreamId(),
+              content: renderPreviewStreamText(previewWeComMarkdownV2(finalText)),
+            }),
             "direct block stream",
           );
         }

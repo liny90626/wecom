@@ -1399,6 +1399,96 @@ describe("createBotWsReplyHandle", () => {
     releaseSecondPreview?.();
   });
 
+  it("skips queued preview updates and actively pushes final while a stream ack is pending", async () => {
+    const nonBlockingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+      replyStreamNonBlocking: ReturnType<typeof vi.fn>;
+    };
+    nonBlockingClient.replyStreamNonBlocking = vi
+      .fn()
+      .mockResolvedValueOnce({} as any)
+      .mockResolvedValueOnce("skipped");
+    nonBlockingClient.hasPendingReplyAck = vi.fn().mockReturnValue(true);
+
+    const handle = createBotWsReplyHandle({
+      client: nonBlockingClient,
+      frame: {
+        headers: { req_id: "req-preview-pending-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "已经显示的前半段", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(1_500);
+    await handle.deliver(
+      { text: "已经显示的前半段\n后续预览", isReasoning: false },
+      { kind: "block" },
+    );
+    const finalDelivery = handle.deliver(
+      { text: "已经显示的前半段\n后续预览\n最终结论", isReasoning: false },
+      { kind: "final" },
+    );
+    await vi.advanceTimersByTimeAsync(5_500);
+    await finalDelivery;
+
+    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(2);
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: expect.objectContaining({
+        content: expect.stringContaining("继续输出："),
+      }),
+    });
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("后续预览");
+    expect(pushed).toContain("最终结论");
+    expect(pushed).not.toContain("已经显示的前半段");
+    expect(pushed).toContain(FINAL_COMPLETION_MARKER);
+  });
+
+  it("uses the normal final stream path if a pending preview ack clears quickly", async () => {
+    const nonBlockingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+      replyStreamNonBlocking: ReturnType<typeof vi.fn>;
+    };
+    nonBlockingClient.replyStreamNonBlocking = vi.fn().mockResolvedValue({} as any);
+    nonBlockingClient.hasPendingReplyAck = vi
+      .fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+
+    const handle = createBotWsReplyHandle({
+      client: nonBlockingClient,
+      frame: {
+        headers: { req_id: "req-preview-pending-clears" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "已经显示的前半段", isReasoning: false }, { kind: "block" });
+    await handle.deliver(
+      { text: "已经显示的前半段\n最终结论", isReasoning: false },
+      { kind: "final" },
+    );
+
+    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-preview-pending-clears" } }),
+      expect.any(String),
+      "已经显示的前半段\n最终结论",
+      true,
+    );
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("falls back to active push when the final stream update hangs", async () => {
     mockClient.replyStream.mockImplementationOnce(
       () => new Promise(() => undefined) as any,

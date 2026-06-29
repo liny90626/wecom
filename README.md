@@ -195,6 +195,10 @@ npx vitest run
 
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 v2.5.110-117（2026-06-29，LinKy fork 维护版）
+- **[Bot WS 可靠性] 避免 stream ACK 队列卡住后延迟刷旧气泡** 🛡️ 非 final 预览优先使用 SDK non-blocking stream 更新；final 到来时若同一 `req_id` 仍有 pending ACK，会先短暂等待队列释放，超时后改走主动 markdown 兜底，避免“用户再发一条消息后原气泡才继续流式输出”。
+- **[回归补强] 覆盖 pending ACK 与正常 ACK 恢复两条路径** 🧪 新增 Bot WS 回归用例，确保 pending 卡住时不再把 final 排入旧 stream 队列，同时 ACK 快速恢复时仍保留原气泡正常收尾。完整说明见 [`changelog/v2.5.110-117.md`](./changelog/v2.5.110-117.md)。
+
 #### 📌 v2.5.110-116（2026-06-28，LinKy fork 维护版）
 - **[Bot WS 可靠性] 出站 stream 更新增加本地超时兜底** 🛡️ 当企业微信 SDK 的 `replyStream` 偶发长期 pending 时，插件不再一直卡住后续 final，而是标记当前 stream 不可靠并在 final 阶段主动续发剩余正文。
 - **[完成标识] `（已完成）` 调整为 `（回复完毕）`** 🧾 降低“任务已完成”和“本次回复输出结束”的语义混淆。完整说明见 [`changelog/v2.5.110-116.md`](./changelog/v2.5.110-116.md)。
@@ -212,10 +216,6 @@ npx vitest run
 - **[Reasoning 修复] 多段思考流不再混入正文** 💭 当 OpenClaw 把后续 `<think>...</think>` 片段混在普通 block/final 文本中送达时，插件会先抽取思考段并合并到思考块，只让标签外内容进入正文。
 - **[正文保护] 代码里的 `<think>` 示例不会被误折叠** 🧩 行内代码和 fenced code block 中的字面量 `<think>` 仍按普通正文转义展示，避免文档、示例或调试文本被误判为思考块。
 - **[回归补强] 新增 inline think block 场景测试** 🧪 覆盖普通 block、final 和代码文本三种路径，保护 B1/B2/B3 既有行为不被 reasoning 修复污染。完整说明见 [`changelog/v2.5.110-113.md`](./changelog/v2.5.110-113.md)。
-
-#### 📌 v2.5.110-112（2026-06-27，LinKy fork 维护版）
-- **[短文本去重] final 与 preview 尾段重复时不再二次输出** 🔁 修复带思考块的普通长度回复在 final 阶段重复整段正文的问题。
-- **[版本整理] 维护版更新到 `2.5.110-112`** 🧾 changelog 和 README 补齐到当前维护版本，确保包版本、说明和验证记录一致。
 
 > B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
 

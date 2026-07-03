@@ -195,6 +195,11 @@ npx vitest run
 
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 v2.5.110-118（2026-07-03，LinKy fork 维护版）
+- **[长任务体验] 预览通道过期不再彻底静默** 🛡️ 冻结计时刷新改为冻结即启动（自愈），stream 窗口过期（846608）后主动推送一次性提示"任务仍在后台处理，完成后将以新消息发送"，并为状态刷新加 60 分钟硬上限。
+- **[投递可靠性] final 兜底失败自动重试** 🔁 主动推送兜底失败后按 20s/40s/80s 有限重试 3 次，不再一次失败即静默丢失最终答复；`fail()` 遇终态错误也会推送一次性"投递中断"提示。
+- **[旧气泡复活修复] supersede 竞态收窄** 🧷 final 投递在 pending ACK 等待间隙后复查 supersede 标志，被新消息合并的旧回复不会再刷进旧气泡；新增 late-settle 观测日志辅助定位 SDK 队列晚到帧。完整说明见 [`changelog/v2.5.110-118.md`](./changelog/v2.5.110-118.md)。
+
 #### 📌 v2.5.110-117（2026-06-29，LinKy fork 维护版）
 - **[Bot WS 可靠性] 避免 stream ACK 队列卡住后延迟刷旧气泡** 🛡️ 非 final 预览优先使用 SDK non-blocking stream 更新；final 到来时若同一 `req_id` 仍有 pending ACK，会先短暂等待队列释放，超时后改走主动 markdown 兜底，避免“用户再发一条消息后原气泡才继续流式输出”。
 - **[回归补强] 覆盖 pending ACK 与正常 ACK 恢复两条路径** 🧪 新增 Bot WS 回归用例，确保 pending 卡住时不再把 final 排入旧 stream 队列，同时 ACK 快速恢复时仍保留原气泡正常收尾。完整说明见 [`changelog/v2.5.110-117.md`](./changelog/v2.5.110-117.md)。
@@ -212,12 +217,7 @@ npx vitest run
 - **[思考块兼容] thinking 不再挤占正文字符预算** 💭 思考块只按字节给 WeCom stream 留安全余量，正文预览保留正常字符长度，避免思考块较长时正文首段过短。
 - **[段标优化] 长文本段标改为 `【第x/n段】`** 🧾 移除“消息过长，分段发送”长提示；长文本最后一段会在段标后追加完成标识。完整说明见 [`changelog/v2.5.110-114.md`](./changelog/v2.5.110-114.md)。
 
-#### 📌 v2.5.110-113（2026-06-27，LinKy fork 维护版）
-- **[Reasoning 修复] 多段思考流不再混入正文** 💭 当 OpenClaw 把后续 `<think>...</think>` 片段混在普通 block/final 文本中送达时，插件会先抽取思考段并合并到思考块，只让标签外内容进入正文。
-- **[正文保护] 代码里的 `<think>` 示例不会被误折叠** 🧩 行内代码和 fenced code block 中的字面量 `<think>` 仍按普通正文转义展示，避免文档、示例或调试文本被误判为思考块。
-- **[回归补强] 新增 inline think block 场景测试** 🧪 覆盖普通 block、final 和代码文本三种路径，保护 B1/B2/B3 既有行为不被 reasoning 修复污染。完整说明见 [`changelog/v2.5.110-113.md`](./changelog/v2.5.110-113.md)。
-
-> B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
+> B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)，reasoning 思考块系列修复见 [`changelog/v2.5.110-113.md`](./changelog/v2.5.110-113.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
 
 ---
 

@@ -1311,7 +1311,7 @@ describe("createBotWsReplyHandle", () => {
       String((call[1] as any).markdown.content),
     );
     // The dead preview channel triggers a one-time expired notice first.
-    expect(pushedContents[0]).toContain("进度预览已到时限暂停刷新");
+    expect(pushedContents[0]).toContain("进度预览暂时无法继续刷新");
     const finalPush = pushedContents.find((content) => content.includes("压测结果完成"));
     expect(finalPush).toBeDefined();
     expect(finalPush).toContain("继续输出：");
@@ -1718,6 +1718,284 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(4);
     expect(onDeliver).not.toHaveBeenCalled();
     expect(onFail).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops a pending final push retry when superseded after visible text", async () => {
+    const expiredError = {
+      headers: { req_id: "req-retry-superseded" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    mockClient.sendMessage.mockRejectedValueOnce(new Error("push down"));
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-retry-superseded" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "已可见的旧内容", isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: "旧任务最终结果", isReasoning: false }, { kind: "final" });
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+
+    await vi.advanceTimersByTimeAsync(400_000);
+    await flushPromises();
+    // The suppressed superseded final must never be re-pushed by the retry chain.
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the old final when superseded during an ack wait that clears within the grace window", async () => {
+    let pendingAck = true;
+    const nonBlockingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+      replyStreamNonBlocking: ReturnType<typeof vi.fn>;
+    };
+    nonBlockingClient.replyStreamNonBlocking = vi.fn().mockResolvedValue({} as any);
+    nonBlockingClient.hasPendingReplyAck = vi.fn(() => pendingAck);
+
+    const handle = createBotWsReplyHandle({
+      client: nonBlockingClient,
+      frame: {
+        headers: { req_id: "req-supersede-ack-clears" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "旧任务可见内容", isReasoning: false }, { kind: "block" });
+    const finalDelivery = handle.deliver(
+      { text: "旧任务完整结果", isReasoning: false },
+      { kind: "final" },
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    // The pending ack clears within the 5.5s grace window; the supersede
+    // re-check must still stop the old final from finishing the old stream.
+    pendingAck = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await finalDelivery;
+
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("retries the superseded merge push after a transient failure", async () => {
+    const pushError = new Error("push down");
+    const onDeliver = vi.fn();
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-superseded-retry" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      onDeliver,
+    });
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+    mockClient.replyStream.mockClear();
+    mockClient.sendMessage.mockClear();
+    mockClient.sendMessage.mockRejectedValueOnce(pushError);
+
+    // No visible text yet, so the superseded final merge-delivers by push;
+    // the transient failure surfaces to the core and schedules a retry.
+    await expect(
+      handle.deliver({ text: "旧任务合并结果", isReasoning: false }, { kind: "final" }),
+    ).rejects.toThrow("push down");
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromises();
+
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+    const retried = String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content);
+    expect(retried).toContain("旧任务合并结果");
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(onDeliver).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses the failure notice while a final push retry is pending", async () => {
+    const expiredError = {
+      headers: { req_id: "req-fail-notice-retry-pending" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    mockClient.sendMessage.mockRejectedValueOnce(new Error("push down"));
+    const onFail = vi.fn();
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-fail-notice-retry-pending" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      onFail,
+    });
+
+    await handle.deliver({ text: "最终回复", isReasoning: false }, { kind: "final" });
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    const terminalError = new Error("Reply ack timeout (5000ms) for reqId: req-fail-notice-retry-pending");
+    await handle.fail(terminalError);
+    // While a retry is pending, no "投递中断" notice may be pushed.
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+    const retried = String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content);
+    expect(retried).toContain("最终回复");
+    expect(retried).not.toContain("投递中断");
+  });
+
+  it("routes a non-terminal failure through active push after the stream died", async () => {
+    const expiredError = {
+      headers: { req_id: "req-fail-after-dead-stream" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    const onFail = vi.fn();
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-fail-after-dead-stream" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      onFail,
+    });
+
+    // Freeze by size, then let the 15s status refresh die terminally.
+    await handle.deliver({ text: "预览内容。".repeat(620), isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+    const replyStreamCalls = mockClient.replyStream.mock.calls.length;
+
+    await handle.fail(new Error("agent run crashed"));
+
+    // The dead stream must not be written again; the user gets a generic
+    // one-time notice by active push instead of raw error internals.
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(replyStreamCalls);
+    const pushedContents = mockClient.sendMessage.mock.calls.map((call) =>
+      String((call[1] as any).markdown.content),
+    );
+    const failNotice = pushedContents.find((content) => content.includes("投递中断"));
+    expect(failNotice).toBeDefined();
+    expect(failNotice).not.toContain("agent run crashed");
+    expect(onFail).toHaveBeenCalled();
+  });
+
+  it("resumes the final push retry from the first undelivered chunk", async () => {
+    const expiredError = {
+      headers: { req_id: "req-retry-chunk-resume" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    // Chunk 1 lands, chunk 2 fails transiently, everything else succeeds.
+    mockClient.sendMessage
+      .mockResolvedValueOnce({} as any)
+      .mockRejectedValueOnce(new Error("push down"))
+      .mockResolvedValue({} as any);
+
+    const partA = `AAA段落${"甲".repeat(2000)}`;
+    const partB = `BBB段落${"乙".repeat(2000)}`;
+    const partC = `CCC段落${"丙".repeat(2000)}`;
+    const finalText = `${partA}\n\n${partB}\n\n${partC}`;
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-retry-chunk-resume" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const finalDelivery = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+    await finalDelivery;
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drainChunkTimers();
+
+    const pushedContents = mockClient.sendMessage.mock.calls.map((call) =>
+      String((call[1] as any).markdown.content),
+    );
+    // The already-delivered first chunk must not be re-sent by the retry.
+    expect(pushedContents.filter((content) => content.includes("AAA段落")).length).toBe(1);
+    expect(pushedContents.filter((content) => content.includes("BBB段落")).length).toBe(2);
+    expect(pushedContents.filter((content) => content.includes("CCC段落")).length).toBe(1);
+  });
+
+  it("stops the frozen status refresh permanently at the watchdog lifetime cap", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-watchdog-cap" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "预览内容。".repeat(620), isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    await flushPromises();
+    const callsAtCap = mockClient.replyStream.mock.calls.length;
+    expect(callsAtCap).toBeGreaterThan(2);
+
+    await vi.advanceTimersByTimeAsync(600_000);
+    await flushPromises();
+    // No further status refreshes once the 60min cap latched, and block
+    // events must not re-arm the interval either.
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(callsAtCap);
+    await handle.deliver({ text: "追加内容", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushPromises();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(callsAtCap);
   });
 
   it("does not flush the old final into the old stream when superseded during the pending-ack wait", async () => {

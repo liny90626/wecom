@@ -39,6 +39,11 @@ const LONG_FINAL_DEDUP_MIN_BLOCK_CHARS = 500;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const LONG_FINAL_DEDUP_MAX_REMOVALS = 3;
 const FINAL_COMPLETION_MARKER = "（回复完毕）";
+const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
+const PREVIEW_EXPIRED_NOTICE_TEXT =
+  "⏳ 进度预览已到时限暂停刷新，任务仍在后台处理，完成后将以新消息发送。";
+const FINAL_PUSH_RETRY_BASE_MS = 20_000;
+const FINAL_PUSH_MAX_RETRIES = 3;
 const THINK_TAG_RE = /<\/?think>/gi;
 const OPEN_THINK_TAG_RE = /<think>/gi;
 const CLOSE_THINK_TAG_RE = /<\/think>/gi;
@@ -89,15 +94,39 @@ function withReplySendTimeout<T>(
   promise: Promise<T>,
   operation: string,
   timeoutMs = WECOM_REPLY_SEND_TIMEOUT_MS,
+  logContext?: string,
 ): Promise<T> {
+  const startedAt = Date.now();
+  let timedOut = false;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
+      timedOut = true;
       const error = new Error(`WeCom ${operation} timed out after ${timeoutMs}ms`);
       error.name = "WeComReplyTimeoutError";
       reject(error);
     }, timeoutMs);
   });
+  // Observe the original promise so that sends which settle after our local
+  // timeout are still visible in logs. The SDK keeps timed-out frames queued
+  // per req_id, so a "late settle" is evidence the frame was flushed to the
+  // old stream after we already gave up (stale-bubble investigations).
+  promise.then(
+    () => {
+      if (timedOut) {
+        console.info(
+          `[wecom-reply] late-settle-ok operation=${operation} elapsedMs=${Date.now() - startedAt}${logContext ? ` ${logContext}` : ""}`,
+        );
+      }
+    },
+    (error) => {
+      if (timedOut) {
+        console.info(
+          `[wecom-reply] late-settle-error operation=${operation} elapsedMs=${Date.now() - startedAt}${logContext ? ` ${logContext}` : ""} error=${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
+  );
   return Promise.race([promise, timeoutPromise]).finally(() => {
     if (timeout) {
       clearTimeout(timeout);
@@ -731,6 +760,13 @@ export function createBotWsReplyHandle(params: {
     params.inboundKind === "event" ||
     params.inboundKind === "template-card-event";
 
+  const sendLogContext = `account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId}`;
+  const withHandleSendTimeout = <T>(
+    promise: Promise<T>,
+    operation: string,
+    timeoutMs?: number,
+  ): Promise<T> => withReplySendTimeout(promise, operation, timeoutMs, sendLogContext);
+
   const stopPlaceholderKeepalive = () => {
     if (placeholderKeepalive) {
       clearInterval(placeholderKeepalive);
@@ -780,7 +816,7 @@ export function createBotWsReplyHandle(params: {
   const sendPlaceholder = () => {
     if (streamSettled || placeholderInFlight || isEvent) return;
     placeholderInFlight = true;
-    withReplySendTimeout(
+    withHandleSendTimeout(
       params.client.replyStream(params.frame, resolveStreamId(), placeholderText, false),
       "stream placeholder",
     )
@@ -850,6 +886,10 @@ export function createBotWsReplyHandle(params: {
   let lastDeliveredBodySourceText = "";
   let lastPreviewUpdateAt = 0;
   let lastPreviewStatusAt = 0;
+  let previewExpiredNoticeSent = false;
+  let failNoticeSent = false;
+  let finalPushRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  let finalPushRetryCount = 0;
 
   const markFinalDelivered = (key: string, options: { peerDedup: boolean }): boolean => {
     if (finalDelivered) {
@@ -887,7 +927,12 @@ export function createBotWsReplyHandle(params: {
   const sendMarkdownChunksViaActivePush = async (
     textToSend: string,
     options: {
-      reason: "superseded-final" | "stream-fallback";
+      reason:
+        | "superseded-final"
+        | "stream-fallback"
+        | "final-retry"
+        | "preview-expired"
+        | "fail-notice";
       appendCompletionMarker?: boolean;
     },
   ): Promise<void> => {
@@ -901,7 +946,7 @@ export function createBotWsReplyHandle(params: {
         console.info(
           `[wecom-b3] client-push account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${options.reason} chunk=${i + 1}/${markdownChunks.length}`,
         );
-        await withReplySendTimeout(
+        await withHandleSendTimeout(
           params.client.sendMessage(peerId, {
             msgtype: "markdown",
             markdown: { content: chunk },
@@ -926,7 +971,7 @@ export function createBotWsReplyHandle(params: {
         console.info(
           `[wecom-b3] active-push account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${options.reason} chunk=${i + 1}/${markdownChunks.length}`,
         );
-        await withReplySendTimeout(pushHandle.sendMarkdown(peerId, chunk), "active markdown push");
+        await withHandleSendTimeout(pushHandle.sendMarkdown(peerId, chunk), "active markdown push");
         if (i < markdownChunks.length - 1) {
           await new Promise((resolve) => setTimeout(resolve, 800));
         }
@@ -938,6 +983,72 @@ export function createBotWsReplyHandle(params: {
         return;
       }
     }
+  };
+
+  interface FinalPushRetryRequest {
+    text: string;
+    deliveryKey: string;
+    peerDedup: boolean;
+    appendCompletionMarker: boolean;
+  }
+
+  // Bounded retry chain for finals whose fallback push failed. Without it a
+  // failed active push after stream expiry silently drops the answer
+  // (rollbackFinalDelivered + return). Timers live in this closure, so each
+  // req_id/session retries independently; run-time guards keep B3 supersede
+  // semantics (a suppressed superseded final is never re-pushed).
+  const runFinalPushRetry = async (retry: FinalPushRetryRequest): Promise<void> => {
+    if (supersededByNewInbound && suppressSupersededFinalPush) {
+      console.info(
+        `[wecom-b3] final-retry-skip-superseded account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+      );
+      return;
+    }
+    if (!markFinalDelivered(retry.deliveryKey, { peerDedup: retry.peerDedup })) {
+      return;
+    }
+    try {
+      await sendMarkdownChunksViaActivePush(retry.text, {
+        reason: "final-retry",
+        appendCompletionMarker: retry.appendCompletionMarker,
+      });
+      visibleReplyStarted = true;
+      console.info(
+        `[wecom-b3] final-retry-delivered attempt=${finalPushRetryCount}/${FINAL_PUSH_MAX_RETRIES} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+      );
+      params.onDeliver?.();
+    } catch (error) {
+      rollbackFinalDelivered(retry.deliveryKey, { peerDedup: retry.peerDedup });
+      console.warn(
+        `[wecom-b3] final-retry-failed attempt=${finalPushRetryCount}/${FINAL_PUSH_MAX_RETRIES} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+      );
+      if (finalPushRetryCount >= FINAL_PUSH_MAX_RETRIES) {
+        console.warn(
+          `[wecom-b3] final-retry-exhausted account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+        );
+        params.onFail?.(error);
+        return;
+      }
+      scheduleFinalPushRetry(retry);
+    }
+  };
+
+  const scheduleFinalPushRetry = (retry: FinalPushRetryRequest): void => {
+    if (finalPushRetryTimer || (supersededByNewInbound && suppressSupersededFinalPush)) {
+      return;
+    }
+    if (finalPushRetryCount >= FINAL_PUSH_MAX_RETRIES) {
+      return;
+    }
+    const delayMs = FINAL_PUSH_RETRY_BASE_MS * 2 ** finalPushRetryCount;
+    finalPushRetryCount += 1;
+    console.warn(
+      `[wecom-b3] final-retry-scheduled attempt=${finalPushRetryCount}/${FINAL_PUSH_MAX_RETRIES} delayMs=${delayMs} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+    );
+    finalPushRetryTimer = setTimeout(() => {
+      finalPushRetryTimer = undefined;
+      void runFinalPushRetry(retry);
+    }, delayMs);
   };
 
   const resolveStreamFallbackText = (finalText: string): string => {
@@ -973,12 +1084,37 @@ export function createBotWsReplyHandle(params: {
     const finalStreamId = resolveStreamId();
     const fallbackText = resolveStreamFallbackText(finalText);
     const firstStreamChunk = markdownChunks[0] ?? "";
-    if (
-      !(await waitForPendingReplyAckToClear({
-        client: params.client,
-        frame: params.frame,
-      }))
-    ) {
+    const pendingAckCleared = await waitForPendingReplyAckToClear({
+      client: params.client,
+      frame: params.frame,
+    });
+    // Re-check supersede after the await gap above (up to 5.5s): a new
+    // inbound may have superseded this handle while we waited for the pending
+    // ack. Without this check the old final would be flushed into the old
+    // stream bubble with finish=true — the "stale bubble revival" race.
+    if (supersededByNewInbound) {
+      if (suppressSupersededFinalPush) {
+        console.info(
+          `[wecom-b3] stream-final-skip-superseded account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId}`,
+        );
+        return false;
+      }
+      console.info(
+        `[wecom-b3] stream-final-superseded-push account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId}`,
+      );
+      try {
+        await sendMarkdownChunksViaActivePush(fallbackText, {
+          reason: "superseded-final",
+          appendCompletionMarker: true,
+        });
+        visibleReplyStarted = true;
+      } catch (fallbackError) {
+        params.onFail?.(fallbackError);
+        return false;
+      }
+      return true;
+    }
+    if (!pendingAckCleared) {
       console.warn(
         `[wecom-b3] stream-final-skip-pending-ack account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId}`,
       );
@@ -1015,7 +1151,7 @@ export function createBotWsReplyHandle(params: {
       console.info(
         `[wecom-b3] stream-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} chunks=${markdownChunks.length}`,
       );
-      await withReplySendTimeout(
+      await withHandleSendTimeout(
         params.client.replyStream(params.frame, finalStreamId, firstStreamChunk, true),
         "stream final",
       );
@@ -1059,7 +1195,7 @@ export function createBotWsReplyHandle(params: {
         console.info(
           `[wecom-b2] stream-remainder account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} chunk=${i + 1}/${markdownChunks.length}`,
         );
-        await withReplySendTimeout(
+        await withHandleSendTimeout(
           params.client.sendMessage(peerId, {
             msgtype: "markdown",
             markdown: { content: markdownChunks[i] ?? "" },
@@ -1086,6 +1222,10 @@ export function createBotWsReplyHandle(params: {
         thinkingLimits.maxChars,
         thinkingLimits.maxBytes,
       );
+      // Self-healing: start the status refresh interval at freeze time
+      // instead of waiting for the first frozen preview send to succeed —
+      // a skipped/failed first send would otherwise leave the counter dead.
+      startPreviewStatusInterval();
     }
     if (previewFrozen) {
       const frozen =
@@ -1100,6 +1240,36 @@ export function createBotWsReplyHandle(params: {
     return previewWeComMarkdownV2(text, thinkingLimits.maxChars, thinkingLimits.maxBytes);
   };
 
+  // One-time active push after the frozen preview channel dies (typically
+  // errcode 846608 once the WeCom stream window closes at ~6 min). Without
+  // it the bubble goes silent forever while the task is still running.
+  const maybeSendPreviewExpiredNotice = (): void => {
+    if (
+      previewExpiredNoticeSent ||
+      !previewFrozen ||
+      streamSettled ||
+      finalDelivered ||
+      isEvent ||
+      supersededByNewInbound
+    ) {
+      return;
+    }
+    previewExpiredNoticeSent = true;
+    void sendMarkdownChunksViaActivePush(PREVIEW_EXPIRED_NOTICE_TEXT, {
+      reason: "preview-expired",
+    })
+      .then(() => {
+        console.info(
+          `[wecom-preview] expired-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+        );
+      })
+      .catch((error) => {
+        console.warn(
+          `[wecom-preview] expired-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+        );
+      });
+  };
+
   const sendPreviewUpdate = async (
     previewText: string,
     now: number,
@@ -1107,7 +1277,7 @@ export function createBotWsReplyHandle(params: {
   ): Promise<boolean> => {
     const previewStreamId = resolveStreamId();
     try {
-      const result = await withReplySendTimeout(
+      const result = await withHandleSendTimeout(
         sendNonFinalStreamUpdate({
           client: params.client,
           frame: params.frame,
@@ -1132,6 +1302,7 @@ export function createBotWsReplyHandle(params: {
         streamUpdateUnreliable = true;
         stopPreviewFreezeTimeout();
         stopPreviewStatusInterval();
+        maybeSendPreviewExpiredNotice();
         return false;
       }
       console.warn(
@@ -1178,6 +1349,13 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     const now = Date.now();
+    if (previewStartedAt !== undefined && now - previewStartedAt >= PREVIEW_WATCHDOG_MAX_MS) {
+      console.warn(
+        `[wecom-preview] status-watchdog-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${now - previewStartedAt}`,
+      );
+      stopPreviewStatusInterval();
+      return;
+    }
     if (now - lastPreviewStatusAt < BLOCK_PREVIEW_STATUS_UPDATE_MS) {
       return;
     }
@@ -1305,7 +1483,7 @@ export function createBotWsReplyHandle(params: {
     if (isEvent || supersededNoticeSent || visibleReplyStarted || streamSettled) return;
     supersededNoticeSent = true;
     const noticeStreamId = resolveStreamId();
-    void withReplySendTimeout(
+    void withHandleSendTimeout(
       params.client.replyStream(params.frame, noticeStreamId, B3_SUPERSEDED_NOTICE_TEXT, true),
       "supersede notice",
     )
@@ -1506,7 +1684,7 @@ export function createBotWsReplyHandle(params: {
       try {
         if (params.inboundKind === "welcome") {
           settleStream();
-          await withReplySendTimeout(
+          await withHandleSendTimeout(
             params.client.replyWelcome(params.frame, {
               msgtype: "text",
               text: { content: finalText },
@@ -1516,7 +1694,7 @@ export function createBotWsReplyHandle(params: {
         } else if (isEvent) {
           settleStream();
           // Send push message for other events
-          await withReplySendTimeout(
+          await withHandleSendTimeout(
             params.client.sendMessage(peerId, {
               msgtype: "markdown",
               markdown: { content: toWeComMarkdownV2(finalText) },
@@ -1542,6 +1720,12 @@ export function createBotWsReplyHandle(params: {
             rollbackFinalDelivered(currentFinalDeliveryKey, {
               peerDedup: currentFinalUsesPeerDedup,
             });
+            scheduleFinalPushRetry({
+              text: textToSend,
+              deliveryKey: currentFinalDeliveryKey,
+              peerDedup: currentFinalUsesPeerDedup,
+              appendCompletionMarker: finalAppendCompletionMarker,
+            });
             throw error;
           }
         } else if (info.kind === "final") {
@@ -1554,12 +1738,20 @@ export function createBotWsReplyHandle(params: {
             rollbackFinalDelivered(currentFinalDeliveryKey, {
               peerDedup: currentFinalUsesPeerDedup,
             });
+            if (!(supersededByNewInbound && suppressSupersededFinalPush)) {
+              scheduleFinalPushRetry({
+                text: resolveStreamFallbackText(finalText),
+                deliveryKey: currentFinalDeliveryKey,
+                peerDedup: currentFinalUsesPeerDedup,
+                appendCompletionMarker: true,
+              });
+            }
             return;
           }
         } else {
           stopPlaceholderKeepalive();
           visibleReplyStarted = true;
-          await withReplySendTimeout(
+          await withHandleSendTimeout(
             sendNonFinalStreamUpdate({
               client: params.client,
               frame: params.frame,
@@ -1581,7 +1773,32 @@ export function createBotWsReplyHandle(params: {
     fail: async (error: unknown) => {
       notifyPeerActive();
       settleStream();
+      if (supersededByNewInbound) {
+        // A superseded handle must not touch the old stream again — sending
+        // the error text would finish (or revive) the old bubble.
+        console.info(
+          `[wecom-b3] fail-skip-superseded account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+        );
+        params.onFail?.(error);
+        return;
+      }
       if (isTerminalReplyError(error)) {
+        // The stream channel is dead; without an active push the user would
+        // get total silence. Push a one-time failure notice unless a final
+        // was delivered or a final push retry is still pending.
+        if (!isEvent && !finalDelivered && !finalPushRetryTimer && !failNoticeSent) {
+          failNoticeSent = true;
+          try {
+            await sendMarkdownChunksViaActivePush(
+              `⚠️ 本次回复投递中断：${formatErrorMessage(error)}`,
+              { reason: "fail-notice" },
+            );
+          } catch (pushError) {
+            console.warn(
+              `[wecom-reply] fail-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(pushError)}`,
+            );
+          }
+        }
         params.onFail?.(error);
         return;
       }
@@ -1590,7 +1807,7 @@ export function createBotWsReplyHandle(params: {
 
       try {
         if (params.inboundKind === "welcome") {
-          await withReplySendTimeout(
+          await withHandleSendTimeout(
             params.client.replyWelcome(params.frame, {
               msgtype: "text",
               text: { content: text },
@@ -1598,7 +1815,7 @@ export function createBotWsReplyHandle(params: {
             "welcome error reply",
           );
         } else if (isEvent) {
-          await withReplySendTimeout(
+          await withHandleSendTimeout(
             params.client.sendMessage(peerId, {
               msgtype: "markdown",
               markdown: { content: text },
@@ -1607,7 +1824,7 @@ export function createBotWsReplyHandle(params: {
           );
         } else {
           visibleReplyStarted = true;
-          await withReplySendTimeout(
+          await withHandleSendTimeout(
             params.client.replyStream(params.frame, resolveStreamId(), text, true),
             "stream error reply",
           );
@@ -1642,7 +1859,7 @@ export function createBotWsReplyHandle(params: {
       stopPreviewFreezeTimeout();
       stopPreviewStatusInterval();
       console.info(
-        `[wecom-b3] superseded account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${meta.reason}`,
+        `[wecom-b3] superseded account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${meta.reason} pendingAck=${hasPendingReplyAck(params.client, params.frame)}`,
       );
       closeSupersededPlaceholder();
     },

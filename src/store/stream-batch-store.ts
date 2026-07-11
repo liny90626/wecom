@@ -5,6 +5,21 @@ import type { PendingInbound, StreamState } from "../types/legacy-stream.js";
 import type { WecomBotInboundMessage as WecomInboundMessage } from "../types/index.js";
 import type { WecomWebhookTarget } from "../types/runtime-context.js";
 
+function isMediaLikeInbound(msg: WecomInboundMessage): boolean {
+  const msgtype = String(msg.msgtype ?? "").trim().toLowerCase();
+  return msgtype === "image" || msgtype === "file" || msgtype === "video" || msgtype === "mixed";
+}
+
+function shouldMergeInitialMediaBatch(
+  pending: PendingInbound,
+  incomingMsg: WecomInboundMessage,
+): boolean {
+  return (
+    isMediaLikeInbound(incomingMsg) ||
+    pending.messages.some((msg) => isMediaLikeInbound(msg))
+  );
+}
+
 export class StreamStore {
   private streams = new Map<string, StreamState>();
   private msgidToStreamId = new Map<string, string>();
@@ -197,6 +212,7 @@ export class StreamStore {
         batchKey,
         target,
         msg,
+        messages: [msg],
         contents: [msgContent],
         msgids: msg.msgid ? [msg.msgid] : [],
         nonce,
@@ -214,11 +230,17 @@ export class StreamStore {
     const activeBatchKey = state.activeBatchKey;
     const activeIsInitial = activeBatchKey === conversationKey;
     const activePending = this.pendingInbounds.get(activeBatchKey);
-    if (activePending && !activeIsInitial) {
+    const queuedBatchKey = state.queue[0];
+    const canMergeIntoActive =
+      activePending &&
+      !queuedBatchKey &&
+      (!activeIsInitial || shouldMergeInitialMediaBatch(activePending, msg));
+    if (activePending && canMergeIntoActive) {
       const activeStream = this.streams.get(activePending.streamId);
       const activeStarted = Boolean(activeStream?.started);
       if (!activeStarted) {
         activePending.contents.push(msgContent);
+        activePending.messages.push(msg);
         if (msg.msgid) {
           activePending.msgids.push(msg.msgid);
         }
@@ -230,11 +252,11 @@ export class StreamStore {
       }
     }
 
-    const queuedBatchKey = state.queue[0];
     if (queuedBatchKey) {
       const existingQueued = this.pendingInbounds.get(queuedBatchKey);
       if (existingQueued) {
         existingQueued.contents.push(msgContent);
+        existingQueued.messages.push(msg);
         if (msg.msgid) {
           existingQueued.msgids.push(msg.msgid);
         }
@@ -256,6 +278,7 @@ export class StreamStore {
       batchKey,
       target,
       msg,
+      messages: [msg],
       contents: [msgContent],
       msgids: msg.msgid ? [msg.msgid] : [],
       nonce,

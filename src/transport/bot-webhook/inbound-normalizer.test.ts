@@ -13,6 +13,7 @@ describe("processBotInboundMessage quote media", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(decryptWecomMediaWithMeta).mockReset();
   });
 
   it("downloads quote.file for text messages", async () => {
@@ -149,6 +150,84 @@ describe("processBotInboundMessage quote media", () => {
       "https://example.com/quoted.png",
       "item-aes-key",
       expect.any(Object),
+    );
+  });
+
+  it("keeps every media item from a top-level mixed message in order", async () => {
+    vi.mocked(decryptWecomMediaWithMeta)
+      .mockResolvedValueOnce({
+        buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+        sourceContentType: "image/png",
+        sourceFilename: "first.png",
+        sourceUrl: "https://example.com/first.png",
+      })
+      .mockResolvedValueOnce({
+        buffer: Buffer.from("%PDF-1.7 second"),
+        sourceContentType: "application/pdf",
+        sourceFilename: "second.pdf",
+        sourceUrl: "https://example.com/second.pdf",
+      });
+
+    const result = await processBotInboundMessage({
+      target: {
+        account: { accountId: "purple", encodingAESKey: "account-aes-key" },
+        config: { channels: { wecom: { mediaMaxMb: 24 } } },
+        runtime: { error: logError },
+      } as never,
+      msg: {
+        msgid: "msg-mixed-multi-media",
+        msgtype: "mixed",
+        mixed: {
+          msg_item: [
+            { msgtype: "text", text: { content: "请一起看这两个附件" } },
+            { msgtype: "image", image: { url: "https://example.com/first.png", aeskey: "image-key" } },
+            { msgtype: "file", file: { url: "https://example.com/second.pdf", aeskey: "file-key" } },
+          ],
+        },
+      } as never,
+      recordOperationalIssue,
+    });
+
+    expect(result.body).toBe("请一起看这两个附件\n[image]\n[file]");
+    expect(result.medias?.map((media) => media.filename)).toEqual(["first.png", "second.pdf"]);
+    expect(result.media?.filename).toBe("first.png");
+    expect(decryptWecomMediaWithMeta).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps successful mixed media and exposes a later decrypt failure", async () => {
+    vi.mocked(decryptWecomMediaWithMeta)
+      .mockResolvedValueOnce({
+        buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+        sourceContentType: "image/png",
+        sourceFilename: "first.png",
+        sourceUrl: "https://example.com/first.png",
+      })
+      .mockRejectedValueOnce(new Error("HTTP 403 forbidden"));
+
+    const result = await processBotInboundMessage({
+      target: {
+        account: { accountId: "purple", encodingAESKey: "account-aes-key" },
+        config: { channels: { wecom: { mediaMaxMb: 24 } } },
+        runtime: { error: logError },
+      } as never,
+      msg: {
+        msgid: "msg-mixed-partial-fail",
+        msgtype: "mixed",
+        mixed: {
+          msg_item: [
+            { msgtype: "image", image: { url: "https://example.com/first.png", aeskey: "image-key" } },
+            { msgtype: "file", file: { url: "https://example.com/expired.pdf", aeskey: "file-key" } },
+          ],
+        },
+      } as never,
+      recordOperationalIssue,
+    });
+
+    expect(result.medias?.map((media) => media.filename)).toEqual(["first.png"]);
+    expect(result.body).toContain("[image]");
+    expect(result.body).toContain("[file] (decryption failed: HTTP 403 forbidden)");
+    expect(recordOperationalIssue).toHaveBeenCalledWith(
+      expect.objectContaining({ summary: expect.stringContaining("reason=expired_or_forbidden") }),
     );
   });
 

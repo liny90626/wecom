@@ -55,6 +55,7 @@ export type BotInboundMedia = {
 export type BotInboundNormalizationResult = {
   body: string;
   media?: BotInboundMedia;
+  medias?: BotInboundMedia[];
 };
 
 type InboundMediaKind = "image" | "file" | "video";
@@ -339,6 +340,17 @@ function resolveQuoteMediaCandidate(msg: WecomInboundMessage): QuoteMediaCandida
   return undefined;
 }
 
+function buildInboundNormalizationResult(
+  body: string,
+  medias: BotInboundMedia[],
+): BotInboundNormalizationResult {
+  return {
+    body,
+    ...(medias[0] ? { media: medias[0] } : {}),
+    ...(medias.length > 0 ? { medias } : {}),
+  };
+}
+
 export async function processBotInboundMessage(params: {
   target: WecomWebhookTarget;
   msg: WecomInboundMessage;
@@ -487,7 +499,7 @@ export async function processBotInboundMessage(params: {
   if (msgtype === "mixed") {
     const items = (msg as any).mixed?.msg_item;
     if (Array.isArray(items)) {
-      let foundMedia: BotInboundNormalizationResult["media"];
+      const medias: BotInboundMedia[] = [];
       const bodyParts: string[] = [];
       for (const item of items) {
         const t = String(item.msgtype ?? "").toLowerCase();
@@ -496,17 +508,18 @@ export async function processBotInboundMessage(params: {
           if (content) bodyParts.push(content);
           continue;
         }
-        if ((t === "image" || t === "file" || t === "video") && !foundMedia && aesKey) {
+        if ((t === "image" || t === "file" || t === "video") && aesKey) {
           const mediaKind = t as InboundMediaKind;
           const url = String(item[mediaKind]?.url ?? "").trim();
           if (url) {
             try {
-              foundMedia = await tryDecryptMedia({
+              const media = await tryDecryptMedia({
                 kind: mediaKind,
                 url,
                 explicitFilename: pickBotFileName(msg, item?.[mediaKind]),
                 aesKey: item?.[mediaKind]?.aeskey,
               });
+              medias.push(media);
               bodyParts.push(`[${t}]`);
               continue;
             } catch (err) {
@@ -524,7 +537,7 @@ export async function processBotInboundMessage(params: {
         }
         bodyParts.push(`[${t}]`);
       }
-      return { body: bodyParts.join("\n"), media: foundMedia };
+      return buildInboundNormalizationResult(bodyParts.join("\n"), medias);
     }
   }
 

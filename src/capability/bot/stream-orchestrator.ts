@@ -26,8 +26,29 @@ export type StartBotAgentStreamParams = {
   msg: WecomInboundMessage;
   streamId: string;
   mergedContents?: string[] | string;
+  mergedMessages?: WecomInboundMessage[];
   mergedMsgids?: string[];
 };
+
+type InboundMediaFailure = {
+  name?: string;
+  error: string;
+};
+
+function formatMediaFailure(error: unknown): string {
+  return error instanceof Error && error.message.trim()
+    ? error.message.trim()
+    : String(error ?? "unknown media failure");
+}
+
+function appendMediaFailures(body: string, failures: InboundMediaFailure[]): string {
+  if (failures.length === 0) return body;
+  const lines = failures.map((failure, index) => {
+    const name = failure.name?.trim() || `第${index + 1}个附件`;
+    return `[附件处理失败: ${name} - ${failure.error}]`;
+  });
+  return [body, ...lines].filter((line) => line.trim()).join("\n");
+}
 
 export function createBotStreamOrchestrator(params: {
   streamStore: StreamStore;
@@ -67,7 +88,7 @@ export function createBotStreamOrchestrator(params: {
   };
 
   async function flushPending(pending: PendingInbound): Promise<void> {
-    const { streamId, target, msg, contents, msgids, conversationKey, batchKey } = pending;
+    const { streamId, target, msg, messages, contents, msgids, conversationKey, batchKey } = pending;
     const mergedContents = contents.filter((c) => c.trim()).join("\n").trim();
 
     let core: PluginRuntime | null = null;
@@ -97,6 +118,7 @@ export function createBotStreamOrchestrator(params: {
       msg,
       streamId,
       mergedContents: contents.length > 1 ? mergedContents : undefined,
+      mergedMessages: messages.length > 1 ? messages : undefined,
       mergedMsgids: msgids.length > 1 ? msgids : undefined,
     }).catch((err) => {
       streamStore.updateStream(streamId, (state) => {
@@ -129,15 +151,31 @@ export function createBotStreamOrchestrator(params: {
       s.aibotid = aibotid;
     });
 
-    let { body: rawBody, media } = await processBotInboundMessage({
-      target,
-      msg,
-      recordOperationalIssue: (event) => recordBotOperationalEvent(target, event),
-    });
-
-    if (params.mergedContents) {
-      rawBody = Array.isArray(params.mergedContents) ? params.mergedContents.join("\n") : params.mergedContents;
+    const inboundMessages = params.mergedMessages?.length ? params.mergedMessages : [msg];
+    const normalizedMessages = [];
+    for (const inboundMessage of inboundMessages) {
+      normalizedMessages.push(
+        await processBotInboundMessage({
+          target,
+          msg: inboundMessage,
+          recordOperationalIssue: (event) => recordBotOperationalEvent(target, event),
+        }),
+      );
     }
+    const normalizedBody = normalizedMessages
+      .map((result) => result.body)
+      .filter((bodyPart) => bodyPart.trim())
+      .join("\n")
+      .trim();
+    const mergedBody = params.mergedContents
+      ? Array.isArray(params.mergedContents)
+        ? params.mergedContents.join("\n")
+        : params.mergedContents
+      : "";
+    const rawBody = normalizedBody || mergedBody;
+    const inboundMedia = normalizedMessages.flatMap((result) =>
+      result.medias?.length ? result.medias : result.media ? [result.media] : [],
+    );
 
     const handledLocalPath = await handleDirectLocalPathIntent({
       streamStore,
@@ -151,17 +189,20 @@ export function createBotStreamOrchestrator(params: {
     });
     if (handledLocalPath) return;
 
-    let mediaPath: string | undefined;
-    let mediaType: string | undefined;
-    const mediaFilename = media?.filename;
-    if (media) {
+    const mediaFailures: InboundMediaFailure[] = [];
+    const mediaRecords: Array<{ path: string; contentType?: string; filename: string }> = [];
+    const maxBytes = resolveWecomMediaMaxBytes(target.config, target.account.accountId);
+    for (const media of inboundMedia) {
       try {
-        const maxBytes = resolveWecomMediaMaxBytes(target.config, target.account.accountId);
         const saved = await core.channel.media.saveMediaBuffer(media.buffer, media.contentType, "inbound", maxBytes, media.filename);
-        mediaPath = saved.path;
-        mediaType = saved.contentType;
-        logVerbose(target, `saved inbound media to ${mediaPath} (${mediaType})`);
+        mediaRecords.push({
+          path: saved.path,
+          contentType: saved.contentType,
+          filename: media.filename,
+        });
+        logVerbose(target, `saved inbound media to ${saved.path} (${saved.contentType})`);
       } catch (err) {
+        mediaFailures.push({ name: media.filename, error: formatMediaFailure(err) });
         target.runtime.error?.(`Failed to save inbound media: ${String(err)}`);
       }
     }
@@ -207,19 +248,20 @@ export function createBotStreamOrchestrator(params: {
       logVerbose(target, `dynamic agent routing: ${targetAgentId}, sessionKey=${route.sessionKey}`);
     }
 
-    if (mediaPath) {
+    for (const media of mediaRecords) {
       try {
         const stagedSessionPath = await stageWecomInboundMediaForSession({
           cfg: target.config,
           accountId: target.account.accountId,
           agentId: route.agentId,
           sessionKey: route.sessionKey,
-          mediaPath,
-          filename: mediaFilename,
+          mediaPath: media.path,
+          filename: media.filename,
         });
-        mediaPath = stagedSessionPath;
-        logVerbose(target, `session media staged to ${mediaPath}`);
+        media.path = stagedSessionPath;
+        logVerbose(target, `session media staged to ${media.path}`);
       } catch (err) {
+        mediaFailures.push({ name: media.filename, error: formatMediaFailure(err) });
         target.runtime.error?.(`Failed to stage inbound media for session workspace: ${String(err)}`);
       }
     }
@@ -230,6 +272,7 @@ export function createBotStreamOrchestrator(params: {
     const fromLabel = chatType === "group" ? `group:${chatId}` : `user:${userId}`;
     const storePath = core.channel.session.resolveStorePath(config.session?.store, { agentId: route.agentId });
     const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(config);
+    const effectiveRawBody = appendMediaFailures(rawBody, mediaFailures);
     const previousTimestamp = core.channel.session.readSessionUpdatedAt({
       storePath,
       sessionKey: route.sessionKey,
@@ -239,7 +282,7 @@ export function createBotStreamOrchestrator(params: {
       from: fromLabel,
       previousTimestamp,
       envelope: envelopeOptions,
-      body: rawBody,
+      body: effectiveRawBody,
     });
 
     const authz = await resolveWecomCommandAuthorization({
@@ -271,20 +314,24 @@ export function createBotStreamOrchestrator(params: {
       return;
     }
 
-    const attachments = mediaPath
-      ? [
-        {
-          name: media?.filename || "file",
-          mimeType: mediaType,
-          url: pathToFileURL(mediaPath).href,
-        },
-      ]
+    const attachments = mediaRecords.length
+      ? mediaRecords.map((media) => ({
+          name: media.filename || "file",
+          mimeType: media.contentType,
+          contentType: media.contentType,
+          url: pathToFileURL(media.path).href,
+          remoteUrl: pathToFileURL(media.path).href,
+        }))
       : undefined;
+    const firstMedia = mediaRecords[0];
+    const mediaPaths = mediaRecords.map((media) => media.path);
+    const mediaTypes = mediaRecords.map((media) => media.contentType);
+    const mediaTypesPayload = mediaTypes.some(Boolean) ? mediaTypes : undefined;
 
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: body,
-      RawBody: rawBody,
-      CommandBody: rawBody,
+      RawBody: effectiveRawBody,
+      CommandBody: effectiveRawBody,
       Attachments: attachments,
       From: chatType === "group" ? `wecom:group:${chatId}` : `wecom:user:${userId}`,
       To: chatType === "group" ? `wecom:group:${chatId}` : `wecom:user:${chatId}`,
@@ -300,9 +347,13 @@ export function createBotStreamOrchestrator(params: {
       CommandAuthorized: commandAuthorized,
       OriginatingChannel: "wecom",
       OriginatingTo: chatType === "group" ? `wecom:group:${chatId}` : `wecom:user:${chatId}`,
-      MediaPath: mediaPath,
-      MediaType: mediaType,
-      MediaUrl: mediaPath,
+      MediaFailures: mediaFailures.length > 0 ? mediaFailures : undefined,
+      MediaPath: firstMedia?.path,
+      MediaType: firstMedia?.contentType,
+      MediaUrl: firstMedia?.path,
+      MediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
+      MediaUrls: mediaPaths.length > 0 ? mediaPaths : undefined,
+      MediaTypes: mediaTypesPayload,
     });
 
     await core.channel.session.recordInboundSession({

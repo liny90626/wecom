@@ -31,6 +31,7 @@ export type PendingInbound = {
   batchKey: string;
   target: WecomWebhookTarget;
   msg: WecomInboundMessage;
+  messages: WecomInboundMessage[];
   contents: string[];
   media?: { buffer: Buffer; contentType: string; filename: string };
   msgids: string[];

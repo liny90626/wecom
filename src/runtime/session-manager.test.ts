@@ -171,4 +171,43 @@ describe("prepareInboundSession", () => {
       }),
     );
   });
+
+  it("waits for tracked session metadata before returning", async () => {
+    getPeerContextToken.mockReturnValue(undefined);
+    let releaseMetadata!: () => void;
+    const metadataTask = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
+    const { core, recordInboundSession } = createCore();
+    recordInboundSession.mockImplementationOnce(async (params) => {
+      params.trackSessionMetaTask?.(metadataTask);
+    });
+
+    const operation = prepareInboundSession({
+      core,
+      cfg: {} as any,
+      event: {
+        accountId: "default",
+        transport: "bot-ws",
+        messageId: "msg-metadata-wait",
+        conversation: {
+          peerKind: "direct",
+          peerId: "HiDaoMax",
+          senderId: "HiDaoMax",
+        },
+        text: "hello",
+      } as any,
+      mediaService: createMediaService(),
+    });
+    let settled = false;
+    void operation.then(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() => expect(recordInboundSession).toHaveBeenCalledTimes(1));
+    expect(settled).toBe(false);
+    releaseMetadata();
+    await operation;
+    expect(settled).toBe(true);
+  });
 });

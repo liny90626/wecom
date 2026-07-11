@@ -2,6 +2,7 @@ import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
 import type { WecomMediaService } from "../shared/media-service.js";
 import type { UnifiedInboundEvent } from "../types/index.js";
 import { getPeerContextToken } from "../context-store.js";
+import { recordInboundSessionSettled } from "../shared/inbound-session.js";
 import { buildWecomContextTarget } from "../target.js";
 import { resolveRuntimeRoute } from "./routing-bridge.js";
 import { registerWecomSourceSnapshot } from "./source-registry.js";
@@ -11,6 +12,12 @@ export type PreparedSession = {
   ctx: ReturnType<PluginRuntime["channel"]["reply"]["finalizeInboundContext"]>;
   storePath: string;
 };
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error("WeCom inbound session prepare aborted.");
+  }
+}
 
 function readContextSessionId(ctx: { SessionId?: string } | Record<string, unknown>): string | undefined {
   const sessionId = "SessionId" in ctx ? ctx.SessionId : undefined;
@@ -22,8 +29,10 @@ export async function prepareInboundSession(params: {
   cfg: OpenClawConfig;
   event: UnifiedInboundEvent;
   mediaService: WecomMediaService;
+  abortSignal?: AbortSignal;
 }): Promise<PreparedSession> {
-  const { core, cfg, event, mediaService } = params;
+  const { core, cfg, event, mediaService, abortSignal } = params;
+  throwIfAborted(abortSignal);
   const route = resolveRuntimeRoute({ core, cfg, event });
   const source =
     event.transport === "bot-ws"
@@ -49,6 +58,7 @@ export async function prepareInboundSession(params: {
     sessionKey: route.sessionKey,
   });
   const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(cfg);
+  throwIfAborted(abortSignal);
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "WeCom",
     from: `${event.conversation.peerKind}:${event.conversation.peerId}`,
@@ -58,9 +68,11 @@ export async function prepareInboundSession(params: {
   });
 
   const firstAttachment = await mediaService.normalizeFirstAttachment(event);
+  throwIfAborted(abortSignal);
   const mediaPath = firstAttachment
     ? await mediaService.saveInboundAttachment(event, firstAttachment)
     : undefined;
+  throwIfAborted(abortSignal);
   const defaultOriginatingTo =
     event.conversation.peerKind === "group"
       ? `wecom:group:${event.conversation.peerId}`
@@ -128,12 +140,18 @@ export async function prepareInboundSession(params: {
     });
   }
 
-  await core.channel.session.recordInboundSession({
-    storePath,
-    sessionKey: ctx.SessionKey ?? route.sessionKey,
-    ctx,
-    onRecordError: () => {},
-  });
+  throwIfAborted(abortSignal);
+  await recordInboundSessionSettled(
+    core,
+    {
+      storePath,
+      sessionKey: ctx.SessionKey ?? route.sessionKey,
+      ctx,
+      onRecordError: () => {},
+    },
+    { abortSignal },
+  );
+  throwIfAborted(abortSignal);
 
   return { route, ctx, storePath };
 }

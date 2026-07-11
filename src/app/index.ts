@@ -92,13 +92,14 @@ export function registerActiveBotWsReplyHandle(params: {
   peerKind?: "direct" | "group" | null;
   peerId?: string | null;
   handle: ReplyHandle;
-}): void {
+}): boolean {
   const accountId = normalizeOptional(params.accountId);
   const sessionKey = normalizeOptional(params.sessionKey);
   const peerId = normalizePeerId(params.peerId);
   if (!accountId) {
-    return;
+    return false;
   }
+  let supersededPrevious = false;
   if (sessionKey) {
     activeBotWsReplyHandlesBySession.set(
       buildSessionHandleKey(accountId, sessionKey),
@@ -109,6 +110,7 @@ export function registerActiveBotWsReplyHandle(params: {
     const peerKey = buildPeerHandleKey(accountId, params.peerKind, peerId);
     const previousPeerHandle = activeBotWsReplyHandlesByPeer.get(peerKey);
     if (previousPeerHandle && previousPeerHandle !== params.handle) {
+      supersededPrevious = true;
       previousPeerHandle.supersedeByNewInbound?.({
         accountId,
         peerKind: params.peerKind,
@@ -118,6 +120,7 @@ export function registerActiveBotWsReplyHandle(params: {
     }
     activeBotWsReplyHandlesByPeer.set(peerKey, params.handle);
   }
+  return supersededPrevious;
 }
 
 export function getActiveBotWsReplyHandle(params: {
@@ -184,14 +187,28 @@ export function unregisterBotWsPushHandle(accountId: string): void {
 export function unregisterAccountRuntime(accountId: string): void {
   runtimes.delete(accountId);
   botWsPushHandles.delete(accountId);
+  const handlesToDispose = new Set<ReplyHandle>();
   for (const key of activeBotWsReplyHandlesBySession.keys()) {
     if (key.startsWith(`${accountId}::`)) {
+      const handle = activeBotWsReplyHandlesBySession.get(key);
+      if (handle) handlesToDispose.add(handle);
       activeBotWsReplyHandlesBySession.delete(key);
     }
   }
   for (const key of activeBotWsReplyHandlesByPeer.keys()) {
     if (key.startsWith(`${accountId}::`)) {
+      const handle = activeBotWsReplyHandlesByPeer.get(key);
+      if (handle) handlesToDispose.add(handle);
       activeBotWsReplyHandlesByPeer.delete(key);
+    }
+  }
+  for (const handle of handlesToDispose) {
+    try {
+      handle.dispose?.(`account-unregister:${accountId}`);
+    } catch (error) {
+      console.warn(
+        `[wecom-runtime] active reply dispose failed account=${accountId} error=${String(error)}`,
+      );
     }
   }
   clearWecomSourceAccount(accountId);

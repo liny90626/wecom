@@ -312,6 +312,42 @@ describe("dispatchRuntimeReply", () => {
     await expect(run(true)).resolves.toBeUndefined();
   });
 
+  it("does not treat another outbound in the same session as this run's Fast completion", async () => {
+    const sessionKey = "session-unrelated-outbound-after-fast";
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onToolResult({
+        text: "Fast: auto-off(62s>=60s)",
+        channelData: { openclawProgressKind: "fast-mode-auto" },
+      });
+      recordWecomOutboundDelivery(sessionKey);
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        sourceReplyDeliveryMode: "message_tool_only",
+        observedReplyDelivery: false,
+      };
+    });
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: sessionKey } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver: vi.fn().mockResolvedValue(undefined),
+          fail,
+        } as any,
+      }),
+    ).rejects.toThrow("no visible output");
+    expect(fail).toHaveBeenCalledOnce();
+  });
+
   it("accepts message-tool delivery completed while Fast auto-off progress is sent", async () => {
     const sessionKey = "session-message-tool-during-fast-off";
     let releaseProgress!: () => void;

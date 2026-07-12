@@ -171,6 +171,7 @@ export async function dispatchRuntimeReply(params: {
     }
     const postFastObservedDelivery =
       fastOffPending &&
+      observedReplyDelivery &&
       getWecomOutboundDeliverySequence(sessionKey) > fastOffOutboundDeliverySequence;
     if ((observedReplyDelivery && !fastOffPending) || postFastObservedDelivery) {
       await closeReply();
@@ -192,6 +193,7 @@ export async function dispatchRuntimeReply(params: {
   const observedDelivery = observedReplyDelivery || result.observedReplyDelivery === true;
   const postFastObservedDelivery =
     fastOffPending &&
+    observedDelivery &&
     getWecomOutboundDeliverySequence(sessionKey) > fastOffOutboundDeliverySequence;
   const successfulFinal = result.queuedFinal === true || (result.counts?.final ?? 0) > 0;
 

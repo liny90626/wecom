@@ -880,35 +880,44 @@ async function processAgentMessage(params: {
 
   // 5秒无响应自动回复进度提示
   let hasResponseSent = false;
+  // 进度提示与正式回复共享同一队列，避免已开始发送的提示晚于正文到达。
+  let messageSendQueue = Promise.resolve();
   const effectiveAgent = upstreamAgent ?? agent;
   const effectiveReplyTarget = upstreamReplyTarget ?? replyTarget;
-  const processingTimer = setTimeout(async () => {
-    if (hasResponseSent) return;
-    try {
-      if (upstreamAgent && primaryAgentForUpstream) {
-        await sendUpstreamAgentApiText({
-          upstreamAgent,
-          primaryAgent: primaryAgentForUpstream,
-          ...effectiveReplyTarget,
-          text: "正在处理中，请稍候...",
-        });
-      } else {
-        await sendAgentApiText({
-          agent: effectiveAgent,
-          ...effectiveReplyTarget,
-          text: "正在处理中，请稍候...",
-        });
-      }
-      log?.(
-        `[wecom-agent] sent processing notification to ${isGroup ? `chat:${peerId}` : fromUser}`,
-      );
-    } catch (err) {
-      error?.(`[wecom-agent] failed to send processing notification: ${String(err)}`);
-    }
+  const processingTimer = setTimeout(() => {
+    messageSendQueue = appendSequentialTask(
+      messageSendQueue,
+      async () => {
+        if (hasResponseSent) return;
+        try {
+          if (upstreamAgent && primaryAgentForUpstream) {
+            await sendUpstreamAgentApiText({
+              upstreamAgent,
+              primaryAgent: primaryAgentForUpstream,
+              ...effectiveReplyTarget,
+              text: "正在处理中，请稍候...",
+            });
+          } else {
+            await sendAgentApiText({
+              agent: effectiveAgent,
+              ...effectiveReplyTarget,
+              text: "正在处理中，请稍候...",
+            });
+          }
+          log?.(
+            `[wecom-agent] sent processing notification to ${isGroup ? `chat:${peerId}` : fromUser}`,
+          );
+        } catch (err) {
+          error?.(`[wecom-agent] failed to send processing notification: ${String(err)}`);
+        }
+      },
+      (err) => {
+        error?.(`[wecom-agent] previous send task failed before processing notice: ${String(err)}`);
+      },
+    );
   }, 5000);
 
   // 发送队列锁：确保所有 deliver 调用（以及内部的分片发送）严格串行执行
-  let messageSendQueue = Promise.resolve();
   let deferredMediaUrls: string[] = [];
 
   const mergeDeferredMediaUrls = (mediaUrls: string[]): string[] => {
@@ -1067,8 +1076,8 @@ async function processAgentMessage(params: {
           // 更新队列链
           // 使用 then 链接，并捕获前一个任务可能的错误，确保当前任务总能执行
           messageSendQueue = appendSequentialTask(messageSendQueue, currentTask, (err) => {
-              error?.(`[wecom-agent] previous send task failed: ${String(err)}`);
-            });
+            error?.(`[wecom-agent] previous send task failed: ${String(err)}`);
+          });
 
           // 等待当前任务完成（保持背压，虽然对于 http callback 模式这可能只是延迟了整体结束时间）
           await messageSendQueue;

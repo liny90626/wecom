@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { processBotInboundMessage } from "./inbound-normalizer.js";
 import { decryptWecomMediaWithMeta } from "../../media.js";
+import { WECOM_PKCS7_BLOCK_SIZE } from "../../crypto.js";
 
 vi.mock("../../media.js", () => ({
   decryptWecomMediaWithMeta: vi.fn(),
@@ -59,7 +60,7 @@ describe("processBotInboundMessage quote media", () => {
       "https://example.com/quoted.pdf",
       "account-aes-key",
       expect.objectContaining({
-        maxBytes: 24 * 1024 * 1024,
+        maxBytes: 24 * 1024 * 1024 + WECOM_PKCS7_BLOCK_SIZE,
       }),
     );
     expect(result.media).toBeDefined();
@@ -205,7 +206,9 @@ describe("processBotInboundMessage quote media", () => {
         sourceUrl: "https://example.com/first.png",
       })
       .mockImplementationOnce(async (_url, _aesKey, options) => {
-        expect(options?.maxBytes).toBe(aggregateBytes - firstBytes);
+        expect(options?.maxBytes).toBe(
+          aggregateBytes - firstBytes + WECOM_PKCS7_BLOCK_SIZE,
+        );
         throw new Error(`response body too large (>${options?.maxBytes} bytes)`);
       });
 
@@ -240,17 +243,83 @@ describe("processBotInboundMessage quote media", () => {
       1,
       "https://example.com/first.png",
       "account-aes-key",
-      expect.objectContaining({ maxBytes: aggregateBytes }),
+      expect.objectContaining({
+        maxBytes: aggregateBytes + WECOM_PKCS7_BLOCK_SIZE,
+      }),
     );
     expect(result.medias?.map((media) => media.filename)).toEqual(["first.png"]);
-    expect(result.body).toBe(
-      `按顺序处理\n[image]\n[file] (decryption failed: response body too large (>${aggregateBytes - firstBytes} bytes))`,
-    );
+    expect(result.body).toBe("按顺序处理\n[image]\n[file]");
     expect(result.mediaFailures).toEqual([
       {
         name: "second.pdf",
-        error: `response body too large (>${aggregateBytes - firstBytes} bytes)`,
+        error: "附件超过本批次大小限制",
       },
+    ]);
+  });
+
+  it("accepts plaintext exactly at the budget while allowing one encrypted padding block", async () => {
+    const plaintextBytes = 1024;
+    vi.mocked(decryptWecomMediaWithMeta).mockResolvedValue({
+      buffer: Buffer.alloc(plaintextBytes, 1),
+      sourceContentType: "image/png",
+      sourceFilename: "exact.png",
+      sourceUrl: "https://example.com/exact.png",
+    });
+
+    const result = await processBotInboundMessage({
+      target: {
+        account: { accountId: "purple", encodingAESKey: "account-aes-key" },
+        config: { channels: { wecom: { mediaMaxMb: 24 } } },
+        runtime: { error: logError },
+      } as never,
+      msg: {
+        msgid: "msg-exact-media-budget",
+        msgtype: "image",
+        image: { url: "https://example.com/exact.png" },
+      } as never,
+      maxDownloadBytes: plaintextBytes,
+      recordOperationalIssue,
+    });
+
+    expect(decryptWecomMediaWithMeta).toHaveBeenCalledWith(
+      "https://example.com/exact.png",
+      "account-aes-key",
+      expect.objectContaining({
+        maxBytes: plaintextBytes + WECOM_PKCS7_BLOCK_SIZE,
+      }),
+    );
+    expect(result.media?.buffer).toHaveLength(plaintextBytes);
+    expect(result.mediaFailures).toBeUndefined();
+  });
+
+  it("rejects decrypted plaintext that exceeds the remaining aggregate budget", async () => {
+    const plaintextBytes = 1024;
+    vi.mocked(decryptWecomMediaWithMeta).mockResolvedValue({
+      buffer: Buffer.alloc(plaintextBytes + 1, 1),
+      sourceContentType: "image/png",
+      sourceFilename: "too-large.png",
+      sourceUrl: "https://example.com/too-large.png",
+    });
+
+    const result = await processBotInboundMessage({
+      target: {
+        account: { accountId: "purple", encodingAESKey: "account-aes-key" },
+        config: { channels: { wecom: { mediaMaxMb: 24 } } },
+        runtime: { error: logError },
+      } as never,
+      msg: {
+        msgid: "msg-over-media-budget",
+        msgtype: "image",
+        image: { url: "https://example.com/too-large.png" },
+      } as never,
+      maxDownloadBytes: plaintextBytes,
+      recordOperationalIssue,
+    });
+
+    expect(result.media).toBeUndefined();
+    expect(result.body).toBe("[image]");
+    expect(result.mediaFailures).toEqual([
+      { name: "too-large.png", error: "附件超过本批次大小限制" },
     ]);
   });
 
@@ -333,10 +402,15 @@ describe("processBotInboundMessage quote media", () => {
 
     expect(result.medias?.map((media) => media.filename)).toEqual(["first.png"]);
     expect(result.body).toContain("[image]");
-    expect(result.body).toContain("[file] (decryption failed: HTTP 403 forbidden)");
+    expect(result.body).toContain("[file]");
+    expect(result.body).not.toContain("HTTP 403");
+    expect(result.mediaFailures).toEqual([
+      { name: "expired.pdf", error: "附件下载链接已过期或无权限" },
+    ]);
     expect(recordOperationalIssue).toHaveBeenCalledWith(
       expect.objectContaining({ summary: expect.stringContaining("reason=expired_or_forbidden") }),
     );
+    expect(recordOperationalIssue.mock.calls.at(-1)?.[0]?.summary).not.toContain("expired.pdf");
   });
 
   it("records expired_or_forbidden reason for quote media decrypt failure", async () => {
@@ -423,7 +497,7 @@ describe("processBotInboundMessage quote media", () => {
       "https://example.com/quoted.png",
       "account-aes-key",
       expect.objectContaining({
-        maxBytes: 24 * 1024 * 1024,
+        maxBytes: 24 * 1024 * 1024 + WECOM_PKCS7_BLOCK_SIZE,
       }),
     );
     expect(result.media).toBeDefined();
@@ -474,7 +548,7 @@ describe("processBotInboundMessage quote media", () => {
       "https://example.com/quoted.mp4",
       "account-aes-key",
       expect.objectContaining({
-        maxBytes: 24 * 1024 * 1024,
+        maxBytes: 24 * 1024 * 1024 + WECOM_PKCS7_BLOCK_SIZE,
       }),
     );
     expect(result.media).toBeDefined();

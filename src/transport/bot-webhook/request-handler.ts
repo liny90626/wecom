@@ -30,6 +30,17 @@ import { buildInboundBody, resolveWecomSenderUserId, shouldProcessBotInboundMess
 
 const ERROR_HELP = "\n\n遇到问题？联系作者: YanHaidao (微信: YanHaidao)";
 
+function isWebhookTargetActive(target: WecomWebhookTarget): boolean {
+  return target.isActive?.() !== false;
+}
+
+function writeWebhookReloading(res: ServerResponse): void {
+  res.statusCode = 503;
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Retry-After", "1");
+  res.end("service reloading - 服务正在重载，请稍后重试");
+}
+
 type RecordBotOperationalEvent = (
   target: Pick<WecomWebhookTarget, "account" | "auditSink">,
   event: Omit<WecomRuntimeAuditEvent, "transport">,
@@ -58,8 +69,13 @@ export function createBotWebhookRequestHandler(params: {
     const signature = resolveSignatureParam(query);
 
     if (req.method === "GET") {
+      const activeTargets = targets.filter(isWebhookTargetActive);
+      if (activeTargets.length === 0) {
+        writeWebhookReloading(res);
+        return true;
+      }
       const echostr = query.get("echostr") ?? "";
-      const signatureMatches = targets.filter(
+      const signatureMatches = activeTargets.filter(
         (target) =>
           target.account.token &&
           verifyWecomSignature({ token: target.account.token, timestamp, nonce, encrypt: echostr, signature }),
@@ -67,7 +83,7 @@ export function createBotWebhookRequestHandler(params: {
       if (signatureMatches.length !== 1) {
         const reason: RouteFailureReason =
           signatureMatches.length === 0 ? "wecom_account_not_found" : "wecom_account_conflict";
-        const candidateIds = (signatureMatches.length > 0 ? signatureMatches : targets).map((target) => target.account.accountId);
+        const candidateIds = (signatureMatches.length > 0 ? signatureMatches : activeTargets).map((target) => target.account.accountId);
         logRouteFailure({
           reqId,
           path,
@@ -111,19 +127,24 @@ export function createBotWebhookRequestHandler(params: {
       res.end(body.error || "invalid payload");
       return true;
     }
+    const activeTargets = targets.filter(isWebhookTargetActive);
+    if (activeTargets.length === 0) {
+      writeWebhookReloading(res);
+      return true;
+    }
     const record = body.value as any;
     const encrypt = String(record?.encrypt ?? record?.Encrypt ?? "");
     console.log(
       `[wecom] inbound(bot): reqId=${reqId} rawJsonBytes=${Buffer.byteLength(JSON.stringify(record), "utf8")} hasEncrypt=${Boolean(encrypt)} encryptLen=${encrypt.length}`,
     );
-    const signatureMatches = targets.filter(
+    const signatureMatches = activeTargets.filter(
       (target) =>
         target.account.token && verifyWecomSignature({ token: target.account.token, timestamp, nonce, encrypt, signature }),
     );
     if (signatureMatches.length !== 1) {
       const reason: RouteFailureReason =
         signatureMatches.length === 0 ? "wecom_account_not_found" : "wecom_account_conflict";
-      const candidateIds = (signatureMatches.length > 0 ? signatureMatches : targets).map((target) => target.account.accountId);
+      const candidateIds = (signatureMatches.length > 0 ? signatureMatches : activeTargets).map((target) => target.account.accountId);
       logRouteFailure({
         reqId,
         path,

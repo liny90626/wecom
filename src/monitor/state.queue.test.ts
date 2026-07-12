@@ -184,6 +184,144 @@ describe("wecom StreamStore queue", () => {
     }
   });
 
+  test("cancels three pending batches without promoting ready successors during reload", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new StreamStore();
+      const flushed: string[] = [];
+      store.setFlushHandler((pending) => flushed.push(pending.streamId));
+      const target = {
+        account: { accountId: "reload-three" } as any,
+        config: {} as any,
+        runtime: {},
+        core: {} as any,
+        path: "/wecom",
+      } satisfies WecomWebhookTarget;
+      const conversationKey = "wecom:reload-three:U:reload";
+      const active = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "RELOAD-3-A" } as any,
+        msgContent: "A",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 1_000,
+      });
+      const queued = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "RELOAD-3-B" } as any,
+        msgContent: "B",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      await vi.advanceTimersByTimeAsync(11);
+      const later = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "RELOAD-3-C" } as any,
+        msgContent: "C",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      const queuedAck = store.createStream({ msgid: "ACK-RELOAD-3-B" });
+      const laterAck = store.createStream({ msgid: "ACK-RELOAD-3-C" });
+      store.addAckStreamForBatch({ batchStreamId: queued.streamId, ackStreamId: queuedAck });
+      store.addAckStreamForBatch({ batchStreamId: later.streamId, ackStreamId: laterAck });
+      await vi.advanceTimersByTimeAsync(11);
+
+      expect(store.cancelPendingForAccount("reload-three", "account reloaded")).toEqual(
+        expect.arrayContaining([active.streamId, queued.streamId, later.streamId]),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(flushed).toEqual([]);
+      for (const streamId of [active.streamId, queued.streamId, later.streamId]) {
+        expect(store.getStream(streamId)).toEqual(
+          expect.objectContaining({ error: "account reloaded", finished: true }),
+        );
+      }
+      for (const ackStreamId of [queuedAck, laterAck]) {
+        expect(store.getStream(ackStreamId)).toEqual(
+          expect.objectContaining({
+            content: "⚠️ 合并处理失败，请查看上一条错误信息或重试。",
+            finished: true,
+          }),
+        );
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("keeps the third batch queued when prune promotes a ready second batch", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      const store = new StreamStore();
+      const flushed: string[] = [];
+      store.setFlushHandler((pending) => {
+        flushed.push(pending.streamId);
+        store.markStarted(pending.streamId);
+      });
+      const target = {
+        account: {} as any,
+        config: {} as any,
+        runtime: {},
+        core: {} as any,
+        path: "/wecom",
+      } satisfies WecomWebhookTarget;
+      const conversationKey = "wecom:default:U:prune-three";
+      const active = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "PRUNE-3-A" } as any,
+        msgContent: "A",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      await vi.advanceTimersByTimeAsync(11);
+      const queued = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "PRUNE-3-B" } as any,
+        msgContent: "B",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      await vi.advanceTimersByTimeAsync(11);
+
+      vi.setSystemTime(new Date(Date.now() + LIMITS.STREAM_TTL_MS + 1));
+      store.updateStream(queued.streamId, () => {});
+      const later = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "PRUNE-3-C" } as any,
+        msgContent: "C",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 1_000,
+      });
+      store.prune(Date.now());
+
+      expect(flushed).toEqual([active.streamId, queued.streamId]);
+      expect(store.getStream(later.streamId)).toEqual(
+        expect.objectContaining({ started: false, finished: false }),
+      );
+
+      store.onStreamFinished(queued.streamId);
+      expect(flushed).toEqual([active.streamId, queued.streamId]);
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(flushed).toEqual([active.streamId, queued.streamId, later.streamId]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("does not merge into active batch; flushes queued batch after active finishes", async () => {
     vi.useFakeTimers();
     try {
@@ -283,6 +421,38 @@ describe("wecom StreamStore queue", () => {
       ],
       contents: ["[image]", "[image]", "比较两张图"],
     },
+    {
+      name: "quoted file then text",
+      messages: [
+        {
+          msgid: "M1",
+          msgtype: "text",
+          text: { content: "请看引用文件" },
+          quote: {
+            msgtype: "file",
+            file: { url: "https://example.com/quoted.pdf" },
+          },
+        },
+        { msgid: "M2", msgtype: "text", text: { content: "请结合文件回答" } },
+      ],
+      contents: ["请看引用文件\n[quote:file]", "请结合文件回答"],
+    },
+    {
+      name: "text then quoted file",
+      messages: [
+        { msgid: "M1", msgtype: "text", text: { content: "先补充问题" } },
+        {
+          msgid: "M2",
+          msgtype: "text",
+          text: { content: "引用文件如下" },
+          quote: {
+            msgtype: "file",
+            file: { url: "https://example.com/quoted.pdf" },
+          },
+        },
+      ],
+      contents: ["先补充问题", "引用文件如下\n[quote:file]"],
+    },
   ])("merges a short $name burst into one ordered initial batch", async ({ messages, contents }) => {
     vi.useFakeTimers();
     try {
@@ -322,6 +492,71 @@ describe("wecom StreamStore queue", () => {
       expect(flushedPending.messages.map((msg: WecomInboundMessage) => msg.msgid)).toEqual(
         messages.map((msg) => msg.msgid),
       );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("starts a new queued batch after the previous short merge window expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new StreamStore();
+      const flushed: string[] = [];
+      store.setFlushHandler((pending) => {
+        flushed.push(pending.streamId);
+        store.markStarted(pending.streamId);
+      });
+      const target = {
+        account: {} as any,
+        config: {} as any,
+        runtime: {},
+        core: {} as any,
+        path: "/wecom",
+      } satisfies WecomWebhookTarget;
+      const conversationKey = "wecom:default:U:expired-queued-window";
+
+      const active = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "WINDOW-A" } as any,
+        msgContent: "A",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      await vi.advanceTimersByTimeAsync(11);
+      expect(flushed).toEqual([active.streamId]);
+
+      const queued = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "WINDOW-B" } as any,
+        msgContent: "B",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      await vi.advanceTimersByTimeAsync(11);
+
+      const later = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "WINDOW-C" } as any,
+        msgContent: "C",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      expect(queued.status).toBe("queued_new");
+      expect(later.status).toBe("queued_new");
+      expect(later.streamId).not.toBe(queued.streamId);
+      await vi.advanceTimersByTimeAsync(11);
+
+      store.onStreamFinished(active.streamId);
+      expect(flushed).toEqual([active.streamId, queued.streamId]);
+      store.onStreamFinished(queued.streamId);
+      expect(flushed).toEqual([active.streamId, queued.streamId, later.streamId]);
+      store.onStreamFinished(later.streamId);
     } finally {
       vi.useRealTimers();
     }
@@ -413,6 +648,42 @@ describe("wecom StreamStore queue", () => {
       target,
       msg: { msgid: "M2", msgtype: "text", text: { content: "[file] 只是文字" } } as any,
       msgContent: "[file] 只是文字",
+      nonce: "n",
+      timestamp: "t",
+    });
+
+    expect(first.status).toBe("active_new");
+    expect(second.status).toBe("queued_new");
+  });
+
+  test("does not treat a text-only mixed message as an attachment batch", () => {
+    const store = new StreamStore();
+    const target = {
+      account: {} as any,
+      config: {} as any,
+      runtime: {},
+      core: {} as any,
+      path: "/wecom",
+    } satisfies WecomWebhookTarget;
+    const conversationKey = "wecom:default:U:text-only-mixed";
+
+    const first = store.addPendingMessage({
+      conversationKey,
+      target,
+      msg: { msgid: "M1", msgtype: "text", text: { content: "第一条" } } as any,
+      msgContent: "第一条",
+      nonce: "n",
+      timestamp: "t",
+    });
+    const second = store.addPendingMessage({
+      conversationKey,
+      target,
+      msg: {
+        msgid: "M2",
+        msgtype: "mixed",
+        mixed: { msg_item: [{ msgtype: "text", text: { content: "第二条" } }] },
+      } as any,
+      msgContent: "第二条",
       nonce: "n",
       timestamp: "t",
     });

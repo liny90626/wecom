@@ -23,6 +23,7 @@ export type WecomWebhookTarget = {
   runtime: WecomRuntimeEnv;
   core: PluginRuntime;
   path: string;
+  isActive?: () => boolean;
   touchTransportSession?: (patch: TransportSessionPatch) => void;
   auditSink?: (event: WecomRuntimeAuditEvent) => void;
 };

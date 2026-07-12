@@ -1,4 +1,5 @@
 import { decryptWecomMediaWithMeta } from "../../media.js";
+import { WECOM_PKCS7_BLOCK_SIZE } from "../../crypto.js";
 import {
   resolveWecomEgressProxyUrl,
   resolveWecomMediaDownloadTimeoutMs,
@@ -296,6 +297,19 @@ function classifyMediaFailure(error: unknown): MediaFailureReason {
   return "decrypt";
 }
 
+function describeMediaFailure(reason: MediaFailureReason): string {
+  switch (reason) {
+    case "expired_or_forbidden":
+      return "附件下载链接已过期或无权限";
+    case "timeout":
+      return "附件下载超时";
+    case "size_limit":
+      return "附件超过本批次大小限制";
+    default:
+      return "附件下载或解密失败";
+  }
+}
+
 /**
  * 从引用消息中选择并提取第一个可用的媒体候选。
  * 
@@ -450,20 +464,13 @@ export async function processBotInboundMessage(params: {
     recordOperationalIssue({
       category: "media-decrypt-failed",
       messageId: msg.msgid ? String(msg.msgid) : undefined,
-      summary: `${payload.scope} ${payload.kind} decrypt failed reason=${reason} url=${payload.url}`,
+      summary: `${payload.scope} ${payload.kind} decrypt failed reason=${reason}`,
       raw: { transport: "bot-webhook", envelopeType: "json", body: msg },
       error: payload.error instanceof Error ? payload.error.message : String(payload.error),
     });
-    const baseErrorMessage =
-      payload.error instanceof Error && payload.error.message.trim()
-        ? payload.error.message.trim()
-        : String(payload.error);
-    const errorMessage =
-      typeof payload.error === "object" && payload.error && (payload.error as any).cause
-        ? `${baseErrorMessage} (cause: ${String((payload.error as any).cause)})`
-        : baseErrorMessage;
+    const errorMessage = describeMediaFailure(reason);
     return {
-      body: `${payload.bodyFallback} (decryption failed: ${errorMessage})`,
+      body: payload.bodyFallback,
       mediaFailures: [
         {
           name:
@@ -489,7 +496,9 @@ export async function processBotInboundMessage(params: {
     const t0 = Date.now();
     console.log(`[wecom-media] download-start kind=${payload.kind} host=${urlHost} aesKey=${payload.aesKey ? "payload" : "account"} timeoutMs=${mediaTimeoutMs} proxy=${proxyUrl || "none"}`);
     const decrypted = await decryptWecomMediaWithMeta(payload.url, payload.aesKey ?? aesKey, {
-      maxBytes: remainingDownloadBytes,
+      // mediaMaxMb is a plaintext budget. The encrypted response can contain
+      // one extra PKCS#7 block, so enforce the exact limit after decryption.
+      maxBytes: remainingDownloadBytes + WECOM_PKCS7_BLOCK_SIZE,
       http: { proxyUrl, timeoutMs: mediaTimeoutMs },
     });
     if (decrypted.buffer.byteLength > remainingDownloadBytes) {

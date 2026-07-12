@@ -10,7 +10,39 @@ const MERGED_ACK_FAILED_TEXT = "⚠️ 合并处理失败，请查看上一条�
 
 function isMediaLikeInbound(msg: WecomInboundMessage): boolean {
   const msgtype = String(msg.msgtype ?? "").trim().toLowerCase();
-  return msgtype === "image" || msgtype === "file" || msgtype === "video" || msgtype === "mixed";
+  if (msgtype === "image" || msgtype === "file" || msgtype === "video") {
+    return true;
+  }
+  if (msgtype !== "mixed") {
+    if (msgtype !== "text" && msgtype !== "voice") {
+      return false;
+    }
+    const quote = (msg as any).quote;
+    const quoteType = String(quote?.msgtype ?? "").trim().toLowerCase();
+    if (quoteType === "image" || quoteType === "file" || quoteType === "video") {
+      return Boolean(String(quote?.[quoteType]?.url ?? "").trim());
+    }
+    const quoteItems = quoteType === "mixed" ? quote?.mixed?.msg_item : undefined;
+    return (
+      Array.isArray(quoteItems) &&
+      quoteItems.some((item: any) => {
+        const itemType = String(item?.msgtype ?? "").trim().toLowerCase();
+        return (
+          ["image", "file", "video"].includes(itemType) &&
+          Boolean(String(item?.[itemType]?.url ?? "").trim())
+        );
+      })
+    );
+  }
+  const items = (msg as any).mixed?.msg_item;
+  return (
+    Array.isArray(items) &&
+    items.some((item: any) =>
+      ["image", "file", "video"].includes(
+        String(item?.msgtype ?? "").trim().toLowerCase(),
+      ),
+    )
+  );
 }
 
 function shouldMergeInitialMediaBatch(
@@ -239,7 +271,7 @@ export class StreamStore {
     const activeBatchKey = state.activeBatchKey;
     const activeIsInitial = activeBatchKey === conversationKey;
     const activePending = this.pendingInbounds.get(activeBatchKey);
-    const queuedBatchKey = state.queue[0];
+    const queuedBatchKey = state.queue.at(-1);
     const canMergeIntoActive =
       activePending &&
       !queuedBatchKey &&
@@ -263,7 +295,7 @@ export class StreamStore {
 
     if (queuedBatchKey) {
       const existingQueued = this.pendingInbounds.get(queuedBatchKey);
-      if (existingQueued) {
+      if (existingQueued && !existingQueued.readyToFlush) {
         existingQueued.contents.push(msgContent);
         existingQueued.messages.push(msg);
         if (msg.msgid) {
@@ -279,7 +311,7 @@ export class StreamStore {
 
     const seq = state.nextSeq++;
     const batchKey = `${conversationKey}#q${seq}`;
-    state.queue = [batchKey];
+    state.queue.push(batchKey);
     const streamId = this.createStream({ msgid: msg.msgid, conversationKey, batchKey });
     const pending: PendingInbound = {
       streamId,

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { decryptWecomMediaWithMeta } from "../../media.js";
+import { WECOM_PKCS7_BLOCK_SIZE } from "../../crypto.js";
 import { StreamStore } from "../../store/stream-batch-store.js";
 import * as runtimeModule from "../../runtime.js";
 import { createBotStreamOrchestrator } from "./stream-orchestrator.js";
@@ -296,7 +297,9 @@ describe("createBotStreamOrchestrator merged media", () => {
         sourceUrl: "https://example.com/first.png",
       })
       .mockImplementationOnce(async (_url, _aesKey, options) => {
-        expect(options?.maxBytes).toBe(aggregateBytes - firstBytes);
+        expect(options?.maxBytes).toBe(
+          aggregateBytes - firstBytes + WECOM_PKCS7_BLOCK_SIZE,
+        );
         throw new Error(`response body too large (>${options?.maxBytes} bytes)`);
       });
     const { core, recordInboundSession, saveMediaBuffer } = createCore();
@@ -337,9 +340,10 @@ describe("createBotStreamOrchestrator merged media", () => {
     expect(saveMediaBuffer).toHaveBeenCalledTimes(1);
     const ctx = recordInboundSession.mock.calls[0]?.[0]?.ctx;
     expect(ctx.Attachments).toHaveLength(1);
-    expect(ctx.RawBody).toContain("response body too large");
+    expect(ctx.RawBody).toContain("附件超过本批次大小限制");
+    expect(ctx.RawBody.match(/附件超过本批次大小限制/g)).toHaveLength(1);
     expect(ctx.MediaFailures).toEqual([
-      expect.objectContaining({ name: "second.png", error: expect.stringContaining("response body too large") }),
+      { name: "second.png", error: "附件超过本批次大小限制" },
     ]);
   });
 

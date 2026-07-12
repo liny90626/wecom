@@ -245,6 +245,66 @@ describe("wecomPlugin gateway lifecycle", () => {
     cancelPending.mockRestore();
   });
 
+  it("does not enqueue an in-flight webhook request after reload retires its target", async () => {
+    const token = "token";
+    const encodingAESKey = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    const timestamp = "1700000000";
+    const nonce = "nonce";
+    const cfg = createWebhookBotConfig({ token, encodingAESKey });
+    const abortController = new AbortController();
+    const ctx = createCtx({ cfg, abortController });
+    const startPromise = wecomPlugin.gateway!.startAccount!(ctx);
+    await Promise.resolve();
+
+    const plain = JSON.stringify({
+      msgid: "MSG-RELOAD-IN-FLIGHT",
+      aibotid: "BOT",
+      chattype: "single",
+      from: { userid: "alice" },
+      msgtype: "text",
+      text: { content: "不要在旧 target 入队" },
+    });
+    const encrypt = encryptWecomPlaintext({
+      encodingAESKey,
+      receiveId: "",
+      plaintext: plain,
+    });
+    const signature = computeWecomMsgSignature({
+      token,
+      timestamp,
+      nonce,
+      encrypt,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "POST";
+    req.url =
+      `/plugins/wecom/bot?msg_signature=${encodeURIComponent(signature)}` +
+      `&timestamp=${timestamp}&nonce=${nonce}`;
+    const res = createMockResponse();
+    const addPending = vi.spyOn(monitorState.streamStore, "addPendingMessage");
+
+    try {
+      const handledPromise = handleWecomWebhookRequest(req, res);
+      await Promise.resolve();
+      abortController.abort();
+      await startPromise;
+
+      req.push(JSON.stringify({ encrypt }));
+      req.push(null);
+      await expect(handledPromise).resolves.toBe(true);
+
+      expect(res._getStatusCode()).toBe(503);
+      expect(res._getData()).toContain("服务正在重载");
+      expect(addPending).not.toHaveBeenCalled();
+    } finally {
+      addPending.mockRestore();
+      if (!abortController.signal.aborted) {
+        abortController.abort();
+        await startPromise;
+      }
+    }
+  });
+
   it("rejects startup when matrix account credentials conflict", async () => {
     const cfg = {
       channels: {

@@ -194,6 +194,114 @@ describe("processBotInboundMessage quote media", () => {
     expect(decryptWecomMediaWithMeta).toHaveBeenCalledTimes(2);
   });
 
+  it("bounds each mixed download by the remaining aggregate byte budget", async () => {
+    const firstBytes = 700 * 1024;
+    const aggregateBytes = 1024 * 1024;
+    vi.mocked(decryptWecomMediaWithMeta)
+      .mockResolvedValueOnce({
+        buffer: Buffer.alloc(firstBytes, 1),
+        sourceContentType: "image/png",
+        sourceFilename: "first.png",
+        sourceUrl: "https://example.com/first.png",
+      })
+      .mockImplementationOnce(async (_url, _aesKey, options) => {
+        expect(options?.maxBytes).toBe(aggregateBytes - firstBytes);
+        throw new Error(`response body too large (>${options?.maxBytes} bytes)`);
+      });
+
+    const result = await processBotInboundMessage({
+      target: {
+        account: { accountId: "purple", encodingAESKey: "account-aes-key" },
+        config: { channels: { wecom: { mediaMaxMb: 24 } } },
+        runtime: { error: logError },
+      } as never,
+      msg: {
+        msgid: "msg-mixed-aggregate-limit",
+        msgtype: "mixed",
+        mixed: {
+          msg_item: [
+            { msgtype: "text", text: { content: "按顺序处理" } },
+            {
+              msgtype: "image",
+              image: { url: "https://example.com/first.png", filename: "first.png" },
+            },
+            {
+              msgtype: "file",
+              file: { url: "https://example.com/second.pdf", filename: "second.pdf" },
+            },
+          ],
+        },
+      } as never,
+      maxDownloadBytes: aggregateBytes,
+      recordOperationalIssue,
+    });
+
+    expect(decryptWecomMediaWithMeta).toHaveBeenNthCalledWith(
+      1,
+      "https://example.com/first.png",
+      "account-aes-key",
+      expect.objectContaining({ maxBytes: aggregateBytes }),
+    );
+    expect(result.medias?.map((media) => media.filename)).toEqual(["first.png"]);
+    expect(result.body).toBe(
+      `按顺序处理\n[image]\n[file] (decryption failed: response body too large (>${aggregateBytes - firstBytes} bytes))`,
+    );
+    expect(result.mediaFailures).toEqual([
+      {
+        name: "second.pdf",
+        error: `response body too large (>${aggregateBytes - firstBytes} bytes)`,
+      },
+    ]);
+  });
+
+  it("extracts the first file or video from quote.mixed", async () => {
+    vi.mocked(decryptWecomMediaWithMeta).mockResolvedValue({
+      buffer: Buffer.from("%PDF-1.7 quoted"),
+      sourceContentType: "application/pdf",
+      sourceFilename: "quoted.pdf",
+      sourceUrl: "https://example.com/quoted.pdf",
+    });
+
+    const result = await processBotInboundMessage({
+      target: {
+        account: { accountId: "purple", encodingAESKey: "account-aes-key" },
+        config: { channels: { wecom: { mediaMaxMb: 24 } } },
+        runtime: { error: logError },
+      } as never,
+      msg: {
+        msgid: "msg-quote-mixed-file",
+        msgtype: "text",
+        text: { content: "看引用附件" },
+        quote: {
+          msgtype: "mixed",
+          mixed: {
+            msg_item: [
+              { msgtype: "text", text: { content: "引用说明" } },
+              {
+                msgtype: "file",
+                file: {
+                  url: "https://example.com/quoted.pdf",
+                  aeskey: "quote-file-key",
+                  filename: "quoted.pdf",
+                },
+              },
+              { msgtype: "video", video: { url: "https://example.com/later.mp4" } },
+            ],
+          },
+        },
+      } as never,
+      recordOperationalIssue,
+    });
+
+    expect(decryptWecomMediaWithMeta).toHaveBeenCalledOnce();
+    expect(decryptWecomMediaWithMeta).toHaveBeenCalledWith(
+      "https://example.com/quoted.pdf",
+      "quote-file-key",
+      expect.any(Object),
+    );
+    expect(result.media?.filename).toBe("quoted.pdf");
+  });
+
   it("keeps successful mixed media and exposes a later decrypt failure", async () => {
     vi.mocked(decryptWecomMediaWithMeta)
       .mockResolvedValueOnce({

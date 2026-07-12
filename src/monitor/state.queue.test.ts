@@ -2,7 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 
 import type { WecomBotInboundMessage as WecomInboundMessage } from "../types/index.js";
 import type { WecomWebhookTarget } from "./types.js";
-import { StreamStore } from "./state.js";
+import { LIMITS, StreamStore } from "./state.js";
 
 describe("wecom StreamStore queue", () => {
   test("settles merged acknowledgement streams on every batch terminal path", () => {
@@ -23,6 +23,165 @@ describe("wecom StreamStore queue", () => {
       }),
     );
     expect(store.onStreamFinished(batchStreamId)).toEqual([]);
+  });
+
+  test("marks merged acknowledgement streams failed when the batch failed", () => {
+    const store = new StreamStore();
+    const batchStreamId = store.createStream({});
+    const ackStreamId = store.createStream({ msgid: "ACK-FAILED" });
+    store.updateStream(batchStreamId, (state) => {
+      state.error = "runtime unavailable";
+      state.finished = true;
+    });
+    store.addAckStreamForBatch({ batchStreamId, ackStreamId });
+
+    expect(store.onStreamFinished(batchStreamId)).toEqual([ackStreamId]);
+    expect(store.getStream(ackStreamId)).toEqual(
+      expect.objectContaining({
+        content: "⚠️ 合并处理失败，请查看上一条错误信息或重试。",
+        finished: true,
+      }),
+    );
+  });
+
+  test("marks merged acknowledgement streams failed for an error fallback terminal", () => {
+    const store = new StreamStore();
+    const batchStreamId = store.createStream({});
+    const ackStreamId = store.createStream({ msgid: "ACK-FALLBACK-FAILED" });
+    store.updateStream(batchStreamId, (state) => {
+      state.fallbackMode = "error";
+      state.finished = true;
+    });
+    store.addAckStreamForBatch({ batchStreamId, ackStreamId });
+
+    store.onStreamFinished(batchStreamId);
+
+    expect(store.getStream(ackStreamId)).toEqual(
+      expect.objectContaining({
+        content: "⚠️ 合并处理失败，请查看上一条错误信息或重试。",
+        finished: true,
+      }),
+    );
+  });
+
+  test("flushes a ready queued batch when prune expires the active stream", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      const store = new StreamStore();
+      const flushed: string[] = [];
+      store.setFlushHandler((pending) => {
+        flushed.push(pending.streamId);
+        store.markStarted(pending.streamId);
+      });
+      const target = {
+        account: {} as any,
+        config: {} as any,
+        runtime: {},
+        core: {} as any,
+        path: "/wecom",
+      } satisfies WecomWebhookTarget;
+      const conversationKey = "wecom:default:U:prune-ready";
+
+      const active = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "PRUNE-A" } as any,
+        msgContent: "A",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      const queued = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "PRUNE-B" } as any,
+        msgContent: "B",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      const ackStreamId = store.createStream({ msgid: "ACK-PRUNE" });
+      store.addAckStreamForBatch({ batchStreamId: active.streamId, ackStreamId });
+
+      await vi.advanceTimersByTimeAsync(11);
+      expect(flushed).toEqual([active.streamId]);
+
+      vi.setSystemTime(new Date(Date.now() + LIMITS.STREAM_TTL_MS + 1));
+      store.updateStream(queued.streamId, () => {});
+      store.prune(Date.now());
+
+      expect(flushed).toEqual([active.streamId, queued.streamId]);
+      expect(store.getStream(ackStreamId)).toEqual(
+        expect.objectContaining({
+          content: "⚠️ 合并处理失败，请查看上一条错误信息或重试。",
+          finished: true,
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("cancels every pending account batch before a ready queue can flush on reload", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new StreamStore();
+      const flushed: string[] = [];
+      store.setFlushHandler((pending) => flushed.push(pending.streamId));
+      const target = {
+        account: { accountId: "reload-account" } as any,
+        config: {} as any,
+        runtime: {},
+        core: {} as any,
+        path: "/wecom",
+      } satisfies WecomWebhookTarget;
+      const conversationKey = "wecom:reload-account:U:reload";
+      const active = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "RELOAD-A" } as any,
+        msgContent: "A",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 1_000,
+      });
+      const queued = store.addPendingMessage({
+        conversationKey,
+        target,
+        msg: { msgid: "RELOAD-B" } as any,
+        msgContent: "B",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      const ackStreamId = store.createStream({ msgid: "ACK-RELOAD" });
+      store.addAckStreamForBatch({ batchStreamId: queued.streamId, ackStreamId });
+
+      await vi.advanceTimersByTimeAsync(11);
+      expect(flushed).toEqual([]);
+
+      expect(store.cancelPendingForAccount("reload-account", "account runtime reloaded")).toEqual(
+        expect.arrayContaining([active.streamId, queued.streamId]),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(flushed).toEqual([]);
+      expect(store.getStream(active.streamId)).toEqual(
+        expect.objectContaining({ error: "account runtime reloaded", finished: true }),
+      );
+      expect(store.getStream(queued.streamId)).toEqual(
+        expect.objectContaining({ error: "account runtime reloaded", finished: true }),
+      );
+      expect(store.getStream(ackStreamId)).toEqual(
+        expect.objectContaining({
+          content: "⚠️ 合并处理失败，请查看上一条错误信息或重试。",
+          finished: true,
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("does not merge into active batch; flushes queued batch after active finishes", async () => {

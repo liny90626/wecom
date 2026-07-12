@@ -52,10 +52,16 @@ export type BotInboundMedia = {
   filename: string;
 };
 
+export type BotInboundMediaFailure = {
+  name?: string;
+  error: string;
+};
+
 export type BotInboundNormalizationResult = {
   body: string;
   media?: BotInboundMedia;
   medias?: BotInboundMedia[];
+  mediaFailures?: BotInboundMediaFailure[];
 };
 
 type InboundMediaKind = "image" | "file" | "video";
@@ -295,7 +301,7 @@ function classifyMediaFailure(error: unknown): MediaFailureReason {
  * 
  * 优先级规则：
  * 1. quote.image / quote.file / quote.video：单个媒体类型直接提取
- * 2. quote.mixed：从多个 msg_item 中提取第一个 image
+ * 2. quote.mixed：按顺序提取第一个 image / file / video
  * 3. URI 过期约 5 分钟，必须尽快下载/解密
  * 
  * @returns 包含 kind、url、aesKey、filename 的候选项，或 undefined
@@ -317,22 +323,23 @@ function resolveQuoteMediaCandidate(msg: WecomInboundMessage): QuoteMediaCandida
     };
   }
 
-  // 处理混合消息类型：从 msg_item 数组中提取第一个图片
+  // Quote media is single-valued here, so preserve item order and take the first supported item.
   if (quoteType === "mixed" && Array.isArray(quote?.mixed?.msg_item)) {
     for (const item of quote.mixed.msg_item) {
       const itemType = String(item?.msgtype ?? "").toLowerCase();
-      if (itemType !== "image") {
+      if (itemType !== "image" && itemType !== "file" && itemType !== "video") {
         continue;
       }
-      const url = String(item?.image?.url ?? "").trim();
+      const kind = itemType as InboundMediaKind;
+      const url = String(item?.[kind]?.url ?? "").trim();
       if (!url) {
         continue;
       }
       return {
-        kind: "image",
+        kind,
         url,
-        aesKey: item?.image?.aeskey,
-        explicitFilename: pickBotFileName(msg, item?.image),
+        aesKey: item?.[kind]?.aeskey,
+        explicitFilename: pickBotFileName(msg, item?.[kind]),
       };
     }
   }
@@ -340,20 +347,71 @@ function resolveQuoteMediaCandidate(msg: WecomInboundMessage): QuoteMediaCandida
   return undefined;
 }
 
+export function countBotInboundMediaCandidates(msg: WecomInboundMessage): number {
+  const msgtype = String(msg.msgtype ?? "").trim().toLowerCase();
+  if (msgtype === "image" || msgtype === "file" || msgtype === "video") {
+    return 1;
+  }
+  if (msgtype === "mixed") {
+    const items = (msg as any).mixed?.msg_item;
+    if (!Array.isArray(items)) return 0;
+    return items.filter((item: any) =>
+      ["image", "file", "video"].includes(String(item?.msgtype ?? "").trim().toLowerCase()),
+    ).length;
+  }
+  if (msgtype === "text" || msgtype === "voice") {
+    return resolveQuoteMediaCandidate(msg) ? 1 : 0;
+  }
+  return 0;
+}
+
+export function buildBotInboundBodyWithoutMediaUrls(msg: WecomInboundMessage): string {
+  const msgtype = String(msg.msgtype ?? "").trim().toLowerCase();
+  if (msgtype === "image" || msgtype === "file" || msgtype === "video") {
+    return `[${msgtype}]`;
+  }
+  if (msgtype === "mixed") {
+    const items = (msg as any).mixed?.msg_item;
+    if (!Array.isArray(items)) return "[mixed]";
+    return items
+      .map((item: any) => {
+        const itemType = String(item?.msgtype ?? "").trim().toLowerCase();
+        if (itemType === "text") return String(item?.text?.content ?? "").trim();
+        return `[${itemType || "item"}]`;
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (msgtype === "text" || msgtype === "voice") {
+    const baseBody =
+      msgtype === "text"
+        ? String((msg as any).text?.content ?? "").trim()
+        : String((msg as any).voice?.content ?? "").trim() || "[voice]";
+    const quoteCandidate = resolveQuoteMediaCandidate(msg);
+    if (quoteCandidate) {
+      return [baseBody, `[quote:${quoteCandidate.kind}]`].filter(Boolean).join("\n");
+    }
+  }
+  return buildInboundBody(msg);
+}
+
 function buildInboundNormalizationResult(
   body: string,
   medias: BotInboundMedia[],
+  mediaFailures: BotInboundMediaFailure[] = [],
 ): BotInboundNormalizationResult {
   return {
     body,
     ...(medias[0] ? { media: medias[0] } : {}),
     ...(medias.length > 0 ? { medias } : {}),
+    ...(mediaFailures.length > 0 ? { mediaFailures } : {}),
   };
 }
 
 export async function processBotInboundMessage(params: {
   target: WecomWebhookTarget;
   msg: WecomInboundMessage;
+  maxDownloadBytes?: number;
   recordOperationalIssue: (event: {
     category: "media-decrypt-failed";
     messageId?: string;
@@ -366,6 +424,10 @@ export async function processBotInboundMessage(params: {
   const msgtype = String(msg.msgtype ?? "").toLowerCase();
   const aesKey = target.account.encodingAESKey;
   const maxBytes = resolveWecomMediaMaxBytes(target.config, target.account.accountId);
+  let remainingDownloadBytes =
+    typeof params.maxDownloadBytes === "number" && Number.isFinite(params.maxDownloadBytes)
+      ? Math.max(0, Math.min(maxBytes, Math.floor(params.maxDownloadBytes)))
+      : maxBytes;
   const proxyUrl = resolveWecomEgressProxyUrl(target.config);
   const mediaTimeoutMs = resolveWecomMediaDownloadTimeoutMs(target.config);
 
@@ -373,6 +435,7 @@ export async function processBotInboundMessage(params: {
     scope: string;
     kind: InboundMediaKind;
     url: string;
+    name?: string;
     error: unknown;
     bodyFallback: string;
   }): BotInboundNormalizationResult => {
@@ -391,11 +454,26 @@ export async function processBotInboundMessage(params: {
       raw: { transport: "bot-webhook", envelopeType: "json", body: msg },
       error: payload.error instanceof Error ? payload.error.message : String(payload.error),
     });
-    const errorMessage =
-      typeof payload.error === "object" && payload.error
-        ? `${(payload.error as any).message}${(payload.error as any).cause ? ` (cause: ${String((payload.error as any).cause)})` : ""}`
+    const baseErrorMessage =
+      payload.error instanceof Error && payload.error.message.trim()
+        ? payload.error.message.trim()
         : String(payload.error);
-    return { body: `${payload.bodyFallback} (decryption failed: ${errorMessage})` };
+    const errorMessage =
+      typeof payload.error === "object" && payload.error && (payload.error as any).cause
+        ? `${baseErrorMessage} (cause: ${String((payload.error as any).cause)})`
+        : baseErrorMessage;
+    return {
+      body: `${payload.bodyFallback} (decryption failed: ${errorMessage})`,
+      mediaFailures: [
+        {
+          name:
+            payload.name ||
+            sanitizeInboundFilename(extractFileNameFromUrl(payload.url)) ||
+            payload.kind,
+          error: errorMessage,
+        },
+      ],
+    };
   };
 
   const tryDecryptMedia = async (payload: {
@@ -404,13 +482,20 @@ export async function processBotInboundMessage(params: {
     explicitFilename?: string;
     aesKey?: string;
   }): Promise<BotInboundMedia> => {
+    if (remainingDownloadBytes <= 0) {
+      throw new Error("aggregate media maxBytes exhausted (0 bytes remaining)");
+    }
     const urlHost = (() => { try { return new URL(payload.url).hostname; } catch { return "?"; } })();
     const t0 = Date.now();
     console.log(`[wecom-media] download-start kind=${payload.kind} host=${urlHost} aesKey=${payload.aesKey ? "payload" : "account"} timeoutMs=${mediaTimeoutMs} proxy=${proxyUrl || "none"}`);
     const decrypted = await decryptWecomMediaWithMeta(payload.url, payload.aesKey ?? aesKey, {
-      maxBytes,
+      maxBytes: remainingDownloadBytes,
       http: { proxyUrl, timeoutMs: mediaTimeoutMs },
     });
+    if (decrypted.buffer.byteLength > remainingDownloadBytes) {
+      throw new Error(`response body too large (>${remainingDownloadBytes} bytes)`);
+    }
+    remainingDownloadBytes -= decrypted.buffer.byteLength;
     console.log(`[wecom-media] download-ok kind=${payload.kind} host=${urlHost} durationMs=${Date.now() - t0} bytes=${decrypted.buffer.length} contentType=${decrypted.sourceContentType ?? "?"}`);
     const inferred = inferInboundMediaMeta({
       kind: payload.kind === "image" ? "image" : "file",
@@ -443,6 +528,7 @@ export async function processBotInboundMessage(params: {
           scope: "inbound",
           kind: "image",
           url,
+          name: pickBotFileName(msg),
           error: err,
           bodyFallback: "[image]",
         });
@@ -466,6 +552,7 @@ export async function processBotInboundMessage(params: {
           scope: "inbound",
           kind: "file",
           url,
+          name: pickBotFileName(msg),
           error: err,
           bodyFallback: "[file]",
         });
@@ -489,6 +576,7 @@ export async function processBotInboundMessage(params: {
           scope: "inbound",
           kind: "video",
           url,
+          name: pickBotFileName(msg),
           error: err,
           bodyFallback: "[video]",
         });
@@ -500,6 +588,7 @@ export async function processBotInboundMessage(params: {
     const items = (msg as any).mixed?.msg_item;
     if (Array.isArray(items)) {
       const medias: BotInboundMedia[] = [];
+      const mediaFailures: BotInboundMediaFailure[] = [];
       const bodyParts: string[] = [];
       for (const item of items) {
         const t = String(item.msgtype ?? "").toLowerCase();
@@ -527,17 +616,19 @@ export async function processBotInboundMessage(params: {
                 scope: "mixed",
                 kind: mediaKind,
                 url,
+                name: pickBotFileName(msg, item?.[mediaKind]),
                 error: err,
                 bodyFallback: `[${t}]`,
               });
               bodyParts.push(failed.body);
+              mediaFailures.push(...(failed.mediaFailures ?? []));
               continue;
             }
           }
         }
         bodyParts.push(`[${t}]`);
       }
-      return buildInboundNormalizationResult(bodyParts.join("\n"), medias);
+      return buildInboundNormalizationResult(bodyParts.join("\n"), medias, mediaFailures);
     }
   }
 
@@ -559,6 +650,7 @@ export async function processBotInboundMessage(params: {
           scope: "quote",
           kind: candidate.kind,
           url: candidate.url,
+          name: candidate.explicitFilename,
           error: err,
           bodyFallback: `${baseBody}\n[quote:${candidate.kind}]`,
         });

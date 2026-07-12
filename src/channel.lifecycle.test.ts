@@ -12,6 +12,7 @@ import { createRuntimeEnv } from "./test-utils/runtime-env.js";
 import { computeWecomMsgSignature, encryptWecomPlaintext } from "./crypto.js";
 import { wecomPlugin } from "./channel.js";
 import { handleWecomWebhookRequest } from "./monitor.js";
+import { monitorState } from "./monitor/state.js";
 import { setWecomRuntime } from "./runtime.js";
 import type { ResolvedWecomAccount } from "./types/index.js";
 
@@ -222,6 +223,26 @@ describe("wecomPlugin gateway lifecycle", () => {
       receiveId,
     });
     expect(inactivePluginRoute.handled).toBe(false);
+  });
+
+  it("settles pending webhook batches for the account before reload shutdown completes", async () => {
+    const token = "token";
+    const encodingAESKey = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    const cfg = createWebhookBotConfig({ token, encodingAESKey });
+    const abortController = new AbortController();
+    const ctx = createCtx({ cfg, abortController });
+    const cancelPending = vi.spyOn(monitorState.streamStore, "cancelPendingForAccount");
+
+    const startPromise = wecomPlugin.gateway!.startAccount!(ctx);
+    await Promise.resolve();
+    abortController.abort();
+    await startPromise;
+
+    expect(cancelPending).toHaveBeenCalledWith(
+      "default",
+      expect.stringContaining("stopped"),
+    );
+    cancelPending.mockRestore();
   });
 
   it("rejects startup when matrix account credentials conflict", async () => {

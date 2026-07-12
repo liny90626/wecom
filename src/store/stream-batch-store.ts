@@ -5,6 +5,9 @@ import type { PendingInbound, StreamState } from "../types/legacy-stream.js";
 import type { WecomBotInboundMessage as WecomInboundMessage } from "../types/index.js";
 import type { WecomWebhookTarget } from "../types/runtime-context.js";
 
+const MERGED_ACK_COMPLETED_TEXT = "✅ 已合并处理完成，请查看上一条回复。";
+const MERGED_ACK_FAILED_TEXT = "⚠️ 合并处理失败，请查看上一条错误信息或重试。";
+
 function isMediaLikeInbound(msg: WecomInboundMessage): boolean {
   const msgtype = String(msg.msgtype ?? "").trim().toLowerCase();
   return msgtype === "image" || msgtype === "file" || msgtype === "video" || msgtype === "mixed";
@@ -113,6 +116,12 @@ export class StreamStore {
           continue;
         }
         conv.activeBatchKey = next;
+        this.conversationState.set(convKey, conv);
+        const pending = this.pendingInbounds.get(next);
+        if (pending?.readyToFlush) {
+          this.flushPending(next);
+        }
+        continue;
       }
       this.conversationState.set(convKey, conv);
     }
@@ -319,11 +328,41 @@ export class StreamStore {
     }
   }
 
+  cancelPendingForAccount(accountId: string, reason: string): string[] {
+    const normalizedAccountId = accountId.trim();
+    if (!normalizedAccountId) return [];
+    const failureReason = reason.trim() || "WeCom webhook account stopped before batch processing.";
+    const cancelled = Array.from(this.pendingInbounds.entries()).filter(
+      ([, pending]) => pending.target.account.accountId === normalizedAccountId,
+    );
+
+    // Remove all account-owned timers first. Settling an active stream can promote its
+    // queued successor, which must not be allowed to flush against the retired target.
+    for (const [batchKey] of cancelled) {
+      this.removePendingBatch(batchKey);
+    }
+
+    const streamIds: string[] = [];
+    for (const [, pending] of cancelled) {
+      streamIds.push(pending.streamId);
+      this.updateStream(pending.streamId, (state) => {
+        state.error = state.error || failureReason;
+        state.content = state.content || "⚠️ 账号正在重载，本批消息未处理，请稍后重试。";
+        state.finished = true;
+      });
+      this.onStreamFinished(pending.streamId);
+    }
+    this.pruneConversationState();
+    return streamIds;
+  }
+
   onStreamFinished(streamId: string): string[] {
+    const batchState = this.streams.get(streamId);
+    const batchFailed = Boolean(batchState?.error || batchState?.fallbackMode === "error");
     const ackStreamIds = this.drainAckStreamsForBatch(streamId);
     for (const ackStreamId of ackStreamIds) {
       this.updateStream(ackStreamId, (state) => {
-        state.content = "✅ 已合并处理完成，请查看上一条回复。";
+        state.content = batchFailed ? MERGED_ACK_FAILED_TEXT : MERGED_ACK_COMPLETED_TEXT;
         state.finished = true;
       });
     }
@@ -360,6 +399,11 @@ export class StreamStore {
 
     for (const [id, state] of this.streams.entries()) {
       if (state.updatedAt < streamCutoff) {
+        if (state.batchKey && !state.finished) {
+          state.error = state.error || "WeCom webhook batch expired before completion.";
+          state.finished = true;
+          this.onStreamFinished(id);
+        }
         this.removeStreamRecord(id, state);
       }
     }

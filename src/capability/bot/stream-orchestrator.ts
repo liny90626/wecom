@@ -11,7 +11,12 @@ import { buildWecomUnauthorizedCommandPrompt, resolveWecomCommandAuthorization }
 import type { PendingInbound } from "../../types/legacy-stream.js";
 import type { WecomBotInboundMessage as WecomInboundMessage } from "../../types/index.js";
 import type { WecomWebhookTarget } from "../../types/runtime-context.js";
-import { looksLikeSendLocalFileIntent, processBotInboundMessage } from "../../transport/bot-webhook/inbound-normalizer.js";
+import {
+  buildBotInboundBodyWithoutMediaUrls,
+  countBotInboundMediaCandidates,
+  looksLikeSendLocalFileIntent,
+  processBotInboundMessage,
+} from "../../transport/bot-webhook/inbound-normalizer.js";
 import { resolveWecomSenderUserId } from "../../transport/bot-webhook/message-shape.js";
 import { buildWecomBotDispatchConfig } from "./dispatch-config.js";
 import { sendBotFallbackPromptNow } from "./fallback-delivery.js";
@@ -37,6 +42,8 @@ type InboundMediaFailure = {
   error: string;
 };
 
+const MAX_MERGED_INBOUND_ATTACHMENTS = 8;
+
 function formatMediaFailure(error: unknown): string {
   return error instanceof Error && error.message.trim()
     ? error.message.trim()
@@ -54,6 +61,24 @@ function appendMediaFailures(body: string, failures: InboundMediaFailure[]): str
 
 function resolveAttachmentUrl(mediaPath: string): string {
   return path.isAbsolute(mediaPath) ? pathToFileURL(mediaPath).href : mediaPath;
+}
+
+function expandMixedInboundMessage(msg: WecomInboundMessage): WecomInboundMessage[] {
+  if (String(msg.msgtype ?? "").trim().toLowerCase() !== "mixed") {
+    return [msg];
+  }
+  const mixed = (msg as any).mixed;
+  const items = mixed?.msg_item;
+  if (!Array.isArray(items) || items.length <= 1) {
+    return [msg];
+  }
+  return items.map(
+    (item) =>
+      ({
+        ...msg,
+        mixed: { ...mixed, msg_item: [item] },
+      }) as WecomInboundMessage,
+  );
 }
 
 export function createBotStreamOrchestrator(params: {
@@ -102,13 +127,15 @@ export function createBotStreamOrchestrator(params: {
       core = getWecomRuntime();
     } catch (err) {
       logVerbose(target, `flush pending: runtime not ready: ${String(err)}`);
-      streamStore.markFinished(streamId);
+      streamStore.updateStream(streamId, (state) => {
+        state.error = formatMediaFailure(err);
+        state.content = state.content || "⚠️ 服务正在重载，本批消息未处理，请稍后重试。";
+        state.finished = true;
+      });
       logInfo(target, `queue: runtime not ready，结束批次并推进 streamId=${streamId}`);
       streamStore.onStreamFinished(streamId);
       return;
     }
-
-    if (!core) return;
 
     streamStore.markStarted(streamId);
     const enrichedTarget: WecomWebhookTarget = { ...target, core };
@@ -158,30 +185,82 @@ export function createBotStreamOrchestrator(params: {
     });
 
     const inboundMessages = params.mergedMessages?.length ? params.mergedMessages : [msg];
-    const normalizedMessages = [];
-    for (const inboundMessage of inboundMessages) {
-      normalizedMessages.push(
-        await processBotInboundMessage({
-          target,
-          msg: inboundMessage,
-          recordOperationalIssue: (event) => recordBotOperationalEvent(target, event),
-        }),
-      );
+    const inboundUnits = inboundMessages.flatMap(expandMixedInboundMessage);
+    const normalizedBodyParts: string[] = [];
+    const mediaFailures: InboundMediaFailure[] = [];
+    const mediaRecords: Array<{ path: string; contentType?: string; filename: string }> = [];
+    const maxBytes = resolveWecomMediaMaxBytes(target.config, target.account.accountId);
+    let attachmentCandidatesSeen = 0;
+    let acceptedMediaBytes = 0;
+
+    for (const inboundMessage of inboundUnits) {
+      const candidateCount = countBotInboundMediaCandidates(inboundMessage);
+      if (candidateCount > 0) {
+        attachmentCandidatesSeen += candidateCount;
+        if (attachmentCandidatesSeen > MAX_MERGED_INBOUND_ATTACHMENTS) {
+          normalizedBodyParts.push(buildBotInboundBodyWithoutMediaUrls(inboundMessage));
+          mediaFailures.push({
+            name: `第${attachmentCandidatesSeen}个附件`,
+            error: `单批次最多处理 ${MAX_MERGED_INBOUND_ATTACHMENTS} 个附件，已跳过`,
+          });
+          continue;
+        }
+      }
+
+      const normalized = await processBotInboundMessage({
+        target,
+        msg: inboundMessage,
+        maxDownloadBytes: maxBytes - acceptedMediaBytes,
+        recordOperationalIssue: (event) => recordBotOperationalEvent(target, event),
+      });
+      if (normalized.body.trim()) {
+        normalizedBodyParts.push(normalized.body);
+      }
+      if (normalized.mediaFailures?.length) {
+        mediaFailures.push(...normalized.mediaFailures);
+      }
+      const medias = normalized.medias?.length
+        ? normalized.medias
+        : normalized.media
+          ? [normalized.media]
+          : [];
+      for (const media of medias) {
+        const mediaBytes = media.buffer.byteLength;
+        if (acceptedMediaBytes + mediaBytes > maxBytes) {
+          mediaFailures.push({
+            name: media.filename,
+            error: `整批附件总大小超过 ${(maxBytes / (1024 * 1024)).toFixed(2)}MB，已跳过`,
+          });
+          continue;
+        }
+        acceptedMediaBytes += mediaBytes;
+        try {
+          const saved = await core.channel.media.saveMediaBuffer(
+            media.buffer,
+            media.contentType,
+            "inbound",
+            maxBytes,
+            media.filename,
+          );
+          mediaRecords.push({
+            path: saved.path,
+            contentType: saved.contentType,
+            filename: media.filename,
+          });
+          logVerbose(target, `saved inbound media to ${saved.path} (${saved.contentType})`);
+        } catch (err) {
+          mediaFailures.push({ name: media.filename, error: formatMediaFailure(err) });
+          target.runtime.error?.(`Failed to save inbound media: ${String(err)}`);
+        }
+      }
     }
-    const normalizedBody = normalizedMessages
-      .map((result) => result.body)
-      .filter((bodyPart) => bodyPart.trim())
-      .join("\n")
-      .trim();
+    const normalizedBody = normalizedBodyParts.join("\n").trim();
     const mergedBody = params.mergedContents
       ? Array.isArray(params.mergedContents)
         ? params.mergedContents.join("\n")
         : params.mergedContents
       : "";
     const rawBody = normalizedBody || mergedBody;
-    const inboundMedia = normalizedMessages.flatMap((result) =>
-      result.medias?.length ? result.medias : result.media ? [result.media] : [],
-    );
 
     const handledLocalPath = await handleDirectLocalPathIntent({
       streamStore,
@@ -194,24 +273,6 @@ export function createBotStreamOrchestrator(params: {
       looksLikeSendLocalFileIntent,
     });
     if (handledLocalPath) return;
-
-    const mediaFailures: InboundMediaFailure[] = [];
-    const mediaRecords: Array<{ path: string; contentType?: string; filename: string }> = [];
-    const maxBytes = resolveWecomMediaMaxBytes(target.config, target.account.accountId);
-    for (const media of inboundMedia) {
-      try {
-        const saved = await core.channel.media.saveMediaBuffer(media.buffer, media.contentType, "inbound", maxBytes, media.filename);
-        mediaRecords.push({
-          path: saved.path,
-          contentType: saved.contentType,
-          filename: media.filename,
-        });
-        logVerbose(target, `saved inbound media to ${saved.path} (${saved.contentType})`);
-      } catch (err) {
-        mediaFailures.push({ name: media.filename, error: formatMediaFailure(err) });
-        target.runtime.error?.(`Failed to save inbound media: ${String(err)}`);
-      }
-    }
 
     const route = core.channel.routing.resolveAgentRoute({
       cfg: config,
@@ -236,6 +297,7 @@ export function createBotStreamOrchestrator(params: {
       streamStore.updateStream(streamId, (s) => {
         s.finished = true;
         s.content = prompt;
+        s.error = prompt;
       });
       try {
         await sendBotFallbackPromptNow({ streamId, text: prompt });

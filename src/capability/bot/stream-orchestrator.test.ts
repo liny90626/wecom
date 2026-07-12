@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { decryptWecomMediaWithMeta } from "../../media.js";
 import { StreamStore } from "../../store/stream-batch-store.js";
+import * as runtimeModule from "../../runtime.js";
 import { createBotStreamOrchestrator } from "./stream-orchestrator.js";
 
 const { finalizeBotStream, stageWecomInboundMediaForSession, createBotReplyDispatcher } = vi.hoisted(
@@ -76,14 +77,14 @@ function createCore() {
   };
 }
 
-function createTarget(core: any, error = vi.fn()) {
+function createTarget(core: any, error = vi.fn(), mediaMaxMb = 16) {
   return {
     account: {
       accountId: "default",
       encodingAESKey: "account-aes-key",
       config: {},
     } as any,
-    config: { channels: { wecom: { mediaMaxMb: 16 } } } as any,
+    config: { channels: { wecom: { mediaMaxMb } } } as any,
     runtime: { log: vi.fn(), error },
     core,
     path: "/wecom",
@@ -178,6 +179,274 @@ describe("createBotStreamOrchestrator merged media", () => {
       }),
     );
     expect(stageWecomInboundMediaForSession).toHaveBeenCalledTimes(2);
+    expect(stageWecomInboundMediaForSession).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ mediaPath: "/tmp/spec.pdf", filename: "spec.pdf" }),
+    );
+    expect(stageWecomInboundMediaForSession).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ mediaPath: "/tmp/photo.png", filename: "photo.png" }),
+    );
+  });
+
+  it("saves each attachment before downloading the next one", async () => {
+    const { core, saveMediaBuffer } = createCore();
+    vi.mocked(decryptWecomMediaWithMeta)
+      .mockResolvedValueOnce({
+        buffer: Buffer.from("first"),
+        sourceContentType: "image/png",
+        sourceFilename: "first.png",
+        sourceUrl: "https://example.com/first.png",
+      })
+      .mockImplementationOnce(async () => {
+        expect(saveMediaBuffer).toHaveBeenCalledTimes(1);
+        return {
+          buffer: Buffer.from("second"),
+          sourceContentType: "image/png",
+          sourceFilename: "second.png",
+          sourceUrl: "https://example.com/second.png",
+        };
+      });
+    const orchestrator = createBotStreamOrchestrator({
+      streamStore: new StreamStore(),
+      recordBotOperationalEvent: vi.fn(),
+    });
+
+    await orchestrator.startAgentForStream({
+      target: createTarget(core),
+      accountId: "default",
+      streamId: "stream-incremental-media",
+      msg: {
+        msgid: "M1",
+        msgtype: "image",
+        chattype: "single",
+        from: { userid: "linky" },
+        image: { url: "https://example.com/first.png" },
+      },
+      mergedMessages: [
+        {
+          msgid: "M1",
+          msgtype: "image",
+          chattype: "single",
+          from: { userid: "linky" },
+          image: { url: "https://example.com/first.png" },
+        },
+        {
+          msgid: "M2",
+          msgtype: "image",
+          chattype: "single",
+          from: { userid: "linky" },
+          image: { url: "https://example.com/second.png" },
+        },
+      ],
+    } as any);
+
+    expect(saveMediaBuffer).toHaveBeenCalledTimes(2);
+  });
+
+  it("limits attachment count before downloading an unbounded merged burst", async () => {
+    vi.mocked(decryptWecomMediaWithMeta).mockResolvedValue({
+      buffer: Buffer.from("small-image"),
+      sourceContentType: "image/png",
+      sourceFilename: "image.png",
+      sourceUrl: "https://example.com/image.png",
+    });
+    const { core, recordInboundSession, saveMediaBuffer } = createCore();
+    const orchestrator = createBotStreamOrchestrator({
+      streamStore: new StreamStore(),
+      recordBotOperationalEvent: vi.fn(),
+    });
+    const mergedMessages = Array.from({ length: 10 }, (_, index) => ({
+      msgid: `M${index + 1}`,
+      msgtype: "image",
+      chattype: "single",
+      from: { userid: "linky" },
+      image: { url: `https://example.com/${index + 1}.png` },
+    }));
+
+    await orchestrator.startAgentForStream({
+      target: createTarget(core),
+      accountId: "default",
+      streamId: "stream-media-count-limit",
+      msg: mergedMessages[0],
+      mergedMessages,
+    } as any);
+
+    expect(decryptWecomMediaWithMeta).toHaveBeenCalledTimes(8);
+    expect(saveMediaBuffer).toHaveBeenCalledTimes(8);
+    const ctx = recordInboundSession.mock.calls[0]?.[0]?.ctx;
+    expect(ctx.Attachments).toHaveLength(8);
+    expect(ctx.RawBody).toContain("单批次最多处理 8 个附件");
+    expect(ctx.RawBody).not.toContain("https://example.com/9.png");
+    expect(ctx.RawBody).not.toContain("https://example.com/10.png");
+    expect(ctx.MediaFailures).toEqual([
+      { name: "第9个附件", error: "单批次最多处理 8 个附件，已跳过" },
+      { name: "第10个附件", error: "单批次最多处理 8 个附件，已跳过" },
+    ]);
+  });
+
+  it("shares the configured media byte budget across the merged batch", async () => {
+    const firstBytes = 700 * 1024;
+    const aggregateBytes = 1024 * 1024;
+    vi.mocked(decryptWecomMediaWithMeta)
+      .mockResolvedValueOnce({
+        buffer: Buffer.alloc(firstBytes, 1),
+        sourceContentType: "image/png",
+        sourceFilename: "first.png",
+        sourceUrl: "https://example.com/first.png",
+      })
+      .mockImplementationOnce(async (_url, _aesKey, options) => {
+        expect(options?.maxBytes).toBe(aggregateBytes - firstBytes);
+        throw new Error(`response body too large (>${options?.maxBytes} bytes)`);
+      });
+    const { core, recordInboundSession, saveMediaBuffer } = createCore();
+    const orchestrator = createBotStreamOrchestrator({
+      streamStore: new StreamStore(),
+      recordBotOperationalEvent: vi.fn(),
+    });
+
+    await orchestrator.startAgentForStream({
+      target: createTarget(core, vi.fn(), 1),
+      accountId: "default",
+      streamId: "stream-media-byte-limit",
+      msg: {
+        msgid: "M1",
+        msgtype: "image",
+        chattype: "single",
+        from: { userid: "linky" },
+        image: { url: "https://example.com/first.png" },
+      },
+      mergedMessages: [
+        {
+          msgid: "M1",
+          msgtype: "image",
+          chattype: "single",
+          from: { userid: "linky" },
+          image: { url: "https://example.com/first.png" },
+        },
+        {
+          msgid: "M2",
+          msgtype: "image",
+          chattype: "single",
+          from: { userid: "linky" },
+          image: { url: "https://example.com/second.png" },
+        },
+      ],
+    } as any);
+
+    expect(saveMediaBuffer).toHaveBeenCalledTimes(1);
+    const ctx = recordInboundSession.mock.calls[0]?.[0]?.ctx;
+    expect(ctx.Attachments).toHaveLength(1);
+    expect(ctx.RawBody).toContain("response body too large");
+    expect(ctx.MediaFailures).toEqual([
+      expect.objectContaining({ name: "second.png", error: expect.stringContaining("response body too large") }),
+    ]);
+  });
+
+  it("settles merged acknowledgements as failed when fail-closed routing rejects the batch", async () => {
+    const { core } = createCore();
+    core.channel.routing.resolveAgentRoute.mockReturnValue({
+      agentId: "main",
+      accountId: "default",
+      sessionKey: "agent:main:wecom:default:direct:linky",
+      matchedBy: "default",
+    });
+    const target = createTarget(core);
+    target.config.channels.wecom.routing = { failClosedOnDefaultRoute: true };
+    const streamStore = new StreamStore();
+    const streamId = streamStore.createStream({});
+    const ackStreamId = streamStore.createStream({ msgid: "ACK-ROUTING" });
+    streamStore.addAckStreamForBatch({ batchStreamId: streamId, ackStreamId });
+    const orchestrator = createBotStreamOrchestrator({
+      streamStore,
+      recordBotOperationalEvent: vi.fn(),
+    });
+
+    await orchestrator.startAgentForStream({
+      target,
+      accountId: "default",
+      streamId,
+      msg: {
+        msgid: "M-ROUTING",
+        msgtype: "text",
+        chattype: "single",
+        from: { userid: "linky" },
+        text: { content: "hello" },
+      },
+    } as any);
+
+    expect(streamStore.getStream(streamId)?.error).toContain("未绑定 OpenClaw Agent");
+    expect(streamStore.getStream(ackStreamId)).toEqual(
+      expect.objectContaining({
+        content: "⚠️ 合并处理失败，请查看上一条错误信息或重试。",
+        finished: true,
+      }),
+    );
+  });
+
+  it("settles merged acknowledgements as failed when the runtime is unavailable", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(runtimeModule, "getWecomRuntime").mockImplementationOnce(() => {
+        throw new Error("runtime not ready");
+      });
+      const streamStore = new StreamStore();
+      const orchestrator = createBotStreamOrchestrator({
+        streamStore,
+        recordBotOperationalEvent: vi.fn(),
+      });
+      streamStore.setFlushHandler((pending) => {
+        void orchestrator.flushPending(pending);
+      });
+      const target = createTarget({});
+      const batch = streamStore.addPendingMessage({
+        conversationKey: "wecom:default:linky:linky",
+        target,
+        msg: {
+          msgid: "M1",
+          msgtype: "image",
+          chattype: "single",
+          from: { userid: "linky" },
+          image: { url: "https://example.com/one.png" },
+        } as any,
+        msgContent: "[image]",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      const merged = streamStore.addPendingMessage({
+        conversationKey: "wecom:default:linky:linky",
+        target,
+        msg: {
+          msgid: "M2",
+          msgtype: "text",
+          chattype: "single",
+          from: { userid: "linky" },
+          text: { content: "分析图片" },
+        } as any,
+        msgContent: "分析图片",
+        nonce: "n",
+        timestamp: "t",
+        debounceMs: 10,
+      });
+      expect(merged.status).toBe("active_merged");
+      const ackStreamId = streamStore.createStream({ msgid: "ACK-RUNTIME" });
+      streamStore.addAckStreamForBatch({ batchStreamId: batch.streamId, ackStreamId });
+
+      await vi.advanceTimersByTimeAsync(11);
+      await vi.waitFor(() => expect(streamStore.getStream(batch.streamId)?.finished).toBe(true));
+
+      expect(streamStore.getStream(batch.streamId)?.error).toContain("runtime not ready");
+      expect(streamStore.getStream(ackStreamId)).toEqual(
+        expect.objectContaining({
+          content: "⚠️ 合并处理失败，请查看上一条错误信息或重试。",
+          finished: true,
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
   });
 
   it("keeps sandbox-relative attachment URLs relative to the agent workspace", async () => {

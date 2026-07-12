@@ -3,6 +3,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type { WecomRuntimeEnv } from "../../types/runtime-context.js";
 import type { ResolvedBotAccount } from "../../types/index.js";
 import type { WecomAccountRuntime } from "../../app/account-runtime.js";
+import { monitorState } from "../../monitor/state.js";
 import { resolveBotWebhookPaths } from "./inbound.js";
 import { createBotWebhookSessionSnapshot } from "./session.js";
 import { registerWecomWebhookTarget } from "../http/registry.js";
@@ -34,6 +35,10 @@ export function startBotWebhookTransport(params: {
   return {
     paths,
     stop: () => {
+      monitorState.streamStore.cancelPendingForAccount(
+        params.account.accountId,
+        "WeCom webhook account stopped or reloaded before batch processing.",
+      );
       for (const unregister of unregisters) {
         unregister();
       }

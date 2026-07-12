@@ -23,7 +23,7 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-`v2.5.110-136` 以 `released/2.5.110-118` 为稳定骨架重新开发选定修复，不直接继承 v135 的复杂回复状态机。v135 完整状态保存在 `features/v135-stabilization` 供审计；主线不恢复分钟级 handoff、init-conflict 长重试、per-peer 熔断器或 synthetic thinking。
+`v2.5.110-136` 以 `released/2.5.110-118` 为稳定骨架重新开发选定修复，不直接继承 v135 的复杂回复状态机。v119-v135 完整状态保存在 `archive/rejected-v119-v135` 供审计；主线不恢复分钟级 handoff、init-conflict 长重试、per-peer 熔断器或 synthetic thinking。当前发布标签为 `released/2.5.110-136`。
 
 - B1：修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
 - B2：优化 Bot WebSocket 长文本回复投递。正文过长时会按企业微信限制分段发送，并对流式预览与最终正文之间的重复片段做去重处理，降低长文本重复和截断风险。
@@ -199,7 +199,7 @@ npx vitest run
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
 #### 📌 v2.5.110-136（2026-07-12，LinKy fork 重做版）
-- **[稳定主线重建] 基于 v118 重做而非继续叠加 v135**：保留 v118 轻量投递骨架，只重新实现有复现证据的 OpenClaw 6.11、ACK、late-final、Fast/no-output 和 Agent exactly-once 修复；v135 完整状态留在 `features/v135-stabilization`。
+- **[稳定主线重建] 基于 v118 重做而非继续叠加 v135**：保留 v118 轻量投递骨架，只重新实现有复现证据的 OpenClaw 6.11、ACK、late-final、Fast/no-output 和 Agent exactly-once 修复；v119-v135 完整状态留在 `archive/rejected-v119-v135`。
 - **[回复完整性] 不再截掉重复标题后的唯一后文**：仅在结构化标题重新开始时删除其连续同序的精确重复尾段；pending preview、thinking 预算、长 final 尾段续传、空 final、中断提示和 late final 均按确认送达状态处理。
 - **[速度与并发] 单次 dispatch、短 quiet grace**：prepare 前即可被新消息抢占，不引入本地 OpenClaw retry、熔断器或分钟级等待；final 兜底重试保持后台 detached。
 - **[Fast 与附件] 进度保留、异常不静默**：冻结预览仍保留 auto-off/auto-on；auto-off 后没有正文会显示中断，auto-on 可正常无正文结束；Bot webhook 的短时附件+文字会保序合并，失败附件进入上下文。完整说明见 [`changelog/v2.5.110-136.md`](./changelog/v2.5.110-136.md)。

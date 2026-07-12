@@ -4,7 +4,7 @@
 
 ## 本 fork 最近 5 个维护版本
 
-- [`v2.5.110-136`](./v2.5.110-136.md)：从 `released/2.5.110-118` 重新构建稳定主线；最小重做 OpenClaw 6.11 metadata 时序、Fast/no-output、ACK/late-final 完整性、Agent exactly-once 和 Bot webhook 短时附件+文字合并，不恢复长等待、熔断器或 synthetic thinking。
+- [`v2.5.110-136`](./v2.5.110-136.md)（发布标签 `released/2.5.110-136`）：从 `released/2.5.110-118` 重新构建稳定主线；最小重做 OpenClaw 6.11 metadata 时序、Fast/no-output、ACK/late-final 完整性、Agent exactly-once 和 Bot webhook 短时附件+文字合并，不恢复长等待、熔断器或 synthetic thinking。
 - [`v2.5.110-118`](./v2.5.110-118.md)：长任务预览通道过期后不再彻底静默（冻结即启动计时自愈 + 一次性过期提示）；final 兜底失败按 20s/40s/80s 有限重试；final 投递在 pending ACK 等待后复查 supersede，修复旧气泡复活竞态；新增 late-settle 观测日志。
 - [`v2.5.110-117`](./v2.5.110-117.md)：修复 Bot WS stream ACK 队列持续 pending 时 final 被排入旧气泡队列的问题；pending 持续未清除时改走主动 markdown 兜底，避免下一条用户消息才触发旧气泡继续输出。
 - [`v2.5.110-116`](./v2.5.110-116.md)：为 Bot WS 出站 stream 更新增加本地超时兜底，减少偶发“回了一半后卡住，下一条消息才刷新完”的情况；完成标识改为 `（回复完毕）`。

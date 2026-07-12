@@ -3,6 +3,7 @@ import path from "node:path";
 import type { WSClient } from "@wecom/aibot-node-sdk";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
+import { registerBotWsPushHandle, unregisterBotWsPushHandle } from "../../runtime.js";
 import { uploadAndSendBotWsMedia } from "./media.js";
 import { __resetBotWsReplyTestState, createBotWsReplyHandle } from "./reply.js";
 
@@ -34,6 +35,7 @@ describe("createBotWsReplyHandle", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     __resetBotWsReplyTestState();
+    unregisterBotWsPushHandle("default");
     vi.stubEnv("OPENCLAW_STATE_DIR", "/tmp/wecom-reply-state");
     mockClient = {
       replyStream: vi.fn(),
@@ -58,6 +60,7 @@ describe("createBotWsReplyHandle", () => {
   });
 
   afterEach(() => {
+    unregisterBotWsPushHandle("default");
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -1162,7 +1165,7 @@ describe("createBotWsReplyHandle", () => {
     expect(pushedText).toMatch(/【第\d+\/\d+段】\n\n（回复完毕）$/);
   });
 
-  it("deduplicates repeated large blocks in long final text", async () => {
+  it("keeps repeated large business blocks without an explicit structured restart", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -1189,7 +1192,50 @@ describe("createBotWsReplyHandle", () => {
     expect(delivered).toContain("开头说明");
     expect(delivered).toContain("中间过渡");
     expect(delivered).toContain("结尾结论");
-    expect(delivered.match(/重复观察00/g)?.length).toBe(1);
+    expect(delivered.match(/重复观察00/g)?.length).toBe(2);
+  });
+
+  it("keeps an identical business paragraph when it belongs to different chapters", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-long-final-cross-chapter-paragraph" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const businessParagraph = [
+      "共享业务原则：",
+      `适用范围：${"该规则在本章承担独立业务含义。".repeat(12)}`,
+      `审批要求：${"相同规则在不同章节仍需完整陈述。".repeat(12)}`,
+      `履约要求：${"本行属于连续业务段落且必须保留。".repeat(12)}`,
+      `审计要求：${"不能仅因多行内容完全一致而删除。".repeat(12)}`,
+    ].join("\n");
+    const filler = Array.from(
+      { length: 55 },
+      (_, index) => `章节间明细${String(index).padStart(2, "0")}：用于构造长正文。`,
+    ).join("\n");
+    const finalText = [
+      "# 第一章 供应规则",
+      businessParagraph,
+      filler,
+      "# 第二章 履约规则",
+      businessParagraph,
+      "第二章独有结论：保留本章完整语义。",
+    ].join("\n\n");
+
+    const delivery = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+    await delivery;
+
+    const delivered = [
+      String(mockClient.replyStream.mock.calls[0]?.[2] ?? ""),
+      ...mockClient.sendMessage.mock.calls.map((call) => String((call[1] as any).markdown.content)),
+    ].join("\n");
+    expect(delivered.match(/共享业务原则/g)?.length).toBe(2);
+    expect(delivered).toContain("第二章独有结论");
   });
 
   it("does not append a short final again when it already exists at the end of preview text", async () => {
@@ -2182,6 +2228,57 @@ describe("createBotWsReplyHandle", () => {
     expect(onDeliver).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    [
+      "ack timeout",
+      new Error("Reply ack timeout (5000ms) for reqId: aibot_send_msg_active-push"),
+    ],
+    ["ambiguous failure", new Error("socket closed after active push send")],
+  ])(
+    "defers an active-push %s to the bounded retry without resending on the same client",
+    async (_label, pushError) => {
+      const expiredError = {
+        headers: { req_id: "req-active-push-ack-timeout" },
+        errcode: 846608,
+        errmsg: "stream message update expired (>6 minutes), cannot update",
+      };
+      const sendMarkdown = vi.fn().mockRejectedValueOnce(pushError).mockResolvedValue(undefined);
+      registerBotWsPushHandle("default", {
+        isConnected: () => true,
+        sendMarkdown,
+        replyCommand: vi.fn(),
+        sendMedia: vi.fn(),
+      });
+      mockClient.replyStream.mockRejectedValueOnce(expiredError);
+      const onDeliver = vi.fn();
+
+      const handle = createBotWsReplyHandle({
+        client: mockClient,
+        frame: {
+          headers: { req_id: "req-active-push-ack-timeout" },
+          body: { from: { userid: "alice" }, chattype: "single" },
+        } as unknown as ReplyHandleParams["frame"],
+        accountId: "default",
+        inboundKind: "text",
+        autoSendPlaceholder: false,
+        onDeliver,
+      });
+
+      await handle.deliver({ text: "最终回复", isReasoning: false }, { kind: "final" });
+
+      expect(sendMarkdown).toHaveBeenCalledTimes(1);
+      expect(mockClient.sendMessage).not.toHaveBeenCalled();
+      expect(onDeliver).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      await flushPromises();
+
+      expect(sendMarkdown).toHaveBeenCalledTimes(2);
+      expect(mockClient.sendMessage).not.toHaveBeenCalled();
+      expect(onDeliver).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("stops final push retries after exhausting attempts", async () => {
     const expiredError = {
       headers: { req_id: "req-final-retry-exhausted" },
@@ -2309,7 +2406,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("does not retry a superseded merge push after a transient failure", async () => {
+  it("keeps a wholly invisible superseded final retry across a newer same-peer activation", async () => {
     const pushError = new Error("push down");
     const onDeliver = vi.fn();
 
@@ -2336,19 +2433,34 @@ describe("createBotWsReplyHandle", () => {
     mockClient.sendMessage.mockClear();
     mockClient.sendMessage.mockRejectedValueOnce(pushError);
 
-    // No visible text yet, so the superseded final gets one merge-push
-    // attempt. Once a newer inbound exists, detached retries stay disabled.
+    // No old body was ever confirmed visible, so its bounded retry remains
+    // responsible for eventually delivering the result.
     await expect(
       handle.deliver({ text: "旧任务合并结果", isReasoning: false }, { kind: "final" }),
     ).rejects.toThrow("push down");
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
 
+    createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-superseded-retry-new" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
     await vi.advanceTimersByTimeAsync(20_000);
     await flushPromises();
 
-    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+    expect(mockClient.sendMessage).toHaveBeenLastCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: { content: "旧任务合并结果" },
+    });
     expect(mockClient.replyStream).not.toHaveBeenCalled();
-    expect(onDeliver).not.toHaveBeenCalled();
+    expect(onDeliver).toHaveBeenCalledTimes(1);
   });
 
   it("suppresses the failure notice while a final push retry is pending", async () => {
@@ -3059,6 +3171,90 @@ describe("createBotWsReplyHandle", () => {
     });
   });
 
+  it("does not queue a supersede notice onto an old stream while its ack is pending", async () => {
+    const pendingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+    };
+    pendingClient.hasPendingReplyAck = vi.fn().mockReturnValue(true);
+    const handle = createBotWsReplyHandle({
+      client: pendingClient,
+      frame: {
+        headers: { req_id: "req-supersede-notice-pending-ack" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5_500);
+    await flushPromises();
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse the callback req_id for a supersede notice after an ack timeout", async () => {
+    const ackTimeout = new Error(
+      "Reply ack timeout (5000ms) for reqId: req-supersede-after-ack-timeout",
+    );
+    mockClient.replyStream.mockRejectedValueOnce(ackTimeout);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-supersede-after-ack-timeout" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "尚未确认可见的旧正文" }, { kind: "block" });
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse the callback req_id to close an empty final after an ack timeout", async () => {
+    const ackTimeout = new Error(
+      "Reply ack timeout (5000ms) for reqId: req-empty-final-after-ack-timeout",
+    );
+    mockClient.replyStream.mockRejectedValueOnce(ackTimeout);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-empty-final-after-ack-timeout" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "尚未确认可见的旧正文" }, { kind: "block" });
+    await handle.deliver({ text: "" }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+  });
+
   it("soft-times out superseded notices and still delivers the old final by active push", async () => {
     mockClient.replyStream.mockImplementationOnce(
       () => new Promise(() => undefined) as any,
@@ -3252,6 +3448,43 @@ describe("createBotWsReplyHandle", () => {
       expect.objectContaining({ headers: { req_id: "req-same-final-b" } }),
       expect.any(String),
       "相同答案",
+      true,
+    );
+  });
+
+  it("delivers legal identical finals independently for different req_ids", async () => {
+    const createHandle = (reqId: string) =>
+      createBotWsReplyHandle({
+        client: mockClient,
+        frame: {
+          headers: { req_id: reqId },
+          body: { from: { userid: "alice" }, chattype: "single" },
+        } as unknown as ReplyHandleParams["frame"],
+        accountId: "default",
+        inboundKind: "text",
+        autoSendPlaceholder: false,
+      });
+
+    await createHandle("req-identical-final-a").deliver(
+      { text: "合法的相同答案", isReasoning: false },
+      { kind: "final" },
+    );
+    await createHandle("req-identical-final-b").deliver(
+      { text: "合法的相同答案", isReasoning: false },
+      { kind: "final" },
+    );
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-identical-final-a" } }),
+      expect.any(String),
+      "合法的相同答案",
+      true,
+    );
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-identical-final-b" } }),
+      expect.any(String),
+      "合法的相同答案",
       true,
     );
   });

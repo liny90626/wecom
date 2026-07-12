@@ -35,9 +35,7 @@ const WECOM_PENDING_ACK_POLL_MS = 100;
 const THINKING_BLOCK_MAX_CHARS = 3_000;
 const THINKING_BLOCK_MAX_BYTES = 8_000;
 const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
-const LONG_FINAL_DEDUP_MIN_BLOCK_CHARS = 500;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
-const LONG_FINAL_DEDUP_MAX_REMOVALS = 3;
 const STRUCTURED_TAIL_MIN_DUPLICATE_LINES = 4;
 const FINAL_COMPLETION_MARKER = "（回复完毕）";
 const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
@@ -104,7 +102,13 @@ function isReplyNoVisibleOutputError(error: unknown, formattedMessage: string): 
 const recentFinalDeliveriesByPeer = new Map<string, number>();
 const pendingFinalRetryByPeer = new Map<
   string,
-  { activationId: string; cancel: () => void }
+  Map<
+    string,
+    {
+      cancel: () => void;
+      shouldCancelForNewActivation: () => boolean;
+    }
+  >
 >();
 const OBSOLETE_FINAL_RETRY = Symbol("obsolete-final-retry");
 
@@ -112,10 +116,22 @@ function cancelPendingFinalRetryForNewActivation(
   peerKey: string,
   activationId: string,
 ): void {
-  const pendingRetry = pendingFinalRetryByPeer.get(peerKey);
-  if (pendingRetry && pendingRetry.activationId !== activationId) {
-    pendingFinalRetryByPeer.delete(peerKey);
+  const pendingRetries = pendingFinalRetryByPeer.get(peerKey);
+  if (!pendingRetries) {
+    return;
+  }
+  for (const [pendingActivationId, pendingRetry] of pendingRetries) {
+    if (
+      pendingActivationId === activationId ||
+      !pendingRetry.shouldCancelForNewActivation()
+    ) {
+      continue;
+    }
+    pendingRetries.delete(pendingActivationId);
     pendingRetry.cancel();
+  }
+  if (pendingRetries.size === 0) {
+    pendingFinalRetryByPeer.delete(peerKey);
   }
 }
 
@@ -138,8 +154,9 @@ function isExpiredStreamUpdateError(error: unknown): boolean {
 }
 
 /** SDK rejects with a plain Error whose message contains "ack timeout" when
- * the WeCom server does not acknowledge a reply within 5 s.  Once timed out
- * the reqId slot is released; further replies on the same reqId will fail. */
+ * the WeCom server does not acknowledge a reply within 5 s. The timed-out
+ * frame is dequeued, but a late ACK can then resolve a newer frame that reused
+ * the same req_id, so callback-stream sends must treat the req_id as terminal. */
 function isAckTimeoutError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("ack timeout");
 }
@@ -278,10 +295,11 @@ function buildFinalDeliveryKey(params: {
   accountId: string;
   peerKind: "direct" | "group";
   peerId: string;
+  reqId: string;
   text: string;
   mediaUrls: readonly string[];
 }): string {
-  const { accountId, peerKind, peerId, text, mediaUrls } = params;
+  const { accountId, peerKind, peerId, reqId, text, mediaUrls } = params;
   const digest = crypto
     .createHash("sha256")
     .update(text)
@@ -292,6 +310,7 @@ function buildFinalDeliveryKey(params: {
     accountId,
     peerKind,
     peerId,
+    reqId,
     digest,
   ].join(":");
 }
@@ -353,118 +372,18 @@ function normalizeDedupText(value: string): string {
     .toLowerCase();
 }
 
-function isDedupProtectedBlock(block: string): boolean {
-  const trimmed = block.trim();
-  if (!trimmed) return true;
-  if (/^\|.*\|$/m.test(trimmed)) return true;
-  if (/^```/.test(trimmed) || /```$/.test(trimmed)) return true;
-  return false;
-}
-
-function splitDedupBlocks(text: string): string[] {
-  const lines = text.split("\n");
-  const blocks: string[] = [];
-  let current: string[] = [];
-
-  const flush = () => {
-    if (current.length === 0) return;
-    blocks.push(current.join("\n"));
-    current = [];
-  };
-
-  for (const line of lines) {
-    if (!line.trim()) {
-      flush();
-      blocks.push(line);
-      continue;
-    }
-    current.push(line);
-  }
-  flush();
-  return blocks;
-}
-
 function dedupeLongFinalText(text: string, options: { previewFrozen: boolean }): string {
   if (!options.previewFrozen && text.length < LONG_FINAL_DEDUP_MIN_CHARS) {
     return text;
   }
 
-  const blocks = splitDedupBlocks(text);
-  const seen = new Map<string, number>();
-  let removed = 0;
-  let changed = false;
-  const out: string[] = [];
-
-  for (const block of blocks) {
-    const normalized = normalizeDedupText(block);
-    const duplicate =
-      removed < LONG_FINAL_DEDUP_MAX_REMOVALS &&
-      block.length >= LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS &&
-      normalized.length >= LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS &&
-      !isDedupProtectedBlock(block) &&
-      seen.has(normalized);
-
-    if (duplicate) {
-      removed += 1;
-      changed = true;
-      continue;
-    }
-
-    out.push(block);
-    if (
-      block.length >= LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS &&
-      normalized.length >= LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS &&
-      !isDedupProtectedBlock(block)
-    ) {
-      seen.set(normalized, out.length - 1);
-    }
+  const repeatedTail = findRepeatedHeadingTail(text);
+  if (!repeatedTail) {
+    return text;
   }
-
-  let deduped = changed ? out.join("\n").replace(/\n{3,}/g, "\n\n").trim() : text;
-  for (let pass = removed; pass < LONG_FINAL_DEDUP_MAX_REMOVALS; pass += 1) {
-    const match = findRepeatedLongBlock(deduped);
-    if (!match) break;
-    deduped = `${deduped.slice(0, match.start)}${deduped.slice(match.end)}`.replace(/\n{3,}/g, "\n\n").trim();
-    changed = true;
-  }
-  const repeatedTail = findRepeatedHeadingTail(deduped);
-  if (repeatedTail) {
-    deduped = `${deduped.slice(0, repeatedTail.start)}${deduped.slice(repeatedTail.end)}`
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-    changed = true;
-  }
-
-  return changed ? deduped : text;
-}
-
-function findRepeatedLongBlock(text: string): { start: number; end: number } | undefined {
-  const paragraphs = splitDedupBlocks(text);
-  const seen = new Map<string, string>();
-  let searchFrom = 0;
-
-  for (const paragraph of paragraphs) {
-    const start = text.indexOf(paragraph, searchFrom);
-    if (start < 0) {
-      continue;
-    }
-    const end = start + paragraph.length;
-    searchFrom = end;
-
-    if (paragraph.length < LONG_FINAL_DEDUP_MIN_BLOCK_CHARS || isDedupProtectedBlock(paragraph)) {
-      continue;
-    }
-    const normalized = normalizeDedupText(paragraph);
-    if (normalized.length < LONG_FINAL_DEDUP_MIN_BLOCK_CHARS) {
-      continue;
-    }
-    if (seen.has(normalized)) {
-      return { start, end };
-    }
-    seen.set(normalized, paragraph);
-  }
-
-  return undefined;
+  return `${text.slice(0, repeatedTail.start)}${text.slice(repeatedTail.end)}`
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function findRepeatedHeadingTail(text: string): { start: number; end: number } | undefined {
@@ -514,8 +433,8 @@ function findRepeatedStructuredTailDuplicateEnd(prior: string, tail: string): nu
     let offset = 0;
     return text.split("\n").flatMap((raw, index, lines) => {
       offset += raw.length + (index < lines.length - 1 ? 1 : 0);
-      const normalized = normalizeDedupText(raw.trim());
-      return normalized.length >= 2 ? [{ normalized, end: offset }] : [];
+      const exact = raw.trim();
+      return exact.length >= 2 ? [{ exact, end: offset }] : [];
     });
   };
   const priorLines = comparableLines(prior);
@@ -526,14 +445,14 @@ function findRepeatedStructuredTailDuplicateEnd(prior: string, tail: string): nu
 
   let bestEnd = 0;
   for (let start = 0; start < priorLines.length; start += 1) {
-    if (priorLines[start]?.normalized !== tailLines[0]?.normalized) {
+    if (priorLines[start]?.exact !== tailLines[0]?.exact) {
       continue;
     }
     let matched = 0;
     while (
       start + matched < priorLines.length &&
       matched < tailLines.length &&
-      priorLines[start + matched]?.normalized === tailLines[matched]?.normalized
+      priorLines[start + matched]?.exact === tailLines[matched]?.exact
     ) {
       matched += 1;
     }
@@ -1086,8 +1005,9 @@ export function createBotWsReplyHandle(params: {
   let obsoleteFinalRetry = false;
   const isCurrentReplyActivation = (): boolean => !obsoleteFinalRetry;
   const finishPendingFinalRetry = (rollbackClaim: boolean): void => {
-    const pendingRetry = pendingFinalRetryByPeer.get(replyPeerKey);
-    if (pendingRetry?.activationId === activationId) {
+    const pendingRetries = pendingFinalRetryByPeer.get(replyPeerKey);
+    pendingRetries?.delete(activationId);
+    if (pendingRetries?.size === 0) {
       pendingFinalRetryByPeer.delete(replyPeerKey);
     }
     if (finalPushRetryTimer) {
@@ -1165,9 +1085,17 @@ export function createBotWsReplyHandle(params: {
       if (progress && index + 1 > progress.delivered) {
         progress.delivered = index + 1;
       }
+      if (
+        options.reason === "superseded-final" ||
+        options.reason === "stream-fallback" ||
+        options.reason === "stream-remainder" ||
+        options.reason === "final-retry"
+      ) {
+        visibleReplyStarted = true;
+      }
     };
-    const sendViaClient = async (startIndex = firstIndex): Promise<void> => {
-      for (let i = startIndex; i < markdownChunks.length; i += 1) {
+    const sendViaClient = async (): Promise<void> => {
+      for (let i = firstIndex; i < markdownChunks.length; i += 1) {
         throwIfObsolete();
         const chunk = markdownChunks[i] ?? "";
         console.info(
@@ -1212,11 +1140,10 @@ export function createBotWsReplyHandle(params: {
           throw error;
         }
         console.warn(
-          `[wecom-b3] active-push-fallback-to-client account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${options.reason} chunk=${i + 1}/${markdownChunks.length} error=${formatFallbackError(error)}`,
+          `[wecom-b3] active-push-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${options.reason} chunk=${i + 1}/${markdownChunks.length} error=${formatFallbackError(error)}`,
         );
-        throwIfObsolete();
-        await sendViaClient(i);
-        return;
+        streamUpdateUnreliable = true;
+        throw error;
       }
     }
   };
@@ -1232,26 +1159,29 @@ export function createBotWsReplyHandle(params: {
   }
 
   const trackPendingFinalRetry = (retry: FinalPushRetryRequest): boolean => {
-    if (!isCurrentReplyActivation() || supersededByNewInbound) {
+    if (
+      !isCurrentReplyActivation() ||
+      (supersededByNewInbound && suppressSupersededFinalPush)
+    ) {
       if (retry.alreadyMarkedDelivered) {
         rollbackFinalDelivered(retry.deliveryKey, { peerDedup: retry.peerDedup });
       }
       return false;
     }
-    const existingRetry = pendingFinalRetryByPeer.get(replyPeerKey);
-    if (existingRetry && existingRetry.activationId !== activationId) {
-      pendingFinalRetryByPeer.delete(replyPeerKey);
-      existingRetry.cancel();
+    let pendingRetries = pendingFinalRetryByPeer.get(replyPeerKey);
+    if (!pendingRetries) {
+      pendingRetries = new Map();
+      pendingFinalRetryByPeer.set(replyPeerKey, pendingRetries);
     }
     pendingFinalRetryClaim = retry.alreadyMarkedDelivered
       ? { deliveryKey: retry.deliveryKey, peerDedup: retry.peerDedup }
       : undefined;
-    pendingFinalRetryByPeer.set(replyPeerKey, {
-      activationId,
+    pendingRetries.set(activationId, {
       cancel: () => {
         obsoleteFinalRetry = true;
         finishPendingFinalRetry(true);
       },
+      shouldCancelForNewActivation: () => visibleReplyStarted,
     });
     return true;
   };
@@ -1506,6 +1436,17 @@ export function createBotWsReplyHandle(params: {
         return false;
       }
       return true;
+    }
+
+    if (supersededByNewInbound && markdownChunks.length > 1) {
+      // The first final chunk is now confirmed visible. Preserve the v118
+      // supersede rule and do not interleave its old remainder with the new reply.
+      suppressSupersededFinalPush = true;
+      obsoleteFinalRetry = true;
+      console.info(
+        `[wecom-b3] stream-remainder-skip-superseded account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId}`,
+      );
+      return false;
     }
 
     if (markdownChunks.length > 1) {
@@ -2106,7 +2047,18 @@ export function createBotWsReplyHandle(params: {
   };
 
   const closeSupersededPlaceholder = (): void => {
-    if (isEvent || supersededNoticeSent || visibleReplyStarted || streamSettled) return;
+    if (
+      isEvent ||
+      supersededNoticeSent ||
+      visibleReplyStarted ||
+      streamSettled ||
+      streamUpdateUnreliable ||
+      placeholderInFlight ||
+      previewInFlightCount > 0 ||
+      hasPendingReplyAck(params.client, params.frame)
+    ) {
+      return;
+    }
     supersededNoticeSent = true;
     const noticeStreamId = resolveStreamId();
     void withHandleSendTimeout(
@@ -2119,6 +2071,9 @@ export function createBotWsReplyHandle(params: {
         );
       })
       .catch((error) => {
+        if (isTerminalReplyError(error)) {
+          streamUpdateUnreliable = true;
+        }
         console.warn(
           `[wecom-b3] supersede-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${noticeStreamId} error=${formatFallbackError(error)}`,
         );
@@ -2330,6 +2285,7 @@ export function createBotWsReplyHandle(params: {
               accountId: params.accountId,
               peerKind,
               peerId: peerKeyId,
+              reqId,
               text: finalText,
               mediaUrls,
             })
@@ -2562,15 +2518,20 @@ export function createBotWsReplyHandle(params: {
         return;
       }
       supersededByNewInbound = true;
-      obsoleteFinalRetry = true;
       suppressSupersededFinalPush = visibleReplyStarted;
+      if (suppressSupersededFinalPush) {
+        obsoleteFinalRetry = true;
+      }
       supersededAt = Date.now();
       clearPendingPreview();
       stopPlaceholderKeepalive();
       stopPreviewFreezeTimeout();
       stopPreviewStatusInterval();
-      // A superseded final must never be revived by a detached retry.
-      finishPendingFinalRetry(true);
+      // Confirmed visible old replies must not revive. A wholly invisible
+      // final keeps its bounded retry so the result is not lost permanently.
+      if (suppressSupersededFinalPush) {
+        finishPendingFinalRetry(true);
+      }
       console.info(
         `[wecom-b3] superseded account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${meta.reason} pendingAck=${hasPendingReplyAck(params.client, params.frame)}`,
       );

@@ -73,6 +73,9 @@ export class WecomAccountRuntime {
 
     const trackedReplyHandle: ReplyHandle = {
       context: replyHandle.context,
+      activate: () => {
+        replyHandle.activate?.();
+      },
       deliver: async (payload: ReplyPayload, info) => {
         const deliverStartedAt = Date.now();
         const textLen = payload.text?.trim().length ?? 0;

@@ -125,6 +125,42 @@ describe("BotWsSdkAdapter", () => {
     expect(unhandledRejections).toHaveLength(0);
   });
 
+  it("does not send a placeholder until the runtime activates the reply handle", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (_event, replyHandle) => {
+        expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
+        replyHandle.activate?.();
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+
+    new BotWsSdkAdapter(runtime as any, {} as any).start();
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-deferred" },
+      body: {
+        msgid: "msg-deferred",
+        msgtype: "text",
+        from: { userid: "user-1" },
+        text: { content: "hello" },
+      },
+    });
+    await waitForAsyncCallbacks();
+
+    expect(runtime.handleEvent).toHaveBeenCalledOnce();
+    expect(sdkMockState.client?.replyStream).toHaveBeenCalledOnce();
+  });
+
   it("short-circuits enter_chat welcome events to a static ws welcome reply", async () => {
     process.on("unhandledRejection", onUnhandledRejection);
 

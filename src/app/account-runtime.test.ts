@@ -81,4 +81,25 @@ describe("WecomAccountRuntime", () => {
       reason: "new-inbound",
     });
   });
+
+  it("forwards reply activation through the runtime wrapper", async () => {
+    let trackedReplyHandle: ReplyHandle | undefined;
+    dispatchInboundEventMock.mockImplementation(async (params: { replyHandle: ReplyHandle }) => {
+      trackedReplyHandle = params.replyHandle;
+    });
+    const activate = vi.fn();
+
+    await makeRuntime().handleEvent(makeEvent(), {
+      context: {
+        transport: "bot-ws",
+        accountId: "acct",
+        raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+      },
+      deliver: vi.fn(),
+      activate,
+    });
+
+    trackedReplyHandle?.activate?.();
+    expect(activate).toHaveBeenCalledOnce();
+  });
 });

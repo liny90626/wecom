@@ -214,6 +214,7 @@ export class BotWsSdkAdapter {
           event.inboundKind === "file" ||
           event.inboundKind === "voice" ||
           event.inboundKind === "mixed",
+        deferActivation: true,
         onDeliver: () => {
           this.runtime.touchTransportSession("bot-ws", {
             ownerId: this.ownerId,

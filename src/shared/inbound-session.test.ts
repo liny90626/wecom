@@ -115,4 +115,38 @@ describe("recordInboundSessionSettled", () => {
       vi.useRealTimers();
     }
   });
+
+  it("does not abandon a default metadata write at ten seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseMetadata!: () => void;
+      const metadataTask = new Promise<void>((resolve) => {
+        releaseMetadata = resolve;
+      });
+      const recordInboundSession = vi.fn(async (params) => {
+        params.trackSessionMetaTask?.(metadataTask);
+      });
+      let outcome: "resolved" | "rejected" | undefined;
+      const operation = recordInboundSessionSettled(
+        { channel: { session: { recordInboundSession } } } as any,
+        makeParams(),
+      );
+      void operation.then(
+        () => {
+          outcome = "resolved";
+        },
+        () => {
+          outcome = "rejected";
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(outcome).toBeUndefined();
+      releaseMetadata();
+      await operation;
+      expect(outcome).toBe("resolved");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

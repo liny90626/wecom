@@ -89,6 +89,46 @@ function makeStore() {
 }
 
 describe("dispatchInboundEvent", () => {
+  it("dispatches the same inbound message id to OpenClaw only once", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const store = makeStore();
+    const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const mediaService = {
+      normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+      saveInboundAttachment: vi.fn(),
+    };
+    const duplicateActivate = vi.fn();
+    const event = makeEvent("msg-duplicate", "只发送一次");
+
+    await dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: mediaService as any,
+      event,
+      replyHandle: makeReplyHandle(),
+    });
+    await dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: mediaService as any,
+      event,
+      replyHandle: makeReplyHandle(undefined, { activate: duplicateActivate }),
+    });
+
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+    expect(duplicateActivate).not.toHaveBeenCalled();
+    expect(auditLog.appendOperational).toHaveBeenCalledWith(
+      expect.objectContaining({ category: "duplicate-inbound", messageId: "msg-duplicate" }),
+    );
+  });
+
   it("aborts the superseded same-peer dispatch and still dispatches the newer message to OpenClaw", async () => {
     let firstAbortSignal: AbortSignal | undefined;
     const dispatchReplyWithBufferedBlockDispatcher = vi

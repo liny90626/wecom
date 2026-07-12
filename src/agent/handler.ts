@@ -34,6 +34,8 @@ import {
   extractToUser,
 } from "../shared/xml-parser.js";
 import { resolveOutboundMediaAsset } from "../shared/media-asset.js";
+import { recordInboundSessionSettled } from "../shared/inbound-session.js";
+import { appendSequentialTask } from "./send-queue.js";
 import {
   downloadAgentApiMedia,
   downloadUpstreamAgentApiMedia,
@@ -867,7 +869,7 @@ async function processAgentMessage(params: {
   });
 
   // 记录会话
-  await core.channel.session.recordInboundSession({
+  await recordInboundSessionSettled(core, {
     storePath,
     sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
     ctx: ctxPayload,
@@ -1064,12 +1066,8 @@ async function processAgentMessage(params: {
 
           // 更新队列链
           // 使用 then 链接，并捕获前一个任务可能的错误，确保当前任务总能执行
-          messageSendQueue = messageSendQueue
-            .then(() => currentTask())
-            .catch((err) => {
+          messageSendQueue = appendSequentialTask(messageSendQueue, currentTask, (err) => {
               error?.(`[wecom-agent] previous send task failed: ${String(err)}`);
-              // 前一个失败不应阻止当前任务，继续尝试执行当前任务
-              return currentTask();
             });
 
           // 等待当前任务完成（保持背压，虽然对于 http callback 模式这可能只是延迟了整体结束时间）

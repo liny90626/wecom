@@ -43,41 +43,20 @@ export async function dispatchRuntimeReply(params: {
   let fastOffOutboundDeliverySequence = 0;
   let fastOffPending = false;
   let fastAutoOnText = "";
-  let callbackFastDelivery:
-    | { text: string; promise: Promise<void> }
-    | undefined;
   let blockDeliveryError: unknown;
   let finalDeliveryError: unknown;
   let toolDeliveryError: unknown;
 
-  const deliverFastProgress = async (
-    payload: ReplyPayload,
-    source: "callback" | "direct",
-  ): Promise<void> => {
+  const deliverFastProgress = async (payload: ReplyPayload): Promise<void> => {
     const text = payload.text?.trim() ?? "";
     if (!text) {
-      return;
-    }
-    if (source === "direct" && callbackFastDelivery?.text === text) {
-      const callbackDelivery = callbackFastDelivery.promise;
-      callbackFastDelivery = undefined;
-      await callbackDelivery;
       return;
     }
     const isAutoOn = /\bauto-on\b/i.test(text);
     const outboundDeliverySequenceBeforeProgress = isAutoOn
       ? 0
       : getWecomOutboundDeliverySequence(sessionKey);
-    const delivery = replyHandle.deliver(payload, { kind: "block" });
-    if (source === "callback") {
-      callbackFastDelivery = { text, promise: delivery };
-    }
-    try {
-      await delivery;
-    } catch (error) {
-      if (source === "callback") callbackFastDelivery = undefined;
-      throw error;
-    }
+    await replyHandle.deliver(payload, { kind: "block" });
     if (isAutoOn) {
       fastOffPending = false;
       fastAutoOnText = text;
@@ -129,7 +108,7 @@ export async function dispatchRuntimeReply(params: {
         },
         onToolResult: async (payload) => {
           if (isFastProgress(payload)) {
-            await deliverFastProgress(payload, "callback");
+            await deliverFastProgress(payload);
           }
         },
       }
@@ -148,10 +127,8 @@ export async function dispatchRuntimeReply(params: {
       dispatcherOptions: {
         deliver: async (payload, info) => {
           if (isBotWsReply && isFastProgress(payload)) {
-            await deliverFastProgress(payload, "direct");
             return;
           }
-          callbackFastDelivery = undefined;
           const kind = info?.kind === "final" ? "final" : "block";
           const visibleBody = hasVisibleReplyBody(payload, info?.kind);
           if (isBotWsReply && kind === "final" && fastOffPending && !visibleBody) {
@@ -218,13 +195,16 @@ export async function dispatchRuntimeReply(params: {
     getWecomOutboundDeliverySequence(sessionKey) > fastOffOutboundDeliverySequence;
   const successfulFinal = result.queuedFinal === true || (result.counts?.final ?? 0) > 0;
 
-  if (finalDeliveryError !== undefined) {
-    return failAndThrow(finalDeliveryError);
-  }
   if (fastOffPending && !postFastObservedDelivery) {
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
   }
-  if (finalDelivered || successfulFinal) {
+  if (finalDelivered) {
+    return;
+  }
+  if (finalDeliveryError !== undefined) {
+    return failAndThrow(finalDeliveryError);
+  }
+  if (successfulFinal) {
     return;
   }
   if ((result.failedCounts?.final ?? 0) > 0) {

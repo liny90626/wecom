@@ -39,8 +39,10 @@ describe("dispatchRuntimeReply", () => {
         replyOptions: expect.objectContaining({
           disableBlockStreaming: false,
           reasoningPreviewEnabled: true,
+          allowProgressCallbacksWhenSourceDeliverySuppressed: true,
           onReasoningStream: expect.any(Function),
           onReasoningEnd: expect.any(Function),
+          onToolResult: expect.any(Function),
         }),
       }),
     );
@@ -242,14 +244,14 @@ describe("dispatchRuntimeReply", () => {
     expect(deliver).toHaveBeenLastCalledWith({ text: "Fast: auto-on" }, { kind: "final" });
   });
 
-  it("deduplicates Fast progress exposed by callback and direct delivery", async () => {
+  it("uses the OpenClaw callback as the single Fast progress delivery path", async () => {
     const fast = {
       text: "Fast: auto-off(62s>=60s)",
       channelData: { openclawProgressKind: "fast-mode-auto" },
     };
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
       await params.replyOptions.onToolResult(fast);
-      await params.dispatcherOptions.deliver({ ...fast }, { kind: "tool" });
+      await params.dispatcherOptions.deliver(fast, { kind: "tool" });
       return { queuedFinal: false, counts: { block: 0, final: 0, tool: 1 } };
     });
     const deliver = vi.fn().mockResolvedValue(undefined);
@@ -258,7 +260,7 @@ describe("dispatchRuntimeReply", () => {
       dispatchRuntimeReply({
         core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
         cfg: {} as any,
-        session: { ctx: { SessionKey: "session-fast-dedupe" } } as any,
+        session: { ctx: { SessionKey: "session-fast-callback" } } as any,
         replyHandle: {
           context: {
             transport: "bot-ws",
@@ -269,43 +271,7 @@ describe("dispatchRuntimeReply", () => {
         } as any,
       }),
     ).rejects.toThrow("no visible output");
-    expect(deliver).toHaveBeenCalledOnce();
-  });
 
-  it("deduplicates concurrent Fast callback and direct delivery", async () => {
-    let releaseDelivery!: () => void;
-    const pendingDelivery = new Promise<void>((resolve) => {
-      releaseDelivery = resolve;
-    });
-    const fast = {
-      text: "Fast: auto-off(62s>=60s)",
-      channelData: { openclawProgressKind: "fast-mode-auto" },
-    };
-    const deliver = vi.fn().mockReturnValue(pendingDelivery);
-    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
-      const callback = params.replyOptions.onToolResult(fast);
-      await Promise.resolve();
-      const direct = params.dispatcherOptions.deliver({ ...fast }, { kind: "tool" });
-      releaseDelivery();
-      await Promise.all([callback, direct]);
-      return { queuedFinal: false, counts: { block: 0, final: 0, tool: 1 } };
-    });
-
-    await expect(
-      dispatchRuntimeReply({
-        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
-        cfg: {} as any,
-        session: { ctx: { SessionKey: "session-fast-concurrent" } } as any,
-        replyHandle: {
-          context: {
-            transport: "bot-ws",
-            accountId: "default",
-            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
-          },
-          deliver,
-        } as any,
-      }),
-    ).rejects.toThrow("no visible output");
     expect(deliver).toHaveBeenCalledOnce();
   });
 
@@ -417,6 +383,41 @@ describe("dispatchRuntimeReply", () => {
         } as any,
       }),
     ).rejects.toBe(failure);
+  });
+
+  it("keeps a later successful final after an earlier candidate delivery failed", async () => {
+    const earlierFailure = new Error("earlier candidate delivery failed");
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.dispatcherOptions.onError(earlierFailure, { kind: "final" });
+      await params.dispatcherOptions.deliver({ text: "最终候选已成功" }, { kind: "final" });
+      return {
+        queuedFinal: true,
+        counts: { block: 0, final: 1, tool: 0 },
+        failedCounts: { final: 1 },
+      };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-fallback-success" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(deliver).toHaveBeenCalledWith({ text: "最终候选已成功" }, { kind: "final" });
+    expect(fail).not.toHaveBeenCalled();
   });
 
 });

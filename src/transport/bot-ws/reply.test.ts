@@ -1647,6 +1647,96 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("继续输出：");
   });
 
+  it("recomputes the fallback tail when a discarded preview ACK clears during the final wait", async () => {
+    let releaseOldPreview: ((value: unknown) => void) | undefined;
+    let pendingAck = true;
+    const pendingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+    };
+    pendingClient.hasPendingReplyAck = vi.fn(() => pendingAck);
+    mockClient.replyStream.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseOldPreview = resolve;
+        }) as any,
+    );
+    const handle = createBotWsReplyHandle({
+      client: pendingClient,
+      frame: {
+        headers: { req_id: "req-late-old-model-preview-during-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    }) as ReturnType<typeof createBotWsReplyHandle> & { resetModelAttempt?: () => void };
+
+    const sharedOpening = "两个候选共享的开头";
+    const oldPreview = handle.deliver(
+      { text: sharedOpening, isReasoning: false },
+      { kind: "block" },
+    );
+    await vi.advanceTimersByTimeAsync(8_000);
+    await oldPreview;
+    handle.resetModelAttempt?.();
+
+    const finalDelivery = handle.deliver(
+      { text: `${sharedOpening}\n赢家最终结论`, isReasoning: false },
+      { kind: "final" },
+    );
+    await flushPromises();
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+    releaseOldPreview?.({});
+    await flushPromises();
+    pendingAck = false;
+    await vi.advanceTimersByTimeAsync(100);
+    await finalDelivery;
+
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).not.toContain(sharedOpening);
+    expect(pushed).toContain("赢家最终结论");
+    expect(pushed).toContain("继续输出：");
+  });
+
+  it("keeps the winner opening after its reasoning preview replaces an old candidate body", async () => {
+    const expiredError = {
+      headers: { req_id: "req-reasoning-preview-replaces-old-body" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream
+      .mockResolvedValueOnce({} as any)
+      .mockResolvedValueOnce({} as any)
+      .mockRejectedValueOnce(expiredError);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-reasoning-preview-replaces-old-body" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    }) as ReturnType<typeof createBotWsReplyHandle> & { resetModelAttempt?: () => void };
+
+    const sharedOpening = "两个候选共享的开头";
+    await handle.deliver({ text: sharedOpening, isReasoning: false }, { kind: "block" });
+    handle.resetModelAttempt?.();
+    await handle.deliver({ text: "赢家正在重新思考", isReasoning: true }, { kind: "block" });
+    const winnerPreview = String(mockClient.replyStream.mock.calls[1]?.[2] ?? "");
+    expect(winnerPreview).toContain("<think>赢家正在重新思考</think>");
+    expect(winnerPreview).not.toContain(sharedOpening);
+    await handle.deliver(
+      { text: `${sharedOpening}\n赢家最终结论`, isReasoning: false },
+      { kind: "final" },
+    );
+
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain(sharedOpening);
+    expect(pushed).toContain("赢家最终结论");
+    expect(pushed).not.toContain("继续输出：");
+  });
+
   it("keeps the full fallback final when the discarded preview does not match", async () => {
     let releaseOldPreview: ((value: unknown) => void) | undefined;
     mockClient.replyStream.mockImplementationOnce(

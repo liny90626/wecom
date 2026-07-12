@@ -1002,11 +1002,11 @@ export function createBotWsReplyHandle(params: {
   let previewStartedAt: number | undefined;
   let previewFrozen = false;
   let previewFrozenSourceText = "";
-  let previewFrozenDeliveredSourceText = "";
+  let previewFrozenDeliveredSourceText: string | undefined;
   let previewFrozenText = "";
   let lastPreviewText = "";
-  let lastDeliveredBodySourceText = "";
-  let confirmedPriorAttemptBodySourceText = "";
+  let lastDeliveredBodySourceText: string | undefined;
+  let confirmedPriorAttemptBodySourceText: string | undefined;
   let lastPreviewUpdateAt = 0;
   let lastPreviewStatusAt = 0;
   let previewExpiredNoticeSent = false;
@@ -1229,8 +1229,8 @@ export function createBotWsReplyHandle(params: {
 
   const resolveStreamFallbackText = (finalText: string): string => {
     const deliveredSourceText =
-      previewFrozenDeliveredSourceText ||
-      lastDeliveredBodySourceText ||
+      previewFrozenDeliveredSourceText ??
+      lastDeliveredBodySourceText ??
       confirmedPriorAttemptBodySourceText;
     if (!deliveredSourceText || !finalText.startsWith(deliveredSourceText)) {
       return finalText;
@@ -1258,7 +1258,6 @@ export function createBotWsReplyHandle(params: {
       options.appendCompletionMarker,
     );
     const finalStreamId = resolveStreamId();
-    const fallbackText = resolveStreamFallbackText(finalText);
     const firstStreamChunk = markdownChunks[0] ?? "";
     const pendingAckCleared = await waitForPendingReplyAckToClear({
       client: params.client,
@@ -1268,6 +1267,7 @@ export function createBotWsReplyHandle(params: {
     if (disposed) {
       return false;
     }
+    const fallbackText = resolveStreamFallbackText(finalText);
     // Re-check supersede after the await gap above (up to 5.5s): a new
     // inbound may have superseded this handle while we waited for the pending
     // ack. Without this check the old final would be flushed into the old
@@ -1509,9 +1509,7 @@ export function createBotWsReplyHandle(params: {
     visibleReplyStarted = true;
     lastPreviewText = previewText;
     lastPreviewUpdateAt = now;
-    if (options?.bodySourceText) {
-      lastDeliveredBodySourceText = options.bodySourceText;
-    }
+    lastDeliveredBodySourceText = options?.bodySourceText ?? "";
     if (previewFrozen) {
       stopPreviewFreezeTimeout();
       lastPreviewStatusAt = now;
@@ -1972,8 +1970,8 @@ export function createBotWsReplyHandle(params: {
         return;
       }
       confirmedPriorAttemptBodySourceText =
-        previewFrozenDeliveredSourceText ||
-        lastDeliveredBodySourceText ||
+        previewFrozenDeliveredSourceText ??
+        lastDeliveredBodySourceText ??
         confirmedPriorAttemptBodySourceText;
       modelAttemptGeneration += 1;
       clearPendingPreview();
@@ -1985,10 +1983,10 @@ export function createBotWsReplyHandle(params: {
       previewStartedAt = undefined;
       previewFrozen = false;
       previewFrozenSourceText = "";
-      previewFrozenDeliveredSourceText = "";
+      previewFrozenDeliveredSourceText = undefined;
       previewFrozenText = "";
       lastPreviewText = "";
-      lastDeliveredBodySourceText = "";
+      lastDeliveredBodySourceText = undefined;
       lastPreviewUpdateAt = 0;
       lastPreviewStatusAt = 0;
       console.info(

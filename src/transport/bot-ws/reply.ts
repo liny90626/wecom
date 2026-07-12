@@ -38,6 +38,7 @@ const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
 const LONG_FINAL_DEDUP_MIN_BLOCK_CHARS = 500;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const LONG_FINAL_DEDUP_MAX_REMOVALS = 3;
+const STRUCTURED_TAIL_MIN_DUPLICATE_LINES = 4;
 const FINAL_COMPLETION_MARKER = "（回复完毕）";
 const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
 const PREVIEW_EXPIRED_NOTICE_TEXT =
@@ -50,6 +51,54 @@ const OPEN_THINK_TAG_RE = /<think>/gi;
 const CLOSE_THINK_TAG_RE = /<\/think>/gi;
 const B3_SUPERSEDED_NOTICE_TEXT = "已收到新消息，合并思考。✅";
 const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
+
+function appendPreviewSuffixWithinLimits(params: {
+  prefix: string;
+  suffix: string;
+  maxChars: number;
+  maxBytes: number;
+}): string {
+  const suffix = previewWeComMarkdownV2(
+    params.suffix,
+    params.maxChars,
+    params.maxBytes,
+  ).trim();
+  const separator = params.prefix.trim() ? "\n\n" : "";
+  const availableChars = params.maxChars - separator.length - suffix.length;
+  const availableBytes =
+    params.maxBytes - Buffer.byteLength(`${separator}${suffix}`, "utf8");
+  const prefix =
+    availableChars > 0 && availableBytes > 0
+      ? previewWeComMarkdownV2(params.prefix, availableChars, availableBytes).trimEnd()
+      : "";
+  return prefix ? `${prefix}${separator}${suffix}` : suffix;
+}
+
+function appendFailureNoticeToProgress(progress: string, notice: string): string {
+  const trimmedProgress = progress.trimEnd();
+  const lastLineStart = trimmedProgress.lastIndexOf("\n") + 1;
+  const lastLine = trimmedProgress.slice(lastLineStart).trim();
+  const trailingFastLine = /\bFast:\s*auto-(?:off|on)\b/i.test(lastLine) ? lastLine : "";
+  return appendPreviewSuffixWithinLimits({
+    prefix: trailingFastLine
+      ? trimmedProgress.slice(0, lastLineStart).trimEnd()
+      : trimmedProgress,
+    suffix: trailingFastLine ? `${trailingFastLine}\n\n${notice}` : notice,
+    maxChars: WECOM_STREAM_MAX_CHARS,
+    maxBytes: WECOM_STREAM_MAX_BYTES,
+  });
+}
+
+function isReplyNoVisibleOutputError(error: unknown, formattedMessage: string): boolean {
+  const name =
+    error && typeof error === "object" && "name" in error
+      ? String((error as { name?: unknown }).name ?? "")
+      : "";
+  return (
+    name === "WeComReplyNoVisibleOutputError" ||
+    formattedMessage.includes("WeCom Bot WS reply produced no visible output")
+  );
+}
 
 const recentFinalDeliveriesByPeer = new Map<string, number>();
 
@@ -175,12 +224,15 @@ async function waitForPendingReplyAckToClear(params: {
   client: WSClient;
   frame: WsFrame<BaseMessage | EventMessage>;
   timeoutMs?: number;
+  hasLocalPendingReply?: () => boolean;
 }): Promise<boolean> {
-  if (!hasPendingReplyAck(params.client, params.frame)) {
+  const hasPending = () =>
+    (params.hasLocalPendingReply?.() ?? false) || hasPendingReplyAck(params.client, params.frame);
+  if (!hasPending()) {
     return true;
   }
   const deadline = Date.now() + (params.timeoutMs ?? WECOM_PENDING_ACK_GRACE_MS);
-  while (hasPendingReplyAck(params.client, params.frame)) {
+  while (hasPending()) {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
       return false;
@@ -360,7 +412,9 @@ function dedupeLongFinalText(text: string, options: { previewFrozen: boolean }):
   }
   const repeatedTail = findRepeatedHeadingTail(deduped);
   if (repeatedTail) {
-    deduped = deduped.slice(0, repeatedTail.start).replace(/\n{3,}/g, "\n\n").trim();
+    deduped = `${deduped.slice(0, repeatedTail.start)}${deduped.slice(repeatedTail.end)}`
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
     changed = true;
   }
 
@@ -429,10 +483,48 @@ function findRepeatedHeadingTail(text: string): { start: number; end: number } |
     ) {
       continue;
     }
-    return { start: second.start, end: text.length };
+    const duplicateTailEnd = findRepeatedStructuredTailDuplicateEnd(prior, tail);
+    if (duplicateTailEnd > 0) {
+      return { start: second.start, end: second.start + duplicateTailEnd };
+    }
   }
 
   return undefined;
+}
+
+function findRepeatedStructuredTailDuplicateEnd(prior: string, tail: string): number {
+  const comparableLines = (text: string) => {
+    let offset = 0;
+    return text.split("\n").flatMap((raw, index, lines) => {
+      offset += raw.length + (index < lines.length - 1 ? 1 : 0);
+      const normalized = normalizeDedupText(raw.trim());
+      return normalized.length >= 2 ? [{ normalized, end: offset }] : [];
+    });
+  };
+  const priorLines = comparableLines(prior);
+  const tailLines = comparableLines(tail);
+  if (tailLines.length < STRUCTURED_TAIL_MIN_DUPLICATE_LINES) {
+    return 0;
+  }
+
+  let bestEnd = 0;
+  for (let start = 0; start < priorLines.length; start += 1) {
+    if (priorLines[start]?.normalized !== tailLines[0]?.normalized) {
+      continue;
+    }
+    let matched = 0;
+    while (
+      start + matched < priorLines.length &&
+      matched < tailLines.length &&
+      priorLines[start + matched]?.normalized === tailLines[matched]?.normalized
+    ) {
+      matched += 1;
+    }
+    if (matched >= STRUCTURED_TAIL_MIN_DUPLICATE_LINES) {
+      bestEnd = Math.max(bestEnd, tailLines[matched - 1]?.end ?? 0);
+    }
+  }
+  return bestEnd;
 }
 
 function normalizeHeadingLine(line: string): string {
@@ -725,6 +817,7 @@ export function createBotWsReplyHandle(params: {
   inboundKind: string;
   placeholderContent?: string;
   autoSendPlaceholder?: boolean;
+  deferActivation?: boolean;
   onDeliver?: () => void;
   onFail?: (error: unknown) => void;
 }): ReplyHandle {
@@ -732,6 +825,7 @@ export function createBotWsReplyHandle(params: {
   let accumulatedText = "";
   let accumulatedThinkingText = "";
   let deferredMediaUrls: string[] = [];
+  let modelAttemptGeneration = 0;
   const resolveStreamId = () => {
     streamId ||= generateReqId("stream");
     return streamId;
@@ -739,12 +833,23 @@ export function createBotWsReplyHandle(params: {
 
   const placeholderText = params.placeholderContent?.trim() || "⏳ 正在思考中...\n\n";
   let streamSettled = false;
+  let disposed = false;
   let placeholderInFlight = false;
   let placeholderKeepalive: ReturnType<typeof setInterval> | undefined;
   let placeholderTimeout: ReturnType<typeof setTimeout> | undefined;
   let previewFreezeTimeout: ReturnType<typeof setTimeout> | undefined;
   let previewStatusInterval: ReturnType<typeof setInterval> | undefined;
   let previewStatusInFlight = false;
+  let previewInFlightCount = 0;
+  type PendingPreview = {
+    text: string;
+    bodySourceText?: string;
+    deadline: number;
+    retryCount: number;
+  };
+  let pendingPreview: PendingPreview | undefined;
+  let pendingPreviewPollTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingPreviewFlushInFlight = false;
 
   // Extract peerId for clustering handles
   const body = params.frame.body as any;
@@ -755,6 +860,7 @@ export function createBotWsReplyHandle(params: {
   const peerKeyId = normalizePeerKey(peerId);
   const peerKind: "direct" | "group" = body?.chattype === "group" ? "group" : "direct";
   const reqId = params.frame.headers.req_id || "unknown";
+  let activated = false;
 
   const isEvent =
     params.inboundKind === "welcome" ||
@@ -806,22 +912,34 @@ export function createBotWsReplyHandle(params: {
     }
   };
 
+  const clearPendingPreview = () => {
+    if (pendingPreviewPollTimer) {
+      clearTimeout(pendingPreviewPollTimer);
+      pendingPreviewPollTimer = undefined;
+    }
+    pendingPreview = undefined;
+  };
+
   const settleStream = () => {
     if (streamSettled) return;
     streamSettled = true;
     stopPlaceholderKeepalive();
     stopPreviewFreezeTimeout();
     stopPreviewStatusInterval();
+    clearPendingPreview();
   };
 
   const sendPlaceholder = () => {
-    if (streamSettled || placeholderInFlight || isEvent) return;
+    if (!activated || disposed || streamSettled || placeholderInFlight || isEvent) return;
     placeholderInFlight = true;
     withHandleSendTimeout(
       params.client.replyStream(params.frame, resolveStreamId(), placeholderText, false),
       "stream placeholder",
-    )
+      )
       .catch((error) => {
+        if (disposed) {
+          return;
+        }
         if (isLocalReplyTimeoutError(error)) {
           console.warn(
             `[wecom-preview] placeholder-timeout account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
@@ -843,6 +961,9 @@ export function createBotWsReplyHandle(params: {
   };
 
   const notifyPeerActive = () => {
+    if (!activated || disposed || supersededByNewInbound) {
+      return;
+    }
     // A genuine reply or reasoning is happening on THIS handle.
     // It means the core SDK has chosen this handle to deliver the response.
     // We can safely terminate all other orphaned keepalives for this peer to prevent infinite loops.
@@ -885,6 +1006,7 @@ export function createBotWsReplyHandle(params: {
   let previewFrozenText = "";
   let lastPreviewText = "";
   let lastDeliveredBodySourceText = "";
+  let confirmedPriorAttemptBodySourceText = "";
   let lastPreviewUpdateAt = 0;
   let lastPreviewStatusAt = 0;
   let previewExpiredNoticeSent = false;
@@ -958,6 +1080,9 @@ export function createBotWsReplyHandle(params: {
       progress?: { delivered: number };
     },
   ): Promise<void> => {
+    if (disposed) {
+      return;
+    }
     const markdownChunks = withOptionalCompletionMarker(
       chunkWeComMarkdownV2(textToSend).map(escapeLiteralThinkTags),
       options.appendCompletionMarker === true,
@@ -974,6 +1099,9 @@ export function createBotWsReplyHandle(params: {
     };
     const sendViaClient = async (startIndex = firstIndex): Promise<void> => {
       for (let i = startIndex; i < markdownChunks.length; i += 1) {
+        if (disposed) {
+          return;
+        }
         const chunk = markdownChunks[i] ?? "";
         console.info(
           `[wecom-b3] client-push account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${options.reason} chunk=${i + 1}/${markdownChunks.length}`,
@@ -1000,6 +1128,9 @@ export function createBotWsReplyHandle(params: {
 
     for (let i = firstIndex; i < markdownChunks.length; i += 1) {
       try {
+        if (disposed) {
+          return;
+        }
         const chunk = markdownChunks[i] ?? "";
         console.info(
           `[wecom-b3] active-push account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${options.reason} chunk=${i + 1}/${markdownChunks.length}`,
@@ -1032,6 +1163,9 @@ export function createBotWsReplyHandle(params: {
   // req_id/session retries independently; run-time guards keep B3 supersede
   // semantics (a suppressed superseded final is never re-pushed).
   const runFinalPushRetry = async (retry: FinalPushRetryRequest): Promise<void> => {
+    if (disposed) {
+      return;
+    }
     if (supersededByNewInbound && suppressSupersededFinalPush) {
       console.info(
         `[wecom-b3] final-retry-skip-superseded account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
@@ -1047,6 +1181,9 @@ export function createBotWsReplyHandle(params: {
         appendCompletionMarker: retry.appendCompletionMarker,
         progress: resolveFinalPushProgress(retry.text, retry.appendCompletionMarker),
       });
+      if (disposed) {
+        return;
+      }
       visibleReplyStarted = true;
       console.info(
         `[wecom-b3] final-retry-delivered attempt=${finalPushRetryCount}/${FINAL_PUSH_MAX_RETRIES} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
@@ -1069,7 +1206,11 @@ export function createBotWsReplyHandle(params: {
   };
 
   const scheduleFinalPushRetry = (retry: FinalPushRetryRequest): void => {
-    if (finalPushRetryTimer || (supersededByNewInbound && suppressSupersededFinalPush)) {
+    if (
+      disposed ||
+      finalPushRetryTimer ||
+      (supersededByNewInbound && suppressSupersededFinalPush)
+    ) {
       return;
     }
     if (finalPushRetryCount >= FINAL_PUSH_MAX_RETRIES) {
@@ -1087,11 +1228,11 @@ export function createBotWsReplyHandle(params: {
   };
 
   const resolveStreamFallbackText = (finalText: string): string => {
-    const deliveredSourceText = previewFrozenDeliveredSourceText || lastDeliveredBodySourceText;
-    if (
-      !deliveredSourceText ||
-      !finalText.startsWith(deliveredSourceText)
-    ) {
+    const deliveredSourceText =
+      previewFrozenDeliveredSourceText ||
+      lastDeliveredBodySourceText ||
+      confirmedPriorAttemptBodySourceText;
+    if (!deliveredSourceText || !finalText.startsWith(deliveredSourceText)) {
       return finalText;
     }
     const remainder = finalText.slice(deliveredSourceText.length).trimStart();
@@ -1122,7 +1263,11 @@ export function createBotWsReplyHandle(params: {
     const pendingAckCleared = await waitForPendingReplyAckToClear({
       client: params.client,
       frame: params.frame,
+      hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
     });
+    if (disposed) {
+      return false;
+    }
     // Re-check supersede after the await gap above (up to 5.5s): a new
     // inbound may have superseded this handle while we waited for the pending
     // ack. Without this check the old final would be flushed into the old
@@ -1193,6 +1338,9 @@ export function createBotWsReplyHandle(params: {
         params.client.replyStream(params.frame, finalStreamId, firstStreamChunk, true),
         "stream final",
       );
+      if (disposed) {
+        return false;
+      }
       visibleReplyStarted = true;
     } catch (error) {
       if (isTerminalReplyError(error)) {
@@ -1231,7 +1379,13 @@ export function createBotWsReplyHandle(params: {
 
     if (markdownChunks.length > 1) {
       for (let i = 1; i < markdownChunks.length; i += 1) {
+        if (disposed) {
+          return false;
+        }
         await new Promise((resolve) => setTimeout(resolve, 800));
+        if (disposed) {
+          return false;
+        }
         console.info(
           `[wecom-b2] stream-remainder account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} chunk=${i + 1}/${markdownChunks.length}`,
         );
@@ -1245,6 +1399,39 @@ export function createBotWsReplyHandle(params: {
       }
     }
     return true;
+  };
+
+  const closeOpenedStreamSilently = async (): Promise<void> => {
+    if (streamSettled) {
+      return;
+    }
+    const finalStreamId = streamId;
+    settleStream();
+    if (!finalStreamId || isEvent || supersededByNewInbound) {
+      return;
+    }
+    const pendingAckCleared = await waitForPendingReplyAckToClear({
+      client: params.client,
+      frame: params.frame,
+      timeoutMs: WECOM_REPLY_SEND_TIMEOUT_MS,
+      hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
+    });
+    if (!pendingAckCleared || supersededByNewInbound) {
+      params.onFail?.(new Error("WeCom empty final stream ACK did not clear."));
+      return;
+    }
+    try {
+      await withHandleSendTimeout(
+        params.client.replyStream(params.frame, finalStreamId, "", true),
+        "empty stream final",
+      );
+      if (disposed) {
+        return;
+      }
+      params.onDeliver?.();
+    } catch (error) {
+      params.onFail?.(error);
+    }
   };
 
   const renderPreviewText = (text: string, now = Date.now()): string => {
@@ -1283,10 +1470,10 @@ export function createBotWsReplyHandle(params: {
   // One-time active push after the frozen preview channel dies (typically
   // errcode 846608 once the WeCom stream window closes at ~6 min). Without
   // it the bubble goes silent forever while the task is still running.
-  const maybeSendPreviewExpiredNotice = (): void => {
+  const maybeSendPreviewExpiredNotice = (allowUnfrozen = false): void => {
     if (
       previewExpiredNoticeSent ||
-      !previewFrozen ||
+      (!previewFrozen && !allowUnfrozen) ||
       streamSettled ||
       finalDelivered ||
       isEvent ||
@@ -1310,47 +1497,14 @@ export function createBotWsReplyHandle(params: {
       });
   };
 
-  const sendPreviewUpdate = async (
+  const recordDeliveredPreview = (
     previewText: string,
     now: number,
     options?: { bodySourceText?: string },
-  ): Promise<boolean> => {
-    const previewStreamId = resolveStreamId();
-    try {
-      const result = await withHandleSendTimeout(
-        sendNonFinalStreamUpdate({
-          client: params.client,
-          frame: params.frame,
-          streamId: previewStreamId,
-          content: previewText,
-        }),
-        "stream preview",
-      );
-      if (result === "skipped") {
-        console.info(
-          `[wecom-preview] update-skipped-pending account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
-        );
-        lastPreviewText = previewText;
-        lastPreviewUpdateAt = now;
-        return false;
-      }
-    } catch (error) {
-      if (isTerminalReplyError(error)) {
-        console.warn(
-          `[wecom-preview] terminal-update-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
-        );
-        streamUpdateUnreliable = true;
-        stopPreviewFreezeTimeout();
-        stopPreviewStatusInterval();
-        maybeSendPreviewExpiredNotice();
-        return false;
-      }
-      console.warn(
-        `[wecom-preview] update-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
-      );
-      return false;
+  ): void => {
+    if (disposed || streamSettled || supersededByNewInbound) {
+      return;
     }
-
     stopPlaceholderKeepalive();
     visibleReplyStarted = true;
     lastPreviewText = previewText;
@@ -1364,8 +1518,218 @@ export function createBotWsReplyHandle(params: {
       previewFrozenDeliveredSourceText = previewFrozenSourceText;
       startPreviewStatusInterval();
     }
+  };
+
+  const sendPreviewUpdate = async (
+    previewText: string,
+    now: number,
+    options?: { bodySourceText?: string; fromPendingSlot?: boolean },
+  ): Promise<boolean> => {
+    const attemptGeneration = modelAttemptGeneration;
+    if (disposed || streamSettled || isEvent || supersededByNewInbound || streamUpdateUnreliable) {
+      return false;
+    }
+    const previewStreamId = resolveStreamId();
+    if (placeholderInFlight) {
+      stopPlaceholderKeepalive();
+      if (!options?.fromPendingSlot) {
+        queuePendingPreview(previewText, options);
+      }
+      console.info(
+        `[wecom-preview] update-delayed-pending account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
+      );
+      return false;
+    }
+
+    previewInFlightCount += 1;
+    const previewSendPromise = sendNonFinalStreamUpdate({
+      client: params.client,
+      frame: params.frame,
+      streamId: previewStreamId,
+      content: previewText,
+    });
+    void previewSendPromise.then(
+      (result) => {
+        if (
+          result !== "skipped" &&
+          attemptGeneration !== modelAttemptGeneration &&
+          options?.bodySourceText
+        ) {
+          confirmedPriorAttemptBodySourceText = options.bodySourceText;
+          console.info(
+            `[wecom-preview] discarded-attempt-delivery-confirmed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
+          );
+        }
+      },
+      () => undefined,
+    );
+    try {
+      const result = await withHandleSendTimeout(previewSendPromise, "stream preview");
+      if (result === "skipped") {
+        if (attemptGeneration !== modelAttemptGeneration) {
+          return false;
+        }
+        console.info(
+          `[wecom-preview] update-skipped-pending account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
+        );
+        if (!options?.fromPendingSlot) {
+          queuePendingPreview(previewText, options);
+        }
+        return false;
+      }
+    } catch (error) {
+      if (attemptGeneration !== modelAttemptGeneration) {
+        return false;
+      }
+      if (isTerminalReplyError(error)) {
+        if (isLocalReplyTimeoutError(error)) {
+          void previewSendPromise.then(
+            (result) => {
+              if (
+                result === "skipped" ||
+                attemptGeneration !== modelAttemptGeneration ||
+                disposed ||
+                streamSettled ||
+                supersededByNewInbound
+              ) {
+                return;
+              }
+              recordDeliveredPreview(previewText, now, options);
+              console.info(
+                `[wecom-preview] late-delivery-confirmed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
+              );
+            },
+            () => undefined,
+          );
+        }
+        console.warn(
+          `[wecom-preview] terminal-update-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
+        );
+        streamUpdateUnreliable = true;
+        clearPendingPreview();
+        stopPreviewFreezeTimeout();
+        stopPreviewStatusInterval();
+        maybeSendPreviewExpiredNotice();
+        return false;
+      }
+      console.warn(
+        `[wecom-preview] update-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
+      );
+      return false;
+    } finally {
+      previewInFlightCount = Math.max(0, previewInFlightCount - 1);
+    }
+
+    if (
+      disposed ||
+      streamSettled ||
+      supersededByNewInbound ||
+      streamUpdateUnreliable ||
+      attemptGeneration !== modelAttemptGeneration
+    ) {
+      return false;
+    }
+    recordDeliveredPreview(previewText, now, options);
     return true;
   };
+
+  function queuePendingPreview(
+    previewText: string,
+    options?: { bodySourceText?: string },
+  ): void {
+    if (
+      !previewText ||
+      disposed ||
+      streamSettled ||
+      isEvent ||
+      supersededByNewInbound ||
+      streamUpdateUnreliable
+    ) {
+      return;
+    }
+    pendingPreview = {
+      text: previewText,
+      bodySourceText: options?.bodySourceText,
+      deadline: pendingPreview?.deadline ?? Date.now() + WECOM_PENDING_ACK_GRACE_MS,
+      retryCount: pendingPreview?.retryCount ?? 0,
+    };
+    schedulePendingPreviewPoll();
+  }
+
+  function schedulePendingPreviewPoll(): void {
+    if (pendingPreviewPollTimer || pendingPreviewFlushInFlight || !pendingPreview) {
+      return;
+    }
+    pendingPreviewPollTimer = setTimeout(() => {
+      pendingPreviewPollTimer = undefined;
+      void flushPendingPreview().catch((error) => {
+        console.warn(
+          `[wecom-preview] pending-flush-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} error=${formatFallbackError(error)}`,
+        );
+      });
+    }, WECOM_PENDING_ACK_POLL_MS);
+  }
+
+  async function flushPendingPreview(): Promise<void> {
+    if (
+      !pendingPreview ||
+      disposed ||
+      streamSettled ||
+      isEvent ||
+      supersededByNewInbound ||
+      streamUpdateUnreliable
+    ) {
+      clearPendingPreview();
+      return;
+    }
+    if (Date.now() >= pendingPreview.deadline) {
+      console.warn(
+        `[wecom-preview] update-delayed-expired account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+      );
+      clearPendingPreview();
+      streamUpdateUnreliable = true;
+      stopPreviewFreezeTimeout();
+      stopPreviewStatusInterval();
+      maybeSendPreviewExpiredNotice(true);
+      return;
+    }
+    if (
+      placeholderInFlight ||
+      previewInFlightCount > 0 ||
+      hasPendingReplyAck(params.client, params.frame)
+    ) {
+      schedulePendingPreviewPoll();
+      return;
+    }
+
+    const preview = pendingPreview;
+    pendingPreview = undefined;
+    pendingPreviewFlushInFlight = true;
+    try {
+      const delivered = await sendPreviewUpdate(preview.text, Date.now(), {
+        bodySourceText: preview.bodySourceText,
+        fromPendingSlot: true,
+      });
+      if (
+        !delivered &&
+        preview.retryCount < 1 &&
+        !pendingPreview &&
+        Date.now() < preview.deadline &&
+        !disposed &&
+        !streamSettled &&
+        !supersededByNewInbound &&
+        !streamUpdateUnreliable
+      ) {
+        pendingPreview = { ...preview, retryCount: preview.retryCount + 1 };
+      }
+      if (delivered && !previewFrozen) {
+        schedulePreviewFreezeTimeout(Date.now());
+      }
+    } finally {
+      pendingPreviewFlushInFlight = false;
+      schedulePendingPreviewPoll();
+    }
+  }
 
   const renderPreviewStreamText = (bodyText: string): string => {
     if (!accumulatedThinkingText) {
@@ -1557,7 +1921,14 @@ export function createBotWsReplyHandle(params: {
       });
   };
 
-  if (params.autoSendPlaceholder !== false && !isEvent) {
+  const activate = (): void => {
+    if (activated || disposed) {
+      return;
+    }
+    activated = true;
+    if (params.autoSendPlaceholder === false || isEvent) {
+      return;
+    }
     sendPlaceholder();
     placeholderKeepalive = setInterval(() => {
       sendPlaceholder();
@@ -1576,6 +1947,10 @@ export function createBotWsReplyHandle(params: {
       activeKeepalivesByPeer.set(peerKeyId, keepalives);
     }
     keepalives.add({ reqId, stop: stopPlaceholderKeepalive });
+  };
+
+  if (!params.deferActivation) {
+    activate();
   }
 
   return {
@@ -1591,9 +1966,44 @@ export function createBotWsReplyHandle(params: {
         envelopeType: "ws",
       },
     },
+    activate,
+    resetModelAttempt: () => {
+      if (disposed) {
+        return;
+      }
+      confirmedPriorAttemptBodySourceText =
+        previewFrozenDeliveredSourceText ||
+        lastDeliveredBodySourceText ||
+        confirmedPriorAttemptBodySourceText;
+      modelAttemptGeneration += 1;
+      clearPendingPreview();
+      stopPreviewFreezeTimeout();
+      stopPreviewStatusInterval();
+      accumulatedText = "";
+      accumulatedThinkingText = "";
+      deferredMediaUrls = [];
+      previewStartedAt = undefined;
+      previewFrozen = false;
+      previewFrozenSourceText = "";
+      previewFrozenDeliveredSourceText = "";
+      previewFrozenText = "";
+      lastPreviewText = "";
+      lastDeliveredBodySourceText = "";
+      lastPreviewUpdateAt = 0;
+      lastPreviewStatusAt = 0;
+      console.info(
+        `[wecom-reply] model-attempt-reset account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} generation=${modelAttemptGeneration}`,
+      );
+    },
     deliver: async (payload: ReplyPayload, info) => {
+      if (disposed) {
+        return;
+      }
       // Mark this chat as active on this handle
       notifyPeerActive();
+      if (info.kind === "final") {
+        clearPendingPreview();
+      }
 
       if (payload.isReasoning) {
         // We reset the safety timeout if reasoning is actively streaming
@@ -1713,6 +2123,9 @@ export function createBotWsReplyHandle(params: {
         }
       }
       if (!finalText) {
+        if (info.kind === "final") {
+          await closeOpenedStreamSilently();
+        }
         return;
       }
 
@@ -1827,9 +2240,15 @@ export function createBotWsReplyHandle(params: {
         }
         throw error;
       }
+      if (disposed) {
+        return;
+      }
       params.onDeliver?.();
     },
     fail: async (error: unknown) => {
+      if (disposed) {
+        return;
+      }
       notifyPeerActive();
       settleStream();
       if (supersededByNewInbound) {
@@ -1841,6 +2260,15 @@ export function createBotWsReplyHandle(params: {
         params.onFail?.(error);
         return;
       }
+      const message = formatErrorMessage(error);
+      const noVisibleOutput = isReplyNoVisibleOutputError(error, message);
+      const failNoticeText =
+        noVisibleOutput && lastPreviewText
+          ? appendFailureNoticeToProgress(lastPreviewText, REPLY_FAIL_NOTICE_TEXT)
+          : REPLY_FAIL_NOTICE_TEXT;
+      const text = noVisibleOutput
+        ? failNoticeText
+        : `WeCom WS reply failed: ${message}`;
       const sendFailNoticeOnce = async (): Promise<void> => {
         if (isEvent || finalDelivered || finalPushRetryTimer || failNoticeSent) {
           return;
@@ -1850,7 +2278,7 @@ export function createBotWsReplyHandle(params: {
           `[wecom-reply] fail-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
         );
         try {
-          await sendMarkdownChunksViaActivePush(REPLY_FAIL_NOTICE_TEXT, {
+          await sendMarkdownChunksViaActivePush(failNoticeText, {
             reason: "fail-notice",
           });
         } catch (pushError) {
@@ -1876,9 +2304,25 @@ export function createBotWsReplyHandle(params: {
         params.onFail?.(error);
         return;
       }
-      const message = formatErrorMessage(error);
-      const text = `WeCom WS reply failed: ${message}`;
-
+      if (!isEvent && params.inboundKind !== "welcome") {
+        const pendingAckCleared = await waitForPendingReplyAckToClear({
+          client: params.client,
+          frame: params.frame,
+          hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
+        });
+        if (disposed) {
+          return;
+        }
+        if (supersededByNewInbound) {
+          params.onFail?.(error);
+          return;
+        }
+        if (!pendingAckCleared || streamUpdateUnreliable) {
+          await sendFailNoticeOnce();
+          params.onFail?.(error);
+          return;
+        }
+      }
       try {
         if (params.inboundKind === "welcome") {
           await withHandleSendTimeout(
@@ -1909,11 +2353,26 @@ export function createBotWsReplyHandle(params: {
       }
       params.onFail?.(error);
     },
+    dispose: (reason: string) => {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      if (finalPushRetryTimer) {
+        clearTimeout(finalPushRetryTimer);
+        finalPushRetryTimer = undefined;
+      }
+      settleStream();
+      console.info(
+        `[wecom-reply] disposed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${reason}`,
+      );
+    },
     markExternalActivity: () => {
       notifyPeerActive();
       stopPlaceholderKeepalive();
       stopPreviewFreezeTimeout();
       stopPreviewStatusInterval();
+      clearPendingPreview();
     },
     supersedeByNewInbound: (meta) => {
       if (
@@ -1929,6 +2388,7 @@ export function createBotWsReplyHandle(params: {
       supersededByNewInbound = true;
       suppressSupersededFinalPush = visibleReplyStarted;
       supersededAt = Date.now();
+      clearPendingPreview();
       stopPlaceholderKeepalive();
       stopPreviewFreezeTimeout();
       stopPreviewStatusInterval();
@@ -1943,5 +2403,5 @@ export function createBotWsReplyHandle(params: {
       );
       closeSupersededPlaceholder();
     },
-  };
+  } as ReplyHandle & { resetModelAttempt: () => void };
 }

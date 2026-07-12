@@ -130,6 +130,64 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(3);
   });
 
+  it("finishes an opened placeholder stream when the final reply is intentionally empty", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-empty-final-close" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+    });
+    await flushPromises();
+
+    await handle.deliver({ text: "", isReasoning: false }, { kind: "final" });
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    const placeholderCall = mockClient.replyStream.mock.calls[0];
+    expect(mockClient.replyStream.mock.calls[1]).toEqual([
+      expect.objectContaining({ headers: { req_id: "req-empty-final-close" } }),
+      placeholderCall?.[1],
+      "",
+      true,
+    ]);
+  });
+
+  it("still finishes an empty final when the placeholder ACK arrives after the normal grace", async () => {
+    let resolvePlaceholder: ((value: unknown) => void) | undefined;
+    mockClient.replyStream
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePlaceholder = resolve;
+          }) as any,
+      )
+      .mockResolvedValue({} as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-empty-final-late-placeholder" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+    });
+    await flushPromises();
+
+    const finalDelivery = handle.deliver({ text: "" }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(5_600);
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    resolvePlaceholder?.({});
+    await vi.advanceTimersByTimeAsync(100);
+    await finalDelivery;
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.replyStream.mock.calls[1]?.[3]).toBe(true);
+  });
+
   it("soft-times out hanging placeholders and allows the next keepalive attempt", async () => {
     mockClient.replyStream
       .mockImplementationOnce(() => new Promise(() => undefined) as any)
@@ -182,6 +240,100 @@ describe("createBotWsReplyHandle", () => {
     vi.advanceTimersByTime(3000);
     await Promise.resolve();
     expect(mockClient.replyStream).not.toHaveBeenCalled();
+  });
+
+  it("defers the placeholder until the runtime activates the reply handle", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-deferred-activation" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+      deferActivation: true,
+    });
+
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+
+    handle.activate?.();
+    handle.activate?.();
+    await flushPromises();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-deferred-activation" } }),
+      expect.any(String),
+      "正在思考...",
+      false,
+    );
+
+    await handle.deliver({ text: "已激活", isReasoning: false }, { kind: "final" });
+  });
+
+  it("coalesces pending previews and sends only the latest after ACK clears", async () => {
+    const nonBlockingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+      replyStreamNonBlocking: ReturnType<typeof vi.fn>;
+    };
+    let pendingAck = true;
+    nonBlockingClient.replyStreamNonBlocking = vi.fn(() =>
+      Promise.resolve(pendingAck ? "skipped" : ({} as any)),
+    );
+    nonBlockingClient.hasPendingReplyAck = vi.fn(() => pendingAck);
+
+    const handle = createBotWsReplyHandle({
+      client: nonBlockingClient,
+      frame: {
+        headers: { req_id: "req-preview-coalesced" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "第一版", isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: "第二版", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(2);
+
+    pendingAck = false;
+    await vi.advanceTimersByTimeAsync(100);
+    await flushPromises();
+    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(3);
+    expect(String(nonBlockingClient.replyStreamNonBlocking.mock.calls[2]?.[2])).toContain("第二版");
+  });
+
+  it("pushes one background notice when a pending preview never becomes writable", async () => {
+    const nonBlockingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+      replyStreamNonBlocking: ReturnType<typeof vi.fn>;
+    };
+    nonBlockingClient.replyStreamNonBlocking = vi.fn().mockResolvedValue("skipped");
+    nonBlockingClient.hasPendingReplyAck = vi.fn(() => true);
+    const handle = createBotWsReplyHandle({
+      client: nonBlockingClient,
+      frame: {
+        headers: { req_id: "req-preview-pending-expired" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "正在读取材料" }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(5_600);
+    await flushPromises();
+
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+    expect(String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content)).toContain(
+      "任务仍在后台处理",
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
   });
 
   it("streams non-reasoning block previews and sends the accumulated final once", async () => {
@@ -955,33 +1107,12 @@ describe("createBotWsReplyHandle", () => {
       "· 当前连续失败：1 个",
       "· 建议：可把该 cron 主模型临时切到 it-server/claude-opus-4-8，或增加延迟重试/错峰重跑策略。",
     ].join("\n");
-    const secondReport = [
-      "今日活跃企微会话与定时任务汇总（2026-06-26 12:44）",
-      "",
-      "一、今日活跃企微会话概览",
-      "",
-      "共 16 个活跃会话：",
-      "· main：1 个",
-      "· knowledge：5 个",
-      "",
-      "| 用户 | 最后活跃 | 交流主题 |",
-      "|---|---:|---|",
-      "| 林昱 | 12:43 | 系统配置/运维排查 |",
-      "",
-      "二、定时任务概览",
-      "",
-      "| 任务名 | 模型 | LC | 上次执行 | 成功率 | 修复状态 |",
-      "|---|---|---|---|---:|---|",
-      "| 安全审查-全天（全团队） | it-server/gpt-5.5 | 默认 | 成功 | - |  |",
-      "",
-      "三、异常与观察项",
-      "",
-      "· 当前连续失败：1 个",
-    ].join("\n");
+    const secondReport = firstReport;
     const filler = Array.from({ length: 70 }, (_, index) =>
       `补充明细${String(index).padStart(2, "0")}：这是一段用于模拟长报告正文的内容，保证 final 触发长文本去重。`,
     ).join("\n");
-    const finalText = `${firstReport}\n\n${filler}\n\n${secondReport}`;
+    const uniqueTail = "唯一后续结论：这段内容只出现在重复报告之后，不能被结构化去重误删。";
+    const finalText = `${firstReport}\n\n${filler}\n\n${secondReport}\n\n${uniqueTail}`;
 
     const deliverPromise = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
     await drainChunkTimers();
@@ -993,7 +1124,56 @@ describe("createBotWsReplyHandle", () => {
     ].join("\n");
     expect(delivered).toContain("三、异常与观察项");
     expect(delivered).toContain("补充明细69");
+    expect(delivered).toContain(uniqueTail);
     expect(delivered.match(/今日活跃企微会话与定时任务汇总/g)?.length).toBe(1);
+  });
+
+  it("keeps a reordered structured section instead of treating shared lines as a duplicate", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-long-final-reordered-structure" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const heading = "系统运行状态与任务处理结果汇总报告";
+    const first = [
+      heading,
+      "一、总体结论",
+      "甲项：主链路运行正常。",
+      "乙项：备用链路等待复核。",
+      "二、详细项目",
+      "丙项：附件投递通过。",
+      "丁项：长任务投递通过。",
+    ].join("\n");
+    const reordered = [
+      heading,
+      "一、总体结论",
+      "乙项：备用链路等待复核。",
+      "甲项：主链路运行正常。",
+      "二、详细项目",
+      "丙项：附件投递通过。",
+      "唯一后文：本段顺序变化具有业务含义，不能删除。",
+    ].join("\n");
+    const filler = Array.from({ length: 80 }, (_, index) =>
+      `运行明细${String(index).padStart(2, "0")}：用于构造足够长的结构化报告正文。`,
+    ).join("\n");
+
+    const delivery = handle.deliver(
+      { text: `${first}\n${filler}\n${reordered}` },
+      { kind: "final" },
+    );
+    await drainChunkTimers();
+    await delivery;
+    const delivered = [
+      String(mockClient.replyStream.mock.calls[0]?.[2] ?? ""),
+      ...mockClient.sendMessage.mock.calls.map((call) => String((call[1] as any).markdown.content)),
+    ].join("\n");
+    expect(delivered.match(new RegExp(heading, "g"))?.length).toBe(2);
+    expect(delivered).toContain("唯一后文");
   });
 
   it("does not deduplicate repeated markdown table blocks", async () => {
@@ -1107,6 +1287,32 @@ describe("createBotWsReplyHandle", () => {
       "文件已发送。",
       true,
     );
+  });
+
+  it("clears failed-candidate body, reasoning, and deferred media before the fallback final", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-model-fallback-reset" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    }) as ReturnType<typeof createBotWsReplyHandle> & { resetModelAttempt?: () => void };
+
+    await handle.deliver({ text: "候选 A 的正文", isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: "候选 A 的思考", isReasoning: true }, { kind: "block" });
+    await handle.deliver({ mediaUrls: ["/tmp/candidate-a-only.png"] }, { kind: "block" });
+    expect(handle.resetModelAttempt).toBeTypeOf("function");
+
+    handle.resetModelAttempt?.();
+    await handle.deliver({ text: "候选 B 的最终正文", isReasoning: false }, { kind: "final" });
+
+    const finalStream = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalStream).toContain("候选 B 的最终正文");
+    expect(finalStream).not.toContain("候选 A");
+    expect(uploadAndSendBotWsMediaMock).not.toHaveBeenCalled();
   });
 
   it("passes configured mediaMaxMb to final media sends", async () => {
@@ -1351,6 +1557,170 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("后续最终内容");
     expect(pushed).not.toContain("预览内容000。");
     expect(pushed).toContain("预览内容390。");
+  });
+
+  it("pushes only the continuation after a late preview success", async () => {
+    let releasePreview: ((value: unknown) => void) | undefined;
+    const expiredError = {
+      headers: { req_id: "req-preview-late-success-final-expired" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releasePreview = resolve;
+          }) as any,
+      )
+      .mockRejectedValueOnce(expiredError);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-preview-late-success-final-expired" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const prefix = "收到，继续补测 Q2。";
+    const previewDelivery = handle.deliver(
+      { text: prefix, isReasoning: false },
+      { kind: "block" },
+    );
+    await vi.advanceTimersByTimeAsync(8_000);
+    await previewDelivery;
+    releasePreview?.({});
+    await flushPromises();
+    await handle.deliver(
+      { text: `${prefix}\n最终结论。`, isReasoning: false },
+      { kind: "final" },
+    );
+
+    expect(mockClient.replyStream).toHaveBeenCalled();
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("继续输出：");
+    expect(pushed).toContain("最终结论");
+    expect(pushed).not.toContain(prefix);
+  });
+
+  it("deduplicates a late confirmed preview from a discarded model candidate", async () => {
+    let releaseOldPreview: ((value: unknown) => void) | undefined;
+    mockClient.replyStream.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseOldPreview = resolve;
+        }) as any,
+    );
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-late-old-model-preview" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    }) as ReturnType<typeof createBotWsReplyHandle> & { resetModelAttempt?: () => void };
+
+    const sharedOpening = "两个候选共享的开头";
+    const oldPreview = handle.deliver(
+      { text: sharedOpening, isReasoning: false },
+      { kind: "block" },
+    );
+    await vi.advanceTimersByTimeAsync(8_000);
+    await oldPreview;
+    handle.resetModelAttempt?.();
+    releaseOldPreview?.({});
+    await flushPromises();
+    await handle.deliver(
+      { text: `${sharedOpening}\n赢家最终结论`, isReasoning: false },
+      { kind: "final" },
+    );
+
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).not.toContain(sharedOpening);
+    expect(pushed).toContain("赢家最终结论");
+    expect(pushed).toContain("继续输出：");
+  });
+
+  it("keeps the full fallback final when the discarded preview does not match", async () => {
+    let releaseOldPreview: ((value: unknown) => void) | undefined;
+    mockClient.replyStream.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseOldPreview = resolve;
+        }) as any,
+    );
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-late-old-model-preview-different" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    }) as ReturnType<typeof createBotWsReplyHandle> & { resetModelAttempt?: () => void };
+
+    const oldPreview = handle.deliver(
+      { text: "候选 A 的旧开头", isReasoning: false },
+      { kind: "block" },
+    );
+    await vi.advanceTimersByTimeAsync(8_000);
+    await oldPreview;
+    handle.resetModelAttempt?.();
+    releaseOldPreview?.({});
+    await flushPromises();
+    await handle.deliver(
+      { text: "候选 B 的不同开头\n赢家最终结论", isReasoning: false },
+      { kind: "final" },
+    );
+
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("候选 B 的不同开头");
+    expect(pushed).toContain("赢家最终结论");
+    expect(pushed).not.toContain("继续输出：");
+  });
+
+  it("uses the current candidate preview instead of an overwritten prior attempt", async () => {
+    const expiredError = {
+      headers: { req_id: "req-current-preview-wins" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream
+      .mockResolvedValueOnce({} as any)
+      .mockResolvedValueOnce({} as any)
+      .mockRejectedValueOnce(expiredError);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-current-preview-wins" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    }) as ReturnType<typeof createBotWsReplyHandle> & { resetModelAttempt?: () => void };
+
+    const priorOpening = "旧候选曾显示的长开头";
+    await handle.deliver({ text: priorOpening, isReasoning: false }, { kind: "block" });
+    handle.resetModelAttempt?.();
+    await handle.deliver({ text: "赢家当前预览", isReasoning: false }, { kind: "block" });
+    await handle.deliver(
+      { text: `${priorOpening}\n赢家最终结论`, isReasoning: false },
+      { kind: "final" },
+    );
+
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).not.toContain("赢家当前预览");
+    expect(pushed).toContain(priorOpening);
+    expect(pushed).toContain("赢家最终结论");
+    expect(pushed).toContain("继续输出：");
   });
 
   it("actively pushes the continuation when a visible short preview update hangs", async () => {
@@ -1672,6 +2042,42 @@ describe("createBotWsReplyHandle", () => {
       markdown: { content: `最终回复\n\n${FINAL_COMPLETION_MARKER}` },
     });
     expect(onDeliver).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels detached final retries and ignores later delivery after disposal", async () => {
+    const expiredError = {
+      headers: { req_id: "req-final-retry-disposed" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    mockClient.sendMessage.mockRejectedValueOnce(new Error("active push failed"));
+    const onDeliver = vi.fn();
+    const onFail = vi.fn();
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-final-retry-disposed" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      onDeliver,
+      onFail,
+    });
+
+    await handle.deliver({ text: "旧 final", isReasoning: false }, { kind: "final" });
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    handle.dispose?.("account-unregister:test");
+    await vi.advanceTimersByTimeAsync(400_000);
+    await handle.deliver({ text: "不得复活", isReasoning: false }, { kind: "final" });
+    await handle.fail(new Error("late failure"));
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+    expect(onDeliver).not.toHaveBeenCalled();
   });
 
   it("stops final push retries after exhausting attempts", async () => {
@@ -2137,6 +2543,73 @@ describe("createBotWsReplyHandle", () => {
     await handle.fail(terminalError);
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
     expect(onFail).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps visible progress and hides no-visible-output internals on failure", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-no-visible-output" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const progress = "已完成前置检查。\n💨Fast: auto-off(62s>=60s)";
+    await handle.deliver({ text: progress, isReasoning: false }, { kind: "block" });
+    const error = new Error(
+      "WeCom Bot WS reply produced no visible output for agent:main:wecom:direct:alice.",
+    );
+    error.name = "WeComReplyNoVisibleOutputError";
+
+    await handle.fail(error);
+
+    const delivered = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(delivered).toContain("已完成前置检查");
+    expect(delivered).toContain("Fast: auto-off");
+    expect(delivered).toContain("本次回复投递中断");
+    expect(delivered).not.toContain("no visible output");
+    expect(delivered).not.toContain("agent:main:wecom");
+    expect(delivered.length).toBeLessThanOrEqual(3_500);
+    expect(Buffer.byteLength(delivered, "utf8")).toBeLessThanOrEqual(12_000);
+  });
+
+  it("uses active push for a no-visible-output failure while the stream ACK stays pending", async () => {
+    const nonBlockingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+      replyStreamNonBlocking: ReturnType<typeof vi.fn>;
+    };
+    let pendingAck = false;
+    nonBlockingClient.hasPendingReplyAck = vi.fn(() => pendingAck);
+    nonBlockingClient.replyStreamNonBlocking = vi.fn().mockResolvedValue({});
+    const onFail = vi.fn();
+    const handle = createBotWsReplyHandle({
+      client: nonBlockingClient,
+      frame: {
+        headers: { req_id: "req-no-visible-pending-ack" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      onFail,
+    });
+    await handle.deliver({ text: "Fast: auto-off(62s>=60s)" }, { kind: "block" });
+    pendingAck = true;
+    const error = new Error("WeCom Bot WS reply produced no visible output for session-a.");
+    error.name = "WeComReplyNoVisibleOutputError";
+
+    const failure = handle.fail?.(error);
+    await vi.advanceTimersByTimeAsync(5_600);
+    await failure;
+
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("本次回复投递中断");
+    expect(pushed).not.toContain("no visible output");
+    expect(onFail).toHaveBeenCalledWith(error);
   });
 
   it("starts the frozen status refresh even when the freezing preview send is skipped", async () => {

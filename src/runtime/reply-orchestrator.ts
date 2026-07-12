@@ -1,7 +1,6 @@
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
 import { hasVisibleReplyBody } from "../shared/reply-visibility.js";
 import type { ReplyHandle, ReplyPayload } from "../types/index.js";
-import { getWecomOutboundDeliverySequence } from "./outbound-delivery.js";
 import type { PreparedSession } from "./session-manager.js";
 
 type DispatchReply = PluginRuntime["channel"]["reply"]["dispatchReplyWithBufferedBlockDispatcher"];
@@ -40,7 +39,6 @@ export async function dispatchRuntimeReply(params: {
   let visibleBodySeen = false;
   let finalDelivered = false;
   let observedReplyDelivery = false;
-  let fastOffOutboundDeliverySequence = 0;
   let fastOffPending = false;
   let fastAutoOnText = "";
   let blockDeliveryError: unknown;
@@ -53,16 +51,12 @@ export async function dispatchRuntimeReply(params: {
       return;
     }
     const isAutoOn = /\bauto-on\b/i.test(text);
-    const outboundDeliverySequenceBeforeProgress = isAutoOn
-      ? 0
-      : getWecomOutboundDeliverySequence(sessionKey);
     await replyHandle.deliver(payload, { kind: "block" });
     if (isAutoOn) {
       fastOffPending = false;
       fastAutoOnText = text;
     } else {
       fastOffPending = true;
-      fastOffOutboundDeliverySequence = outboundDeliverySequenceBeforeProgress;
       fastAutoOnText = "";
     }
   };
@@ -169,11 +163,7 @@ export async function dispatchRuntimeReply(params: {
     if (finalDelivered) {
       return;
     }
-    const postFastObservedDelivery =
-      fastOffPending &&
-      observedReplyDelivery &&
-      getWecomOutboundDeliverySequence(sessionKey) > fastOffOutboundDeliverySequence;
-    if ((observedReplyDelivery && !fastOffPending) || postFastObservedDelivery) {
+    if (observedReplyDelivery) {
       await closeReply();
       return;
     }
@@ -191,13 +181,9 @@ export async function dispatchRuntimeReply(params: {
     result.sendPolicyDenied === true ||
     result.sourceReplyDeliveryMode === "message_tool_only";
   const observedDelivery = observedReplyDelivery || result.observedReplyDelivery === true;
-  const postFastObservedDelivery =
-    fastOffPending &&
-    observedDelivery &&
-    getWecomOutboundDeliverySequence(sessionKey) > fastOffOutboundDeliverySequence;
   const successfulFinal = result.queuedFinal === true || (result.counts?.final ?? 0) > 0;
 
-  if (fastOffPending && !postFastObservedDelivery) {
+  if (fastOffPending && !observedDelivery) {
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
   }
   if (finalDelivered) {

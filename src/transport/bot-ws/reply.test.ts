@@ -191,6 +191,44 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream.mock.calls[1]?.[3]).toBe(true);
   });
 
+  it("does not reuse the callback req_id for final after the placeholder ACK times out", async () => {
+    const ackTimeout = new Error(
+      "Reply ack timeout (5000ms) for reqId: req-placeholder-ack-timeout",
+    );
+    mockClient.replyStream
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            setTimeout(() => reject(ackTimeout), 5_000);
+          }) as any,
+      )
+      .mockResolvedValue({} as any);
+    const onFail = vi.fn();
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-placeholder-ack-timeout" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+      onFail,
+    });
+    await flushPromises();
+
+    const finalDelivery = handle.deliver({ text: "最终正文" }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(5_100);
+    await finalDelivery;
+
+    expect(onFail).toHaveBeenCalledWith(ackTimeout);
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: { content: `最终正文\n\n${FINAL_COMPLETION_MARKER}` },
+    });
+  });
+
   it("soft-times out hanging placeholders and allows the next keepalive attempt", async () => {
     mockClient.replyStream
       .mockImplementationOnce(() => new Promise(() => undefined) as any)
@@ -1505,6 +1543,134 @@ describe("createBotWsReplyHandle", () => {
     );
   });
 
+  it("claims a media final before sending so a duplicate callback cannot resend attachments", async () => {
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({
+      config: {
+        loadConfig: () => ({}),
+      },
+    } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-duplicate-final-media" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const payload = {
+      text: "附件说明",
+      mediaUrls: ["/tmp/report.pdf"],
+      isReasoning: false,
+    };
+
+    await handle.deliver(payload, { kind: "final" });
+    await handle.deliver(payload, { kind: "final" });
+
+    expect(uploadAndSendBotWsMediaMock).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops a media final after supersede makes the first attachment visible", async () => {
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({
+      config: {
+        loadConfig: () => ({}),
+      },
+    } as any);
+    let releaseMedia!: () => void;
+    uploadAndSendBotWsMediaMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseMedia = () => resolve({ ok: true, messageId: "media-visible" });
+        }),
+    );
+    const onDeliver = vi.fn();
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-supersede-during-final-media" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      onDeliver,
+    });
+    const delivery = handle.deliver(
+      {
+        text: "旧任务附件说明",
+        mediaUrls: ["/tmp/first.pdf", "/tmp/second.pdf"],
+        isReasoning: false,
+      },
+      { kind: "final" },
+    );
+    await flushPromises();
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    releaseMedia();
+    await delivery;
+    await flushPromises();
+
+    expect(uploadAndSendBotWsMediaMock).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-supersede-during-final-media" } }),
+      expect.any(String),
+      expect.stringContaining("已收到新消息"),
+      true,
+    );
+    expect(onDeliver).toHaveBeenCalledTimes(1);
+  });
+
+  it("never reclaims successful final media while text fallback retries are exhausted", async () => {
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({
+      config: {
+        loadConfig: () => ({}),
+      },
+    } as any);
+    const expiredError = {
+      headers: { req_id: "req-media-text-retry-exhausted" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    mockClient.sendMessage.mockRejectedValue(new Error("active push rejected before delivery"));
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-text-retry-exhausted" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const payload = {
+      text: "附件说明",
+      mediaUrls: ["/tmp/report.pdf"],
+      isReasoning: false,
+    };
+
+    await handle.deliver(payload, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(140_000);
+    await flushPromises();
+    await handle.deliver(payload, { kind: "final" });
+
+    expect(uploadAndSendBotWsMediaMock).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(4);
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+  });
+
   it("passes configured mediaMaxMb to final media sends", async () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
@@ -2234,8 +2400,9 @@ describe("createBotWsReplyHandle", () => {
       new Error("Reply ack timeout (5000ms) for reqId: aibot_send_msg_active-push"),
     ],
     ["ambiguous failure", new Error("socket closed after active push send")],
+    ["SDK cancellation", new Error("Reply aibot_send_msg active push cancelled")],
   ])(
-    "defers an active-push %s to the bounded retry without resending on the same client",
+    "does not retry an active-push %s with an ambiguous delivery outcome",
     async (_label, pushError) => {
       const expiredError = {
         headers: { req_id: "req-active-push-ack-timeout" },
@@ -2251,6 +2418,7 @@ describe("createBotWsReplyHandle", () => {
       });
       mockClient.replyStream.mockRejectedValueOnce(expiredError);
       const onDeliver = vi.fn();
+      const onFail = vi.fn();
 
       const handle = createBotWsReplyHandle({
         client: mockClient,
@@ -2262,6 +2430,7 @@ describe("createBotWsReplyHandle", () => {
         inboundKind: "text",
         autoSendPlaceholder: false,
         onDeliver,
+        onFail,
       });
 
       await handle.deliver({ text: "最终回复", isReasoning: false }, { kind: "final" });
@@ -2270,12 +2439,13 @@ describe("createBotWsReplyHandle", () => {
       expect(mockClient.sendMessage).not.toHaveBeenCalled();
       expect(onDeliver).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(20_000);
+      await vi.advanceTimersByTimeAsync(80_000);
       await flushPromises();
 
-      expect(sendMarkdown).toHaveBeenCalledTimes(2);
+      expect(sendMarkdown).toHaveBeenCalledTimes(1);
       expect(mockClient.sendMessage).not.toHaveBeenCalled();
-      expect(onDeliver).toHaveBeenCalledTimes(1);
+      expect(onDeliver).not.toHaveBeenCalled();
+      expect(onFail).toHaveBeenCalledWith(pushError);
     },
   );
 

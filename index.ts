@@ -9,7 +9,6 @@ import { createWeComMcpToolFactory } from "./src/capability/mcp/index.js";
 import { wecomPlugin } from "./src/channel.js";
 import { handleWecomWebhookRequest } from "./src/monitor.js";
 import { setWecomRuntime } from "./src/runtime.js";
-import { recordWecomOutboundDelivery } from "./src/runtime/outbound-delivery.js";
 import { isWecomBotWsSource } from "./src/runtime/source-registry.js";
 
 const WECOM_BOT_WS_MEDIA_GUIDANCE = [
@@ -57,16 +56,6 @@ const plugin = {
     registerWecomDocTools(api);
     registerWecomCalendarTools(api);
     api.registerTool(createWeComMcpToolFactory(), { name: "wecom_mcp" });
-
-    api.on("message_sent", (event, ctx) => {
-      if (
-        ctx.channelId === "wecom" &&
-        event.success &&
-        !event.messageId?.startsWith("suppressed-")
-      ) {
-        recordWecomOutboundDelivery(ctx.sessionKey ?? event.sessionKey);
-      }
-    });
 
     api.on("before_prompt_build", (_event, ctx) => {
       if (ctx.channelId !== "wecom") {

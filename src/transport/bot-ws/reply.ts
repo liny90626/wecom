@@ -165,6 +165,18 @@ function isLocalReplyTimeoutError(error: unknown): boolean {
   return error instanceof Error && error.name === "WeComReplyTimeoutError";
 }
 
+function isAmbiguousActivePushDeliveryError(error: unknown): boolean {
+  if (isAckTimeoutError(error) || isLocalReplyTimeoutError(error)) {
+    return true;
+  }
+  const message = formatFallbackError(error).toLowerCase();
+  return (
+    /(?:socket|websocket|connection).*(?:closed|lost|reset)/.test(message) ||
+    /(?:closed|lost|reset).*(?:socket|websocket|connection)/.test(message) ||
+    (message.includes("reply") && message.includes("cancelled"))
+  );
+}
+
 function isTerminalReplyError(error: unknown): boolean {
   return (
     isInvalidReqIdError(error) ||
@@ -895,6 +907,10 @@ export function createBotWsReplyHandle(params: {
           );
           return;
         }
+        // SDK 1.0.6 matches ACKs only by req_id. After an ACK timeout, a late
+        // placeholder ACK could resolve a newer frame if this callback req_id
+        // were reused, so all subsequent delivery must leave the old stream.
+        streamUpdateUnreliable = true;
         settleStream();
         params.onFail?.(error);
       })
@@ -1000,7 +1016,7 @@ export function createBotWsReplyHandle(params: {
   };
 
   let pendingFinalRetryClaim:
-    | { deliveryKey: string; peerDedup: boolean }
+    | { deliveryKey: string; peerDedup: boolean; preserve: boolean }
     | undefined;
   let obsoleteFinalRetry = false;
   const isCurrentReplyActivation = (): boolean => !obsoleteFinalRetry;
@@ -1014,7 +1030,7 @@ export function createBotWsReplyHandle(params: {
       clearTimeout(finalPushRetryTimer);
       finalPushRetryTimer = undefined;
     }
-    if (rollbackClaim && pendingFinalRetryClaim) {
+    if (rollbackClaim && pendingFinalRetryClaim && !pendingFinalRetryClaim.preserve) {
       rollbackFinalDelivered(pendingFinalRetryClaim.deliveryKey, {
         peerDedup: pendingFinalRetryClaim.peerDedup,
       });
@@ -1154,6 +1170,7 @@ export function createBotWsReplyHandle(params: {
     peerDedup: boolean;
     appendCompletionMarker: boolean;
     alreadyMarkedDelivered?: boolean;
+    preserveDeliveryClaim?: boolean;
     maxChars?: number;
     maxBytes?: number;
   }
@@ -1163,7 +1180,7 @@ export function createBotWsReplyHandle(params: {
       !isCurrentReplyActivation() ||
       (supersededByNewInbound && suppressSupersededFinalPush)
     ) {
-      if (retry.alreadyMarkedDelivered) {
+      if (retry.alreadyMarkedDelivered && !retry.preserveDeliveryClaim) {
         rollbackFinalDelivered(retry.deliveryKey, { peerDedup: retry.peerDedup });
       }
       return false;
@@ -1174,7 +1191,11 @@ export function createBotWsReplyHandle(params: {
       pendingFinalRetryByPeer.set(replyPeerKey, pendingRetries);
     }
     pendingFinalRetryClaim = retry.alreadyMarkedDelivered
-      ? { deliveryKey: retry.deliveryKey, peerDedup: retry.peerDedup }
+      ? {
+          deliveryKey: retry.deliveryKey,
+          peerDedup: retry.peerDedup,
+          preserve: retry.preserveDeliveryClaim === true,
+        }
       : undefined;
     pendingRetries.set(activationId, {
       cancel: () => {
@@ -1216,6 +1237,7 @@ export function createBotWsReplyHandle(params: {
     pendingFinalRetryClaim = {
       deliveryKey: retry.deliveryKey,
       peerDedup: retry.peerDedup,
+      preserve: retry.preserveDeliveryClaim === true,
     };
     try {
       await sendMarkdownChunksViaActivePush(retry.text, {
@@ -1245,6 +1267,14 @@ export function createBotWsReplyHandle(params: {
         console.info(
           `[wecom-b3] final-retry-stop-obsolete account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
         );
+        return;
+      }
+      if (isAmbiguousActivePushDeliveryError(error)) {
+        finishPendingFinalRetry(false);
+        console.warn(
+          `[wecom-b3] final-retry-stop-ambiguous account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+        );
+        params.onFail?.(error);
         return;
       }
       if (!retry.alreadyMarkedDelivered) {
@@ -1315,7 +1345,7 @@ export function createBotWsReplyHandle(params: {
       deliveryKey: string;
       peerDedup: boolean;
     },
-  ): Promise<boolean | "retry-scheduled"> => {
+  ): Promise<boolean | "retry-scheduled" | "ambiguous-failure"> => {
     const markdownChunks = withOptionalCompletionMarker(
       chunkWeComMarkdownV2(
         finalText,
@@ -1332,6 +1362,12 @@ export function createBotWsReplyHandle(params: {
       hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
     });
     const fallbackText = resolveStreamFallbackText(finalText);
+    const settleActivePushFailure = (
+      error: unknown,
+    ): false | "ambiguous-failure" => {
+      params.onFail?.(error);
+      return isAmbiguousActivePushDeliveryError(error) ? "ambiguous-failure" : false;
+    };
     // Re-check supersede after the await gap above (up to 5.5s): a new
     // inbound may have superseded this handle while we waited for the pending
     // ack. Without this check the old final would be flushed into the old
@@ -1354,8 +1390,7 @@ export function createBotWsReplyHandle(params: {
         });
         visibleReplyStarted = true;
       } catch (fallbackError) {
-        params.onFail?.(fallbackError);
-        return false;
+        return settleActivePushFailure(fallbackError);
       }
       return true;
     }
@@ -1371,8 +1406,7 @@ export function createBotWsReplyHandle(params: {
         });
         visibleReplyStarted = true;
       } catch (fallbackError) {
-        params.onFail?.(fallbackError);
-        return false;
+        return settleActivePushFailure(fallbackError);
       }
       return true;
     }
@@ -1388,8 +1422,7 @@ export function createBotWsReplyHandle(params: {
         });
         visibleReplyStarted = true;
       } catch (fallbackError) {
-        params.onFail?.(fallbackError);
-        return false;
+        return settleActivePushFailure(fallbackError);
       }
       return true;
     }
@@ -1416,8 +1449,7 @@ export function createBotWsReplyHandle(params: {
           });
           visibleReplyStarted = true;
         } catch (fallbackError) {
-          params.onFail?.(fallbackError);
-          return false;
+          return settleActivePushFailure(fallbackError);
         }
         return true;
       }
@@ -1432,8 +1464,7 @@ export function createBotWsReplyHandle(params: {
         });
         visibleReplyStarted = true;
       } catch (fallbackError) {
-        params.onFail?.(fallbackError);
-        return false;
+        return settleActivePushFailure(fallbackError);
       }
       return true;
     }
@@ -1486,6 +1517,14 @@ export function createBotWsReplyHandle(params: {
         if (error === OBSOLETE_FINAL_RETRY) {
           finishPendingFinalRetry(true);
           return "retry-scheduled";
+        }
+        if (isAmbiguousActivePushDeliveryError(error)) {
+          finishPendingFinalRetry(false);
+          console.warn(
+            `[wecom-b2] stream-remainder-stop-ambiguous account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} error=${formatFallbackError(error)}`,
+          );
+          params.onFail?.(error);
+          return "ambiguous-failure";
         }
         console.warn(
           `[wecom-b2] stream-remainder-retry account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} error=${formatFallbackError(error)}`,
@@ -2216,6 +2255,26 @@ export function createBotWsReplyHandle(params: {
 
       let finalText = outboundText;
       let finalAppendCompletionMarker = false;
+      let finalMediaDelivered = false;
+      let currentFinalDeliveryKey = "";
+      const currentFinalUsesPeerDedup = info.kind === "final" && !supersededByNewInbound;
+      if (info.kind === "final" && mediaUrls.length > 0) {
+        currentFinalDeliveryKey = buildFinalDeliveryKey({
+          accountId: params.accountId,
+          peerKind,
+          peerId: peerKeyId,
+          reqId,
+          text: outboundText,
+          mediaUrls,
+        });
+        if (
+          !markFinalDelivered(currentFinalDeliveryKey, {
+            peerDedup: currentFinalUsesPeerDedup,
+          })
+        ) {
+          return;
+        }
+      }
       if (info.kind === "final" && mediaUrls.length > 0) {
         const cfg = getWecomRuntime().config.loadConfig();
         const mediaLocalRoots = resolveWecomMergedMediaLocalRoots({ cfg });
@@ -2233,12 +2292,29 @@ export function createBotWsReplyHandle(params: {
           });
           if (result.ok) {
             mediaSent += 1;
+            finalMediaDelivered = true;
+            visibleReplyStarted = true;
             if (result.downgradeNote) {
               mediaNotes.push(result.downgradeNote);
+            }
+            if (supersededByNewInbound) {
+              suppressSupersededFinalPush = true;
+              obsoleteFinalRetry = true;
+              break;
             }
             continue;
           }
           mediaFailures.push(formatMediaFailure(mediaUrl, result.error, result.rejectReason));
+        }
+
+        if (supersededByNewInbound && suppressSupersededFinalPush) {
+          deferredMediaUrls = [];
+          settleStream();
+          console.info(
+            `[wecom-b3] superseded-final-stop-after-media account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+          );
+          params.onDeliver?.();
+          return;
         }
 
         if (!finalText && mediaSent > 0) {
@@ -2279,23 +2355,18 @@ export function createBotWsReplyHandle(params: {
         return;
       }
 
-      const currentFinalDeliveryKey =
-        info.kind === "final"
-          ? buildFinalDeliveryKey({
-              accountId: params.accountId,
-              peerKind,
-              peerId: peerKeyId,
-              reqId,
-              text: finalText,
-              mediaUrls,
-            })
-          : "";
-      const currentFinalUsesPeerDedup = info.kind === "final" && !supersededByNewInbound;
-      if (
-        info.kind === "final" &&
-        !markFinalDelivered(currentFinalDeliveryKey, { peerDedup: currentFinalUsesPeerDedup })
-      ) {
-        return;
+      if (info.kind === "final" && !currentFinalDeliveryKey) {
+        currentFinalDeliveryKey = buildFinalDeliveryKey({
+          accountId: params.accountId,
+          peerKind,
+          peerId: peerKeyId,
+          reqId,
+          text: finalText,
+          mediaUrls,
+        });
+        if (!markFinalDelivered(currentFinalDeliveryKey, { peerDedup: currentFinalUsesPeerDedup })) {
+          return;
+        }
       }
 
       // Event frames do not support streaming chunks
@@ -2340,6 +2411,10 @@ export function createBotWsReplyHandle(params: {
               progress: resolveFinalPushProgress(textToSend, finalAppendCompletionMarker),
             });
           } catch (error) {
+            if (isAmbiguousActivePushDeliveryError(error)) {
+              params.onFail?.(error);
+              return;
+            }
             rollbackFinalDelivered(currentFinalDeliveryKey, {
               peerDedup: currentFinalUsesPeerDedup,
             });
@@ -2361,16 +2436,23 @@ export function createBotWsReplyHandle(params: {
           if (normalFinalResult === "retry-scheduled") {
             return;
           }
+          if (normalFinalResult === "ambiguous-failure") {
+            return;
+          }
           if (!normalFinalResult) {
-            rollbackFinalDelivered(currentFinalDeliveryKey, {
-              peerDedup: currentFinalUsesPeerDedup,
-            });
+            if (!finalMediaDelivered) {
+              rollbackFinalDelivered(currentFinalDeliveryKey, {
+                peerDedup: currentFinalUsesPeerDedup,
+              });
+            }
             if (!(supersededByNewInbound && suppressSupersededFinalPush)) {
               scheduleFinalPushRetry({
                 text: resolveStreamFallbackText(finalText),
                 deliveryKey: currentFinalDeliveryKey,
                 peerDedup: currentFinalUsesPeerDedup,
                 appendCompletionMarker: true,
+                alreadyMarkedDelivered: finalMediaDelivered,
+                preserveDeliveryClaim: finalMediaDelivered,
               });
             }
             return;

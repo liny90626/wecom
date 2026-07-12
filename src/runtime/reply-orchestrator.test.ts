@@ -1,13 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  clearWecomOutboundDeliveriesForTest,
-  recordWecomOutboundDelivery,
-} from "./outbound-delivery.js";
+import { describe, expect, it, vi } from "vitest";
 import { dispatchRuntimeReply } from "./reply-orchestrator.js";
 
 describe("dispatchRuntimeReply", () => {
-  beforeEach(clearWecomOutboundDeliveriesForTest);
-
   it("enables block streaming for bot-ws replies", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi
       .fn()
@@ -275,17 +269,20 @@ describe("dispatchRuntimeReply", () => {
     expect(deliver).toHaveBeenCalledOnce();
   });
 
-  it("only accepts message-tool delivery observed after Fast auto-off", async () => {
+  it("accepts current-run message-tool delivery observed before or after Fast auto-off", async () => {
     const run = async (observedAfterFast: boolean) => {
       const sessionKey = `session-message-tool-${String(observedAfterFast)}`;
       const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
-        recordWecomOutboundDelivery(sessionKey);
-        params.replyOptions.onObservedReplyDelivery();
+        if (!observedAfterFast) {
+          await params.replyOptions.onObservedReplyDelivery();
+        }
         await params.replyOptions.onToolResult({
           text: "Fast: auto-off(62s>=60s)",
           channelData: { openclawProgressKind: "fast-mode-auto" },
         });
-        if (observedAfterFast) recordWecomOutboundDelivery(sessionKey);
+        if (observedAfterFast) {
+          await params.replyOptions.onObservedReplyDelivery();
+        }
         return {
           queuedFinal: false,
           counts: { block: 0, final: 0, tool: 0 },
@@ -308,18 +305,17 @@ describe("dispatchRuntimeReply", () => {
       });
     };
 
-    await expect(run(false)).rejects.toThrow("no visible output");
+    await expect(run(false)).resolves.toBeUndefined();
     await expect(run(true)).resolves.toBeUndefined();
   });
 
-  it("does not treat another outbound in the same session as this run's Fast completion", async () => {
-    const sessionKey = "session-unrelated-outbound-after-fast";
+  it("does not treat message-tool mode without current-run observed delivery as complete", async () => {
+    const sessionKey = "session-message-tool-unobserved";
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
       await params.replyOptions.onToolResult({
         text: "Fast: auto-off(62s>=60s)",
         channelData: { openclawProgressKind: "fast-mode-auto" },
       });
-      recordWecomOutboundDelivery(sessionKey);
       return {
         queuedFinal: false,
         counts: { block: 0, final: 0, tool: 0 },
@@ -361,7 +357,6 @@ describe("dispatchRuntimeReply", () => {
         channelData: { openclawProgressKind: "fast-mode-auto" },
       });
       await Promise.resolve();
-      recordWecomOutboundDelivery(sessionKey);
       releaseProgress();
       await progress;
       return {

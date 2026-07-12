@@ -170,7 +170,53 @@ describe("createBotStreamOrchestrator merged media", () => {
       "spec.pdf",
       "photo.png",
     ]);
+    expect(ctx.Attachments[0]).toEqual(
+      expect.objectContaining({
+        path: "/tmp/spec.pdf",
+        url: "file:///tmp/spec.pdf",
+        remoteUrl: "file:///tmp/spec.pdf",
+      }),
+    );
     expect(stageWecomInboundMediaForSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps sandbox-relative attachment URLs relative to the agent workspace", async () => {
+    vi.mocked(decryptWecomMediaWithMeta).mockResolvedValue({
+      buffer: Buffer.from("%PDF-1.7 sandbox"),
+      sourceContentType: "application/pdf",
+      sourceFilename: "report.pdf",
+      sourceUrl: "https://example.com/report.pdf",
+    });
+    stageWecomInboundMediaForSession.mockResolvedValueOnce("media/inbound/report.pdf");
+    const { core, recordInboundSession } = createCore();
+    const orchestrator = createBotStreamOrchestrator({
+      streamStore: new StreamStore(),
+      recordBotOperationalEvent: vi.fn(),
+    });
+
+    await orchestrator.startAgentForStream({
+      target: createTarget(core),
+      accountId: "default",
+      streamId: "stream-sandbox-relative-media",
+      msg: {
+        msgid: "M1",
+        msgtype: "file",
+        chattype: "single",
+        from: { userid: "linky" },
+        file: { url: "https://example.com/report.pdf" },
+      },
+    } as any);
+
+    const ctx = recordInboundSession.mock.calls[0]?.[0]?.ctx;
+    expect(ctx.MediaPath).toBe("media/inbound/report.pdf");
+    expect(ctx.MediaPaths).toEqual(["media/inbound/report.pdf"]);
+    expect(ctx.Attachments[0]).toEqual(
+      expect.objectContaining({
+        path: "media/inbound/report.pdf",
+        url: "media/inbound/report.pdf",
+        remoteUrl: "media/inbound/report.pdf",
+      }),
+    );
   });
 
   it("keeps successful attachments and makes a later save failure visible", async () => {
@@ -231,5 +277,73 @@ describe("createBotStreamOrchestrator merged media", () => {
     expect(ctx.MediaPaths).toEqual(["/tmp/ok.png"]);
     expect(ctx.MediaFailures).toEqual([{ name: "bad.pdf", error: "disk full" }]);
     expect(runtimeError).toHaveBeenCalledWith(expect.stringContaining("Failed to save inbound media"));
+  });
+
+  it("does not expose an attachment that failed session staging", async () => {
+    vi.mocked(decryptWecomMediaWithMeta).mockResolvedValue({
+      buffer: Buffer.from("report"),
+      sourceContentType: "application/pdf",
+      sourceFilename: "report.pdf",
+      sourceUrl: "https://example.com/report.pdf",
+    });
+    stageWecomInboundMediaForSession.mockRejectedValueOnce(new Error("workspace unavailable"));
+    const { core, recordInboundSession } = createCore();
+    const orchestrator = createBotStreamOrchestrator({
+      streamStore: new StreamStore(),
+      recordBotOperationalEvent: vi.fn(),
+    });
+
+    await orchestrator.startAgentForStream({
+      target: createTarget(core),
+      accountId: "default",
+      streamId: "stream-stage-failure",
+      msg: {
+        msgid: "M1",
+        msgtype: "file",
+        chattype: "single",
+        from: { userid: "linky" },
+        file: { url: "https://example.com/report.pdf" },
+      },
+    } as any);
+
+    const ctx = recordInboundSession.mock.calls[0]?.[0]?.ctx;
+    expect(ctx.Attachments).toBeUndefined();
+    expect(ctx.MediaPaths).toBeUndefined();
+    expect(ctx.RawBody).toContain("[附件处理失败: report.pdf - workspace unavailable]");
+  });
+
+  it("waits for session metadata before dispatching the webhook reply", async () => {
+    let releaseMetadata!: () => void;
+    const metadataTask = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
+    const { core, recordInboundSession } = createCore();
+    recordInboundSession.mockImplementation(async (params) => {
+      params.trackSessionMetaTask?.(metadataTask);
+    });
+    const dispatch = core.channel.reply.dispatchReplyWithBufferedBlockDispatcher;
+    const orchestrator = createBotStreamOrchestrator({
+      streamStore: new StreamStore(),
+      recordBotOperationalEvent: vi.fn(),
+    });
+
+    const operation = orchestrator.startAgentForStream({
+      target: createTarget(core),
+      accountId: "default",
+      streamId: "stream-metadata",
+      msg: {
+        msgid: "M1",
+        msgtype: "text",
+        chattype: "single",
+        from: { userid: "linky" },
+        text: { content: "hello" },
+      },
+    } as any);
+    await vi.waitFor(() => expect(recordInboundSession).toHaveBeenCalledOnce());
+    expect(dispatch).not.toHaveBeenCalled();
+
+    releaseMetadata();
+    await operation;
+    expect(dispatch).toHaveBeenCalledOnce();
   });
 });

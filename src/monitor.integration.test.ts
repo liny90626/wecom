@@ -4,6 +4,7 @@ import { encryptWecomPlaintext, computeWecomMsgSignature, WECOM_PKCS7_BLOCK_SIZE
 import * as runtime from "./runtime.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 
@@ -67,6 +68,7 @@ describe("Monitor Integration: Inbound Image", () => {
     const token = "MY_TOKEN";
     const encodingAESKey = "jWmYm7qr5nMoCAstdRmNjt3p7vsH8HkK+qiJqQ0aaaa="; // 32 bytes key
     const receiveId = "MY_CORPID";
+    const workspaceDir = path.join("/tmp", `wecom-monitor-integration-${process.pid}`);
     let unregisterTarget: (() => void) | null = null;
 
     // Mock Core Runtime
@@ -107,7 +109,8 @@ describe("Monitor Integration: Inbound Image", () => {
         logging: { shouldLogVerbose: () => true },
     };
 
-    beforeEach(() => {
+    beforeEach(async () => {
+        await fs.promises.mkdir(workspaceDir, { recursive: true });
         vi.spyOn(runtime, "getWecomRuntime").mockReturnValue(mockCore as any);
 
         unregisterTarget?.();
@@ -121,17 +124,23 @@ describe("Monitor Integration: Inbound Image", () => {
                 receiveId,
                 config: {} as any
             },
-            config: {} as any,
+            config: {
+                agents: {
+                    list: [{ id: "agent-1", workspace: workspaceDir, sandbox: { mode: "off" } }],
+                },
+            } as any,
             runtime: { log: console.log, error: console.error },
             core: mockCore as any,
             path: "/plugins/wecom/bot/default"
         });
     });
 
-    afterEach(() => {
+    afterEach(async () => {
         unregisterTarget?.();
         unregisterTarget = null;
         vi.restoreAllMocks();
+        await fs.promises.rm(workspaceDir, { recursive: true, force: true });
+        await fs.promises.rm("/tmp/saved-image.jpg", { force: true });
     });
 
     // Mock media saving
@@ -214,7 +223,7 @@ describe("Monitor Integration: Inbound Image", () => {
         expect(savedBuffer.toString()).toBe("fake-image-data");
 
         // Expect Context Injection
-        expect(ctx.MediaPath).toBe("/tmp/saved-image.jpg");
+        expect(ctx.MediaPath).toBe(path.join(workspaceDir, "media", "inbound", "image.jpg"));
         expect(ctx.MediaType).toBe("image/jpeg");
         expect(ctx.Surface).toBe("wecom");
         expect(ctx.OriginatingChannel).toBe("wecom");

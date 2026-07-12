@@ -1,3 +1,4 @@
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { PluginRuntime } from "openclaw/plugin-sdk";
@@ -17,6 +18,7 @@ import { sendBotFallbackPromptNow } from "./fallback-delivery.js";
 import { finalizeBotStream } from "./stream-finalizer.js";
 import { handleDirectLocalPathIntent } from "./local-path-delivery.js";
 import { stageWecomInboundMediaForSession } from "./sandbox-media.js";
+import { recordInboundSessionSettled } from "../../shared/inbound-session.js";
 import { createBotReplyDispatcher } from "./stream-delivery.js";
 import type { BotRuntimeLogger, RecordBotOperationalEvent } from "./types.js";
 
@@ -48,6 +50,10 @@ function appendMediaFailures(body: string, failures: InboundMediaFailure[]): str
     return `[附件处理失败: ${name} - ${failure.error}]`;
   });
   return [body, ...lines].filter((line) => line.trim()).join("\n");
+}
+
+function resolveAttachmentUrl(mediaPath: string): string {
+  return path.isAbsolute(mediaPath) ? pathToFileURL(mediaPath).href : mediaPath;
 }
 
 export function createBotStreamOrchestrator(params: {
@@ -248,6 +254,7 @@ export function createBotStreamOrchestrator(params: {
       logVerbose(target, `dynamic agent routing: ${targetAgentId}, sessionKey=${route.sessionKey}`);
     }
 
+    const stagedMediaRecords: typeof mediaRecords = [];
     for (const media of mediaRecords) {
       try {
         const stagedSessionPath = await stageWecomInboundMediaForSession({
@@ -258,8 +265,8 @@ export function createBotStreamOrchestrator(params: {
           mediaPath: media.path,
           filename: media.filename,
         });
-        media.path = stagedSessionPath;
-        logVerbose(target, `session media staged to ${media.path}`);
+        stagedMediaRecords.push({ ...media, path: stagedSessionPath });
+        logVerbose(target, `session media staged to ${stagedSessionPath}`);
       } catch (err) {
         mediaFailures.push({ name: media.filename, error: formatMediaFailure(err) });
         target.runtime.error?.(`Failed to stage inbound media for session workspace: ${String(err)}`);
@@ -314,18 +321,19 @@ export function createBotStreamOrchestrator(params: {
       return;
     }
 
-    const attachments = mediaRecords.length
-      ? mediaRecords.map((media) => ({
+    const attachments = stagedMediaRecords.length
+      ? stagedMediaRecords.map((media) => ({
           name: media.filename || "file",
           mimeType: media.contentType,
           contentType: media.contentType,
-          url: pathToFileURL(media.path).href,
-          remoteUrl: pathToFileURL(media.path).href,
+          path: media.path,
+          url: resolveAttachmentUrl(media.path),
+          remoteUrl: resolveAttachmentUrl(media.path),
         }))
       : undefined;
-    const firstMedia = mediaRecords[0];
-    const mediaPaths = mediaRecords.map((media) => media.path);
-    const mediaTypes = mediaRecords.map((media) => media.contentType);
+    const firstMedia = stagedMediaRecords[0];
+    const mediaPaths = stagedMediaRecords.map((media) => media.path);
+    const mediaTypes = stagedMediaRecords.map((media) => media.contentType);
     const mediaTypesPayload = mediaTypes.some(Boolean) ? mediaTypes : undefined;
 
     const ctxPayload = core.channel.reply.finalizeInboundContext({
@@ -356,7 +364,7 @@ export function createBotStreamOrchestrator(params: {
       MediaTypes: mediaTypesPayload,
     });
 
-    await core.channel.session.recordInboundSession({
+    await recordInboundSessionSettled(core, {
       storePath,
       sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
       ctx: ctxPayload,

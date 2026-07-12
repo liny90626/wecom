@@ -111,12 +111,18 @@ export function registerActiveBotWsReplyHandle(params: {
     const previousPeerHandle = activeBotWsReplyHandlesByPeer.get(peerKey);
     if (previousPeerHandle && previousPeerHandle !== params.handle) {
       supersededPrevious = true;
-      previousPeerHandle.supersedeByNewInbound?.({
-        accountId,
-        peerKind: params.peerKind,
-        peerId,
-        reason: "new-inbound",
-      });
+      try {
+        previousPeerHandle.supersedeByNewInbound?.({
+          accountId,
+          peerKind: params.peerKind,
+          peerId,
+          reason: "new-inbound",
+        });
+      } catch (error) {
+        console.warn(
+          `[wecom-b3] supersede-notify-failed account=${accountId} peer=${params.peerKind}:${peerId} error=${String(error)}`,
+        );
+      }
     }
     activeBotWsReplyHandlesByPeer.set(peerKey, params.handle);
   }

@@ -244,6 +244,7 @@ describe("dispatchInboundEvent", () => {
       const store = makeStore();
       const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
       const oldSupersede = vi.fn();
+      const oldFail = vi.fn();
 
       const first = dispatchInboundEvent({
         core: core as any,
@@ -255,7 +256,7 @@ describe("dispatchInboundEvent", () => {
           saveInboundAttachment: vi.fn(),
         } as any,
         event: makeEvent("msg-stuck-prepare-a", "A"),
-        replyHandle: makeReplyHandle(oldSupersede),
+        replyHandle: makeReplyHandle(oldSupersede, { fail: oldFail }),
       });
       await Promise.resolve();
 
@@ -274,6 +275,7 @@ describe("dispatchInboundEvent", () => {
 
       await first;
       expect(oldSupersede).toHaveBeenCalledTimes(1);
+      expect(oldFail).not.toHaveBeenCalled();
       expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(250);
@@ -376,12 +378,39 @@ describe("dispatchInboundEvent", () => {
     expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
   });
 
+  it("fails an activated Bot WS reply once when prepare rejects before core starts", async () => {
+    const prepareError = new Error("attachment prepare failed");
+    const fail = vi.fn().mockResolvedValue(undefined);
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn();
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+
+    await expect(
+      dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: makeStore() as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockRejectedValue(prepareError),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-prepare-rejected", "prepare"),
+        replyHandle: makeReplyHandle(vi.fn(), { fail }),
+      }),
+    ).rejects.toBe(prepareError);
+
+    expect(fail).toHaveBeenCalledOnce();
+    expect(fail).toHaveBeenCalledWith(prepareError);
+    expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+  });
+
   it("times out a stuck prepare after 60 seconds", async () => {
     vi.useFakeTimers();
     try {
       const dispatchReplyWithBufferedBlockDispatcher = vi.fn();
       const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
       const activate = vi.fn();
+      const fail = vi.fn().mockResolvedValue(undefined);
       const operation = dispatchInboundEvent({
         core: core as any,
         cfg: {} as any,
@@ -392,7 +421,7 @@ describe("dispatchInboundEvent", () => {
           saveInboundAttachment: vi.fn(),
         } as any,
         event: makeEvent("msg-prepare-timeout", "timeout"),
-        replyHandle: makeReplyHandle(vi.fn(), { activate }),
+        replyHandle: makeReplyHandle(vi.fn(), { activate, fail }),
       });
       const rejected = expect(operation).rejects.toMatchObject({
         name: "WeComPrepareTimeoutError",
@@ -401,6 +430,8 @@ describe("dispatchInboundEvent", () => {
       await vi.advanceTimersByTimeAsync(60_000);
       await rejected;
       expect(activate).toHaveBeenCalledTimes(1);
+      expect(fail).toHaveBeenCalledTimes(1);
+      expect(fail.mock.calls[0]?.[0]).toMatchObject({ name: "WeComPrepareTimeoutError" });
       expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();

@@ -86,4 +86,37 @@ describe("active Bot WS reply handle registry", () => {
       }),
     ).toBe(newHandle);
   });
+
+  it("registers the new handle even when the previous supersede callback throws", () => {
+    const oldHandle = makeReplyHandle({
+      supersedeByNewInbound: vi.fn(() => {
+        throw new Error("old handle cleanup failed");
+      }),
+    });
+    const newHandle = makeReplyHandle();
+    registerActiveBotWsReplyHandle({
+      accountId: "acct",
+      sessionKey: "session-a",
+      peerKind: "direct",
+      peerId: "alice",
+      handle: oldHandle,
+    });
+
+    expect(
+      registerActiveBotWsReplyHandle({
+        accountId: "acct",
+        sessionKey: "session-b",
+        peerKind: "direct",
+        peerId: "alice",
+        handle: newHandle,
+      }),
+    ).toBe(true);
+    expect(
+      getActiveBotWsReplyHandle({
+        accountId: "acct",
+        peerKind: "direct",
+        peerId: "alice",
+      }),
+    ).toBe(newHandle);
+  });
 });

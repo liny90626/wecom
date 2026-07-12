@@ -132,6 +132,7 @@ export async function dispatchInboundEvent(params: {
     event.transport === "bot-ws" && replyHandle.context.transport === "bot-ws";
   let sessionKey: string | undefined;
   let supersededPreviousAt: number | undefined;
+  let coreDispatchStarted = false;
 
   if (isBotWsReplySession) {
     console.info(
@@ -179,6 +180,7 @@ export async function dispatchInboundEvent(params: {
     console.info(
       `[wecom-b3] dispatch-core-start account=${event.accountId} messageId=${event.messageId} sessionKey=${sessionKey} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
     );
+    coreDispatchStarted = true;
     const dispatchPromise = dispatchRuntimeReply({
       core,
       cfg,
@@ -200,6 +202,15 @@ export async function dispatchInboundEvent(params: {
         `[wecom-b3] dispatch-core-aborted account=${event.accountId} messageId=${event.messageId} sessionKey=${sessionKey ?? "n/a"} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
       );
       return;
+    }
+    if (isBotWsReplySession && !coreDispatchStarted) {
+      try {
+        await activeReplyHandle.fail?.(error);
+      } catch (failError) {
+        console.warn(
+          `[wecom-b3] dispatch-prepare-fail-notice-error account=${event.accountId} messageId=${event.messageId} peer=${event.conversation.peerKind}:${event.conversation.peerId} error=${String(failError)}`,
+        );
+      }
     }
     throw error;
   } finally {

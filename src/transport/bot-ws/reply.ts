@@ -748,6 +748,12 @@ function escapeThinkBlockText(text: string): string {
     .trim();
 }
 
+function stripDanglingThinkMarkup(text: string): string {
+  return text
+    .replace(/(?:<!--(?:(?!-->)[\s\S])*|<!-?|<--|<)$/, "")
+    .trimEnd();
+}
+
 function trimToUtf8Bytes(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
     return value;
@@ -763,10 +769,12 @@ function trimToUtf8Bytes(value: string, maxBytes: number): string {
 }
 
 function renderThinkContent(text: string): string {
-  return trimToUtf8Bytes(
-    escapeThinkBlockText(text || "progress").slice(0, THINKING_BLOCK_MAX_CHARS),
-    THINKING_BLOCK_MAX_BYTES,
-  ).trim();
+  return stripDanglingThinkMarkup(
+    trimToUtf8Bytes(
+      escapeThinkBlockText(text || "progress").slice(0, THINKING_BLOCK_MAX_CHARS),
+      THINKING_BLOCK_MAX_BYTES,
+    ).trim(),
+  );
 }
 
 function renderInlineThinkBlock(text: string): string {

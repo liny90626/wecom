@@ -479,6 +479,29 @@ describe("createBotWsReplyHandle", () => {
     expect(finalText).toBe("最终正文");
   });
 
+  it.each(["分析完成<--", "分析完成<!--"])(
+    "strips a dangling comment marker from thinking content: %s",
+    async (thinkingText) => {
+      const handle = createBotWsReplyHandle({
+        client: mockClient,
+        frame: {
+          headers: { req_id: "req-thinking-dangling-comment" },
+          body: { from: { userid: "alice" }, chattype: "single" },
+        } as unknown as ReplyHandleParams["frame"],
+        accountId: "default",
+        inboundKind: "text",
+        autoSendPlaceholder: false,
+      });
+
+      await handle.deliver({ text: thinkingText, isReasoning: true }, { kind: "block" });
+
+      const progressText = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
+      expect(progressText).toContain("<think>分析完成</think>");
+      expect(progressText).not.toContain("<--");
+      expect(progressText).not.toContain("<!--");
+    },
+  );
+
   it("does not pass literal think tags through normal final body text", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

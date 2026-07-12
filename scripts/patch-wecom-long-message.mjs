@@ -71,6 +71,12 @@ function status() {
       reply.includes("withReplySendTimeout(") &&
       reply.includes("params.client.sendMessage(peerId,") &&
       reply.includes("\"stream remainder push\"")
+    ) ||
+    (
+      reply.includes("await sendMarkdownChunksViaActivePush(finalText, {") &&
+      reply.includes("reason: \"stream-remainder\"") &&
+      reply.includes("progress.delivered = Math.max(progress.delivered, 1)") &&
+      reply.includes("isObsolete: () => !isCurrentReplyActivation()")
     );
   const replyReady =
     reply.includes("chunkWeComMarkdownV2") &&

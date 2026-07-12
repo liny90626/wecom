@@ -4,7 +4,6 @@ import type { ReplyHandle } from "../types/index.js";
 import {
   getActiveBotWsReplyHandle,
   registerActiveBotWsReplyHandle,
-  unregisterAccountRuntime,
   unregisterActiveBotWsReplyHandle,
 } from "./index.js";
 
@@ -86,30 +85,5 @@ describe("active Bot WS reply handle registry", () => {
         peerId: "alice",
       }),
     ).toBe(newHandle);
-  });
-
-  it("disposes an active handle once when its account runtime is unregistered", () => {
-    const dispose = vi.fn();
-    const handle = makeReplyHandle({ dispose });
-
-    registerActiveBotWsReplyHandle({
-      accountId: "acct",
-      sessionKey: "session-a",
-      peerKind: "direct",
-      peerId: "alice",
-      handle,
-    });
-    unregisterAccountRuntime("acct");
-
-    expect(dispose).toHaveBeenCalledTimes(1);
-    expect(dispose).toHaveBeenCalledWith("account-unregister:acct");
-    expect(
-      getActiveBotWsReplyHandle({
-        accountId: "acct",
-        sessionKey: "session-a",
-        peerKind: "direct",
-        peerId: "alice",
-      }),
-    ).toBeUndefined();
   });
 });

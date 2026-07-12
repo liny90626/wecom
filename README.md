@@ -200,9 +200,9 @@ npx vitest run
 
 #### 📌 v2.5.110-136（2026-07-12，LinKy fork 重做版）
 - **[稳定主线重建] 基于 v118 重做而非继续叠加 v135**：保留 v118 轻量投递骨架，只重新实现有复现证据的 OpenClaw 6.11、ACK、late-final、Fast/no-output 和 fallback 修复；v135 完整状态留在 `features/v135-stabilization`。
-- **[回复完整性] 不再截掉重复标题后的唯一后文**：结构化去重只删除连续同序的精确重复行；pending preview、空 final、中断提示和 late final 均按确认送达状态处理。
+- **[回复完整性] 不再截掉重复标题后的唯一后文**：结构化去重只删除连续同序的精确重复行；pending preview、thinking 预算、长 final 尾段续传、空 final、中断提示和 late final 均按确认送达状态处理。
 - **[速度与并发] 单次 dispatch、短 quiet grace**：prepare 前即可被新消息抢占，不引入本地 OpenClaw retry、熔断器或分钟级等待；final 兜底重试保持后台 detached。
-- **[Fast 与附件] 进度保留、异常不静默**：auto-off 后没有正文会显示中断；auto-on 可正常无正文结束；短时附件+文字保序合并，失败附件进入上下文。完整说明见 [`changelog/v2.5.110-136.md`](./changelog/v2.5.110-136.md)。
+- **[Fast 与附件] 进度保留、异常不静默**：冻结预览仍保留 auto-off/auto-on；auto-off 后没有正文会显示中断，auto-on 可正常无正文结束；短时附件+文字保序合并，失败附件进入上下文。完整说明见 [`changelog/v2.5.110-136.md`](./changelog/v2.5.110-136.md)。
 
 #### 📌 v2.5.110-118（2026-07-03，LinKy fork 维护版）
 - **[长任务体验] 预览通道过期不再彻底静默** 🛡️ 冻结计时刷新改为冻结即启动（自愈），stream 窗口过期（846608）后主动推送一次性提示"任务仍在后台处理，完成后将以新消息发送"，并为状态刷新加 60 分钟硬上限。

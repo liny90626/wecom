@@ -94,10 +94,8 @@ export type ReplyPayload = {
 export type ReplyHandle = {
   context: ReplyContext;
   activate?: () => void;
-  dispose?: (reason: string) => void;
   deliver: (payload: ReplyPayload, info: ReplyDeliveryInfo) => Promise<void>;
   fail?: (error: unknown) => Promise<void>;
-  resetModelAttempt?: () => void;
   markExternalActivity?: () => void;
   supersedeByNewInbound?: (meta: {
     accountId: string;

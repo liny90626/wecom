@@ -118,13 +118,6 @@ export async function dispatchInboundEvent(params: {
   };
   const activeReplyHandle: ReplyHandle = {
     ...replyHandle,
-    dispose: (reason) => {
-      try {
-        replyHandle.dispose?.(reason);
-      } finally {
-        abortObsoleteDispatch(new Error(`WeCom Bot WS reply disposed: ${reason}`));
-      }
-    },
     supersedeByNewInbound: (meta) => {
       try {
         replyHandle.supersedeByNewInbound?.(meta);

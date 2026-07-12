@@ -187,28 +187,14 @@ export function unregisterBotWsPushHandle(accountId: string): void {
 export function unregisterAccountRuntime(accountId: string): void {
   runtimes.delete(accountId);
   botWsPushHandles.delete(accountId);
-  const handlesToDispose = new Set<ReplyHandle>();
   for (const key of activeBotWsReplyHandlesBySession.keys()) {
     if (key.startsWith(`${accountId}::`)) {
-      const handle = activeBotWsReplyHandlesBySession.get(key);
-      if (handle) handlesToDispose.add(handle);
       activeBotWsReplyHandlesBySession.delete(key);
     }
   }
   for (const key of activeBotWsReplyHandlesByPeer.keys()) {
     if (key.startsWith(`${accountId}::`)) {
-      const handle = activeBotWsReplyHandlesByPeer.get(key);
-      if (handle) handlesToDispose.add(handle);
       activeBotWsReplyHandlesByPeer.delete(key);
-    }
-  }
-  for (const handle of handlesToDispose) {
-    try {
-      handle.dispose?.(`account-unregister:${accountId}`);
-    } catch (error) {
-      console.warn(
-        `[wecom-runtime] active reply dispose failed account=${accountId} error=${String(error)}`,
-      );
     }
   }
   clearWecomSourceAccount(accountId);

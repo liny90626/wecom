@@ -297,13 +297,83 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "第一版", isReasoning: false }, { kind: "block" });
     await handle.deliver({ text: "第二版", isReasoning: false }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(2);
+    expect(nonBlockingClient.replyStreamNonBlocking).not.toHaveBeenCalled();
 
     pendingAck = false;
     await vi.advanceTimersByTimeAsync(100);
     await flushPromises();
-    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(3);
-    expect(String(nonBlockingClient.replyStreamNonBlocking.mock.calls[2]?.[2])).toContain("第二版");
+    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(1);
+    expect(String(nonBlockingClient.replyStreamNonBlocking.mock.calls[0]?.[2])).toContain("第二版");
+  });
+
+  it("drops an older pending preview when a newer direct preview succeeds first", async () => {
+    const nonBlockingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+      replyStreamNonBlocking: ReturnType<typeof vi.fn>;
+    };
+    let pendingAck = true;
+    nonBlockingClient.hasPendingReplyAck = vi.fn(() => pendingAck);
+    nonBlockingClient.replyStreamNonBlocking = vi.fn().mockResolvedValue({} as any);
+
+    const handle = createBotWsReplyHandle({
+      client: nonBlockingClient,
+      frame: {
+        headers: { req_id: "req-preview-newer-direct" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "旧版本", isReasoning: false }, { kind: "block" });
+    pendingAck = false;
+    await handle.deliver({ text: "新版本", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+
+    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(1);
+    expect(String(nonBlockingClient.replyStreamNonBlocking.mock.calls[0]?.[2])).toContain("新版本");
+  });
+
+  it("keeps a newer pending preview when an older in-flight preview fails", async () => {
+    const nonBlockingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+      replyStreamNonBlocking: ReturnType<typeof vi.fn>;
+    };
+    let rejectFirst!: (error: unknown) => void;
+    nonBlockingClient.hasPendingReplyAck = vi.fn(() => false);
+    nonBlockingClient.replyStreamNonBlocking = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectFirst = reject;
+          }),
+      )
+      .mockResolvedValue({} as any);
+
+    const handle = createBotWsReplyHandle({
+      client: nonBlockingClient,
+      frame: {
+        headers: { req_id: "req-preview-newer-after-failure" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const firstDelivery = handle.deliver({ text: "旧版本", isReasoning: false }, { kind: "block" });
+    await flushPromises();
+    await handle.deliver({ text: "新版本", isReasoning: false }, { kind: "block" });
+    rejectFirst(new Error("temporary preview failure"));
+    await firstDelivery;
+    await vi.advanceTimersByTimeAsync(100);
+    await flushPromises();
+
+    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(2);
+    expect(String(nonBlockingClient.replyStreamNonBlocking.mock.calls[1]?.[2])).toContain("新版本");
   });
 
   it("pushes one background notice when a pending preview never becomes writable", async () => {
@@ -1683,7 +1753,7 @@ describe("createBotWsReplyHandle", () => {
 
   it("recomputes the continuation when a late preview ACK clears during the final wait", async () => {
     let releasePreview: ((value: unknown) => void) | undefined;
-    let pendingAck = true;
+    let pendingAck = false;
     const pendingClient = mockClient as typeof mockClient & {
       hasPendingReplyAck: ReturnType<typeof vi.fn>;
     };
@@ -1710,6 +1780,7 @@ describe("createBotWsReplyHandle", () => {
       { text: previewText, isReasoning: false },
       { kind: "block" },
     );
+    pendingAck = true;
     await vi.advanceTimersByTimeAsync(8_000);
     await previewDelivery;
 
@@ -1729,6 +1800,66 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).not.toContain(previewText);
     expect(pushed).toContain("唯一后文");
     expect(pushed).toContain("继续输出：");
+  });
+
+  it("records an in-flight pending preview that succeeds after final settlement", async () => {
+    let releasePreview: ((value: unknown) => void) | undefined;
+    let pendingAck = true;
+    const expiredError = {
+      headers: { req_id: "req-pending-flush-final-expired" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const pendingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+      replyStreamNonBlocking: ReturnType<typeof vi.fn>;
+    };
+    pendingClient.hasPendingReplyAck = vi.fn(() => pendingAck);
+    pendingClient.replyStreamNonBlocking = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          releasePreview = resolve;
+        }),
+    );
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+
+    const handle = createBotWsReplyHandle({
+      client: pendingClient,
+      frame: {
+        headers: { req_id: "req-pending-flush-final-expired" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const previewText = "已经确认展示的开头";
+    await handle.deliver({ text: previewText, isReasoning: false }, { kind: "block" });
+    expect(pendingClient.replyStreamNonBlocking).not.toHaveBeenCalled();
+
+    pendingAck = false;
+    await vi.advanceTimersByTimeAsync(100);
+    await flushPromises();
+    expect(pendingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(1);
+
+    const finalDelivery = handle.deliver(
+      { text: `${previewText}\n唯一后文`, isReasoning: false },
+      { kind: "final" },
+    );
+    await flushPromises();
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+
+    releasePreview?.({});
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(100);
+    await finalDelivery;
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toContain("继续输出：");
+    expect(pushed).toContain("唯一后文");
+    expect(pushed).not.toContain(previewText);
   });
 
   it("actively pushes the continuation when a visible short preview update hangs", async () => {
@@ -1787,11 +1918,9 @@ describe("createBotWsReplyHandle", () => {
       hasPendingReplyAck: ReturnType<typeof vi.fn>;
       replyStreamNonBlocking: ReturnType<typeof vi.fn>;
     };
-    nonBlockingClient.replyStreamNonBlocking = vi
-      .fn()
-      .mockResolvedValueOnce({} as any)
-      .mockResolvedValueOnce("skipped");
-    nonBlockingClient.hasPendingReplyAck = vi.fn().mockReturnValue(true);
+    let pendingAck = false;
+    nonBlockingClient.replyStreamNonBlocking = vi.fn().mockResolvedValue({} as any);
+    nonBlockingClient.hasPendingReplyAck = vi.fn(() => pendingAck);
 
     const handle = createBotWsReplyHandle({
       client: nonBlockingClient,
@@ -1805,6 +1934,7 @@ describe("createBotWsReplyHandle", () => {
     });
 
     await handle.deliver({ text: "已经显示的前半段", isReasoning: false }, { kind: "block" });
+    pendingAck = true;
     await vi.advanceTimersByTimeAsync(1_500);
     await handle.deliver(
       { text: "已经显示的前半段\n后续预览", isReasoning: false },
@@ -1817,7 +1947,7 @@ describe("createBotWsReplyHandle", () => {
     await vi.advanceTimersByTimeAsync(5_500);
     await finalDelivery;
 
-    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(2);
+    expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(1);
     expect(mockClient.replyStream).not.toHaveBeenCalled();
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
@@ -2137,7 +2267,7 @@ describe("createBotWsReplyHandle", () => {
   });
 
   it("skips the old final when superseded during an ack wait that clears within the grace window", async () => {
-    let pendingAck = true;
+    let pendingAck = false;
     const nonBlockingClient = mockClient as typeof mockClient & {
       hasPendingReplyAck: ReturnType<typeof vi.fn>;
       replyStreamNonBlocking: ReturnType<typeof vi.fn>;
@@ -2157,6 +2287,7 @@ describe("createBotWsReplyHandle", () => {
     });
 
     await handle.deliver({ text: "旧任务可见内容", isReasoning: false }, { kind: "block" });
+    pendingAck = true;
     const finalDelivery = handle.deliver(
       { text: "旧任务完整结果", isReasoning: false },
       { kind: "final" },
@@ -2644,8 +2775,9 @@ describe("createBotWsReplyHandle", () => {
       hasPendingReplyAck: ReturnType<typeof vi.fn>;
       replyStreamNonBlocking: ReturnType<typeof vi.fn>;
     };
+    let pendingAck = false;
     nonBlockingClient.replyStreamNonBlocking = vi.fn().mockResolvedValue({} as any);
-    nonBlockingClient.hasPendingReplyAck = vi.fn().mockReturnValue(true);
+    nonBlockingClient.hasPendingReplyAck = vi.fn(() => pendingAck);
 
     const handle = createBotWsReplyHandle({
       client: nonBlockingClient,
@@ -2659,6 +2791,7 @@ describe("createBotWsReplyHandle", () => {
     });
 
     await handle.deliver({ text: "旧任务可见内容", isReasoning: false }, { kind: "block" });
+    pendingAck = true;
     const finalDelivery = handle.deliver(
       { text: "旧任务完整结果", isReasoning: false },
       { kind: "final" },

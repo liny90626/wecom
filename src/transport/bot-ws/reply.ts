@@ -1735,15 +1735,23 @@ export function createBotWsReplyHandle(params: {
       return false;
     }
     const previewStreamId = resolveStreamId();
-    if (placeholderInFlight) {
+    const directAttempt = options?.fromPendingSlot !== true;
+    if (
+      directAttempt &&
+      (placeholderInFlight ||
+        previewInFlightCount > 0 ||
+        pendingPreviewFlushInFlight ||
+        hasPendingReplyAck(params.client, params.frame))
+    ) {
       stopPlaceholderKeepalive();
-      if (!options?.fromPendingSlot) {
-        queuePendingPreview(previewText, options);
-      }
+      queuePendingPreview(previewText, options);
       console.info(
         `[wecom-preview] update-delayed-pending account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
       );
       return false;
+    }
+    if (directAttempt && pendingPreview) {
+      clearPendingPreview();
     }
 
     previewInFlightCount += 1;
@@ -1759,7 +1767,7 @@ export function createBotWsReplyHandle(params: {
         console.info(
           `[wecom-preview] update-skipped-pending account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
         );
-        if (!options?.fromPendingSlot) {
+        if (directAttempt && !pendingPreview) {
           queuePendingPreview(previewText, options);
         }
         return false;
@@ -1801,12 +1809,20 @@ export function createBotWsReplyHandle(params: {
       console.warn(
         `[wecom-preview] update-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
       );
+      if (directAttempt && !pendingPreview) {
+        queuePendingPreview(previewText, options);
+      }
       return false;
     } finally {
       previewInFlightCount = Math.max(0, previewInFlightCount - 1);
     }
 
-    if (streamSettled || supersededByNewInbound || streamUpdateUnreliable) {
+    if (supersededByNewInbound) {
+      return false;
+    }
+    if (streamSettled || streamUpdateUnreliable) {
+      visibleReplyStarted = true;
+      recordDeliveredBodySource(options);
       return false;
     }
     recordDeliveredPreview(previewText, now, options);

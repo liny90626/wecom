@@ -319,31 +319,40 @@ export class StreamStore {
     }
   }
 
-  onStreamFinished(streamId: string): void {
+  onStreamFinished(streamId: string): string[] {
+    const ackStreamIds = this.drainAckStreamsForBatch(streamId);
+    for (const ackStreamId of ackStreamIds) {
+      this.updateStream(ackStreamId, (state) => {
+        state.content = "✅ 已合并处理完成，请查看上一条回复。";
+        state.finished = true;
+      });
+    }
+
     const batchKey = this.streamIdToBatchKey.get(streamId);
     const state = batchKey ? this.streams.get(streamId) : undefined;
     const conversationKey = state?.conversationKey;
-    if (!batchKey || !conversationKey) return;
+    if (!batchKey || !conversationKey) return ackStreamIds;
 
     this.unlinkStreamFromBatch(streamId, batchKey);
 
     const conv = this.conversationState.get(conversationKey);
-    if (!conv) return;
-    if (conv.activeBatchKey !== batchKey) return;
+    if (!conv) return ackStreamIds;
+    if (conv.activeBatchKey !== batchKey) return ackStreamIds;
 
     const next = conv.queue.shift();
     if (!next) {
       this.conversationState.delete(conversationKey);
-      return;
+      return ackStreamIds;
     }
     conv.activeBatchKey = next;
     this.conversationState.set(conversationKey, conv);
 
     const pending = this.pendingInbounds.get(next);
-    if (!pending) return;
+    if (!pending) return ackStreamIds;
     if (pending.readyToFlush) {
       this.flushPending(next);
     }
+    return ackStreamIds;
   }
 
   prune(now: number = Date.now()): void {

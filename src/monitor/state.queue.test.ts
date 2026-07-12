@@ -5,6 +5,26 @@ import type { WecomWebhookTarget } from "./types.js";
 import { StreamStore } from "./state.js";
 
 describe("wecom StreamStore queue", () => {
+  test("settles merged acknowledgement streams on every batch terminal path", () => {
+    const store = new StreamStore();
+    const batchStreamId = store.createStream({});
+    const ackStreamId = store.createStream({ msgid: "ACK-1" });
+    store.updateStream(ackStreamId, (state) => {
+      state.started = true;
+      state.content = "已收到，已合并排队处理中...";
+    });
+    store.addAckStreamForBatch({ batchStreamId, ackStreamId });
+
+    expect(store.onStreamFinished(batchStreamId)).toEqual([ackStreamId]);
+    expect(store.getStream(ackStreamId)).toEqual(
+      expect.objectContaining({
+        content: "✅ 已合并处理完成，请查看上一条回复。",
+        finished: true,
+      }),
+    );
+    expect(store.onStreamFinished(batchStreamId)).toEqual([]);
+  });
+
   test("does not merge into active batch; flushes queued batch after active finishes", async () => {
     vi.useFakeTimers();
     try {

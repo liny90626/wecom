@@ -104,17 +104,8 @@ export async function finalizeBotStream(params: {
   }
 
   logInfo(target, `queue: 当前批次结束，尝试推进下一批 streamId=${streamId}`);
-  const ackStreamIds = streamStore.drainAckStreamsForBatch(streamId);
+  const ackStreamIds = streamStore.onStreamFinished(streamId);
   if (ackStreamIds.length > 0) {
-    const mergedDoneHint = "✅ 已合并处理完成，请查看上一条回复。";
-    for (const ackId of ackStreamIds) {
-      streamStore.updateStream(ackId, (s) => {
-        s.content = mergedDoneHint;
-        s.finished = true;
-      });
-    }
     logInfo(target, `queue: 已更新回执流 count=${ackStreamIds.length} batchStreamId=${streamId}`);
   }
-
-  streamStore.onStreamFinished(streamId);
 }

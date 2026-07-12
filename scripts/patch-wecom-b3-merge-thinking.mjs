@@ -36,6 +36,14 @@ function status() {
   const tests = read(FILES.tests);
   const b2 = run(process.execPath, ["scripts/patch-wecom-long-message.mjs", "--check"]);
   const build = run("npm", ["run", "build"]);
+  const focusedTest = run("npx", [
+    "vitest",
+    "run",
+    "src/app/index.test.ts",
+    "src/app/account-runtime.test.ts",
+    "src/runtime/dispatcher.test.ts",
+    "src/transport/bot-ws/reply.test.ts",
+  ]);
 
   const appReady =
     app.includes("previousPeerHandle") &&
@@ -51,7 +59,9 @@ function status() {
     reply.includes("visibleReplyStarted") &&
     reply.includes("suppressSupersededFinalPush") &&
     reply.includes("superseded-final-skip-visible") &&
-    reply.includes("if (isEvent || supersededNoticeSent || visibleReplyStarted || streamSettled) return;") &&
+    reply.includes("placeholderInFlight ||") &&
+    reply.includes("hasPendingReplyAck(params.client, params.frame)") &&
+    reply.includes("supersede-notice-failed") &&
     reply.includes("stream-final-terminal-fallback") &&
     reply.includes("resolveStreamFallbackText(finalText)") &&
     reply.includes("await sendMarkdownChunksViaActivePush(fallbackText, {") &&
@@ -66,8 +76,7 @@ function status() {
     reply.includes("deliverNormalFinalViaStream(finalText, {") &&
     reply.indexOf("supersededByNewInbound") < reply.indexOf("deliverNormalFinalViaStream(finalText, {");
   const testReady =
-    tests.includes("sends a merge notice when superseded") &&
-    tests.includes("later pushes the old final without updating the old stream") &&
+    tests.includes("sends a merge notice when superseded and later pushes the old final without updating the old stream") &&
     tests.includes("matches superseded peer ids case-insensitively") &&
     tests.includes("does not let a superseded old final dedupe the newer same-peer final") &&
     tests.includes("does not overwrite an already visible old stream with a superseded notice") &&
@@ -75,7 +84,8 @@ function status() {
     tests.includes("pushes only the continuation when a frozen preview stream has expired") &&
     tests.includes("does not actively push a superseded old final after visible text was streaming") &&
     tests.includes("skips the old final push when a visible frozen preview is later superseded") &&
-    tests.includes("deduplicates repeated large blocks in long final text") &&
+    tests.includes("keeps repeated large business blocks without an explicit structured restart") &&
+    tests.includes("keeps an identical business paragraph when it belongs to different chapters") &&
     tests.includes("deduplicates repeated structured tails that restart from the same report heading") &&
     tests.includes("reports failure without marking delivery when stream and active push both fail") &&
     tests.includes("expect(onDeliver).toHaveBeenCalledTimes(1)") &&
@@ -102,7 +112,8 @@ function status() {
     runtimeWrapperReady &&
     dispatchTraceReady &&
     b2.ok &&
-    build.ok;
+    build.ok &&
+    focusedTest.ok;
 
   return {
     id: "B3",
@@ -116,10 +127,12 @@ function status() {
     dispatchTraceReady,
     b2Ready: b2.ok,
     buildReady: build.ok,
+    focusedTestReady: focusedTest.ok,
     status: ready ? "READY" : "NOT_READY",
     errors: {
       b2: b2.ok ? undefined : b2.stderr || b2.stdout,
       build: build.ok ? undefined : build.stderr || build.stdout,
+      test: focusedTest.ok ? undefined : focusedTest.stderr || focusedTest.stdout,
     },
   };
 }

@@ -40,6 +40,13 @@ function status() {
   const tests = read(FILES.tests);
   const b1 = run(process.execPath, ["scripts/patch-wecom-markdown-table.mjs", "--check"]);
   const build = syntaxOk();
+  const focusedTest = run("npx", [
+    "vitest",
+    "run",
+    "src/wecom_msg_adapter/markdown_adapter.test.ts",
+    "src/transport/bot-ws/reply.test.ts",
+    "src/outbound.test.ts",
+  ]);
 
   const markdownReady =
     !markdown.includes("tableToPlainText") &&
@@ -87,8 +94,8 @@ function status() {
     reply.includes("withOptionalCompletionMarker") &&
     reply.includes("finalAppendCompletionMarker") &&
     reply.includes("dedupeLongFinalText(finalText, { previewFrozen })") &&
-    reply.includes("function findRepeatedLongBlock(") &&
     reply.includes("function findRepeatedHeadingTail(") &&
+    reply.includes("function findRepeatedStructuredTailDuplicateEnd(") &&
     reply.includes("function collectStructuredDedupeMarkers(") &&
     reply.includes("hasStructuredOverlapBeforeRepeatedTail(prior, tail)") &&
     reply.includes("recentFinalDeliveriesByPeer") &&
@@ -105,7 +112,8 @@ function status() {
     remainderPushReady &&
     !reply.includes("toWeComMarkdownV2(finalText),\n            info.kind === \"final\"");
   const testReady =
-    tests.includes("deduplicates repeated large blocks in long final text") &&
+    tests.includes("keeps repeated large business blocks without an explicit structured restart") &&
+    tests.includes("keeps an identical business paragraph when it belongs to different chapters") &&
     tests.includes("deduplicates repeated structured tails that restart from the same report heading") &&
     tests.includes("does not deduplicate repeated markdown table blocks") &&
     tests.includes("does not show chunk markers in thinking previews before the final text is complete") &&
@@ -114,7 +122,14 @@ function status() {
     outbound.includes("chunkWeComMarkdownV2") &&
     outbound.includes("Sending Bot WS active message chunk") &&
     outbound.includes("setTimeout(resolve, 800)");
-  const ready = markdownReady && replyReady && testReady && outboundReady && b1.ok && build.ok;
+  const ready =
+    markdownReady &&
+    replyReady &&
+    testReady &&
+    outboundReady &&
+    b1.ok &&
+    build.ok &&
+    focusedTest.ok;
 
   return {
     id: "B2",
@@ -126,26 +141,14 @@ function status() {
     outboundReady,
     b1Ready: b1.ok,
     buildReady: build.ok,
+    focusedTestReady: focusedTest.ok,
     status: ready ? "READY" : "NOT_READY",
     errors: {
       b1: b1.ok ? undefined : b1.stderr || b1.stdout,
       build: build.ok ? undefined : build.stderr || build.stdout,
+      test: focusedTest.ok ? undefined : focusedTest.stderr || focusedTest.stdout,
     },
   };
-}
-
-function selfTest() {
-  const sample = `${"段落一。".repeat(1200)}\n\nEND-B2-V2`;
-  const chunks = [];
-  let rest = sample;
-  while (rest.length) {
-    const chunk = rest.slice(0, 3500);
-    chunks.push(chunk);
-    rest = rest.slice(chunk.length);
-  }
-  if (chunks.length < 2) throw new Error("expected multiple chunks");
-  if (!chunks.join("").includes("END-B2-V2")) throw new Error("tail lost");
-  console.log(`self-test: PASS chunks=${chunks.length}`);
 }
 
 const mode = process.argv[2] || "--check";
@@ -154,7 +157,16 @@ if (mode === "--check") {
   console.log(JSON.stringify(current, null, 2));
   if (current.status !== "READY") process.exit(1);
 } else if (mode === "--self-test") {
-  selfTest();
+  const result = run("npx", [
+    "vitest",
+    "run",
+    "src/wecom_msg_adapter/markdown_adapter.test.ts",
+    "src/transport/bot-ws/reply.test.ts",
+    "src/outbound.test.ts",
+  ]);
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  if (!result.ok) process.exit(1);
 } else if (mode === "--dry-run" || mode === "--apply") {
   console.log(JSON.stringify({ status: "NOOP", reason: "B2 is implemented in tracked TypeScript source; run npm run build to emit dist." }, null, 2));
 } else {

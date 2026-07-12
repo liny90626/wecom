@@ -1,6 +1,6 @@
 {
   "name": "@yanhaidao/wecom",
-  "version": "2.5.110-118",
+  "version": "2.5.110-136",
   "description": "OpenClaw 企业微信（WeCom）插件，默认 Bot WebSocket，支持加密媒体解密、Agent 主动发消息与多账号接入",
   "main": "./dist/index.js",
   "files": [
@@ -26,18 +26,18 @@
     "access": "public"
   },
   "dependencies": {
-    "@wecom/aibot-node-sdk": "^1.0.0",
-    "fast-xml-parser": "5.3.4",
-    "undici": "^7.20.0"
+    "@wecom/aibot-node-sdk": "1.0.6",
+    "fast-xml-parser": "5.10.0",
+    "undici": "7.28.0"
   },
   "devDependencies": {
     "@types/node": "^25.2.0",
-    "openclaw": "^2026.3.23-2",
+    "openclaw": "^2026.6.11",
     "typescript": "^5.9.3",
     "vitest": "^2.1.8"
   },
   "peerDependencies": {
-    "openclaw": "^2026.3.23-2"
+    "openclaw": "^2026.6.11"
   },
   "openclaw": {
     "extensions": [

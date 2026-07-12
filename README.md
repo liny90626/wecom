@@ -23,12 +23,15 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
+`v2.5.110-136` 以 `released/2.5.110-118` 为稳定骨架重新开发选定修复，不直接继承 v135 的复杂回复状态机。v135 完整状态保存在 `features/v135-stabilization` 供审计；主线不恢复分钟级 handoff、init-conflict 长重试、per-peer 熔断器或 synthetic thinking。
+
 - B1：修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
 - B2：优化 Bot WebSocket 长文本回复投递。正文过长时会按企业微信限制分段发送，并对流式预览与最终正文之间的重复片段做去重处理，降低长文本重复和截断风险。
 - B3：优化长任务、新消息合并和流式窗口过期场景。旧消息已输出正文时不再被“合并思考”提示覆盖；原流式窗口失效时，会通过主动推送兜底交付最终结果。
 - Reasoning 预览实验：默认接入 OpenClaw reasoning stream，在 Bot WS 进度流中尝试使用企业微信客户端可识别的 `<think>...</think>` 结构展示思考块；最终正文仍保持普通正文路径，避免思考内容污染最终答复。
 - 重复正文防护：补充短文本、中等文本和长文本场景的 final/preview 去重逻辑，减少带思考块回复结束时再次输出正文的情况。
 - 自检与回归：增加并维护 B1/B2/B3、reasoning preview、长任务兜底、分段发送和去重相关测试，方便本 fork 后续迭代时快速发现回归。
+- v136 精简重做：对齐 OpenClaw 6.11 / 企微 SDK 1.0.6，修复 metadata 竞争、Fast auto-off 无正文、fallback 候选污染、ACK/late-final 截断和 Agent 重复发送；同时恢复短时间附件+文字保序合并。
 
 实验性能力仍受 OpenClaw 版本、模型服务是否透传 reasoning 内容、企业微信客户端渲染策略等外部因素影响。除上述修复外，本 fork 尽量保持原项目结构、配置方式和运行时行为不变。
 
@@ -195,6 +198,12 @@ npx vitest run
 
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 v2.5.110-136（2026-07-12，LinKy fork 重做版）
+- **[稳定主线重建] 基于 v118 重做而非继续叠加 v135**：保留 v118 轻量投递骨架，只重新实现有复现证据的 OpenClaw 6.11、ACK、late-final、Fast/no-output 和 fallback 修复；v135 完整状态留在 `features/v135-stabilization`。
+- **[回复完整性] 不再截掉重复标题后的唯一后文**：结构化去重只删除连续同序的精确重复行；pending preview、空 final、中断提示和 late final 均按确认送达状态处理。
+- **[速度与并发] 单次 dispatch、短 quiet grace**：prepare 前即可被新消息抢占，不引入本地 OpenClaw retry、熔断器或分钟级等待；final 兜底重试保持后台 detached。
+- **[Fast 与附件] 进度保留、异常不静默**：auto-off 后没有正文会显示中断；auto-on 可正常无正文结束；短时附件+文字保序合并，失败附件进入上下文。完整说明见 [`changelog/v2.5.110-136.md`](./changelog/v2.5.110-136.md)。
+
 #### 📌 v2.5.110-118（2026-07-03，LinKy fork 维护版）
 - **[长任务体验] 预览通道过期不再彻底静默** 🛡️ 冻结计时刷新改为冻结即启动（自愈），stream 窗口过期（846608）后主动推送一次性提示"任务仍在后台处理，完成后将以新消息发送"，并为状态刷新加 60 分钟硬上限。
 - **[投递可靠性] final 兜底失败自动重试** 🔁 主动推送兜底失败后按 20s/40s/80s 有限重试 3 次，不再一次失败即静默丢失最终答复；`fail()` 遇终态错误也会推送一次性"投递中断"提示。
@@ -211,11 +220,6 @@ npx vitest run
 #### 📌 v2.5.110-115（2026-06-27，LinKy fork 维护版）
 - **[Manifest 修复] 声明运行时注册工具 contracts.tools** 🧩 `openclaw.plugin.json` 顶层补充 `contracts.tools`，覆盖 `wecom_doc`、`wecom_calendar`、`wecom_mcp`，适配新版 OpenClaw 插件诊断规范。
 - **[诊断清理] 消除 registerTool 未声明告警** 🧪 新增 manifest 回归测试，避免后续打包时运行时工具注册和 manifest 声明再次脱节。完整说明见 [`changelog/v2.5.110-115.md`](./changelog/v2.5.110-115.md)。
-
-#### 📌 v2.5.110-114（2026-06-27，LinKy fork 维护版）
-- **[长文本分段] 预览阶段不再显示伪分段标签** 📚 block/preview 只展示当前可见预览，不再出现 `【第1/n段】` 但后续段迟迟不来的体验错位；真正分段只在 final 正文完整到达后触发。
-- **[思考块兼容] thinking 不再挤占正文字符预算** 💭 思考块只按字节给 WeCom stream 留安全余量，正文预览保留正常字符长度，避免思考块较长时正文首段过短。
-- **[段标优化] 长文本段标改为 `【第x/n段】`** 🧾 移除“消息过长，分段发送”长提示；长文本最后一段会在段标后追加完成标识。完整说明见 [`changelog/v2.5.110-114.md`](./changelog/v2.5.110-114.md)。
 
 > B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)，reasoning 思考块系列修复见 [`changelog/v2.5.110-113.md`](./changelog/v2.5.110-113.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
 

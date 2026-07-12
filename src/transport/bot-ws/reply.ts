@@ -1491,6 +1491,7 @@ export function createBotWsReplyHandle(params: {
         peerDedup: options.peerDedup,
         appendCompletionMarker: options.appendCompletionMarker,
         alreadyMarkedDelivered: true,
+        preserveDeliveryClaim: true,
         maxChars: WECOM_STREAM_FINAL_MAX_CHARS,
         maxBytes: WECOM_STREAM_MAX_BYTES,
       };
@@ -2259,6 +2260,9 @@ export function createBotWsReplyHandle(params: {
       let currentFinalDeliveryKey = "";
       const currentFinalUsesPeerDedup = info.kind === "final" && !supersededByNewInbound;
       if (info.kind === "final" && mediaUrls.length > 0) {
+        const cfg = getWecomRuntime().config.loadConfig();
+        const mediaLocalRoots = resolveWecomMergedMediaLocalRoots({ cfg });
+        const mediaMaxBytes = resolveWecomMediaMaxBytes(cfg, params.accountId);
         currentFinalDeliveryKey = buildFinalDeliveryKey({
           accountId: params.accountId,
           peerKind,
@@ -2274,11 +2278,6 @@ export function createBotWsReplyHandle(params: {
         ) {
           return;
         }
-      }
-      if (info.kind === "final" && mediaUrls.length > 0) {
-        const cfg = getWecomRuntime().config.loadConfig();
-        const mediaLocalRoots = resolveWecomMergedMediaLocalRoots({ cfg });
-        const mediaMaxBytes = resolveWecomMediaMaxBytes(cfg, params.accountId);
         const mediaFailures: string[] = [];
         const mediaNotes: string[] = [];
         let mediaSent = 0;

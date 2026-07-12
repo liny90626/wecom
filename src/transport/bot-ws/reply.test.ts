@@ -1671,6 +1671,72 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves the final claim when a visible long first chunk outlives remainder retries", async () => {
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({
+      config: {
+        loadConfig: () => ({}),
+      },
+    } as any);
+    mockClient.sendMessage.mockRejectedValue(new Error("remainder rejected before delivery"));
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-long-media-retry-exhausted" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const payload = {
+      text: `${"长任务正文。".repeat(1_600)}LONG-MEDIA-TAIL`,
+      mediaUrls: ["/tmp/report.pdf"],
+      isReasoning: false,
+    };
+
+    const firstDelivery = handle.deliver(payload, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(800);
+    await firstDelivery;
+    await vi.advanceTimersByTimeAsync(140_000);
+    await flushPromises();
+    await handle.deliver(payload, { kind: "final" });
+
+    expect(uploadAndSendBotWsMediaMock).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not claim a media final before configuration is resolved", async () => {
+    const runtime = await import("../../runtime.js");
+    const configError = new Error("config unavailable");
+    const loadConfig = vi.fn().mockImplementationOnce(() => {
+      throw configError;
+    }).mockReturnValue({});
+    runtime.setWecomRuntime({ config: { loadConfig } } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-config-recovery" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const payload = {
+      text: "附件说明",
+      mediaUrls: ["/tmp/report.pdf"],
+      isReasoning: false,
+    };
+
+    await expect(handle.deliver(payload, { kind: "final" })).rejects.toBe(configError);
+    await expect(handle.deliver(payload, { kind: "final" })).resolves.toBeUndefined();
+
+    expect(uploadAndSendBotWsMediaMock).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+  });
+
   it("passes configured mediaMaxMb to final media sends", async () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
@@ -2806,7 +2872,7 @@ describe("createBotWsReplyHandle", () => {
     const oldHandle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
-        headers: {},
+        headers: { req_id: "req-old-remainder-before-new-activation" },
         body: { from: { userid: "alice" }, chattype: "single" },
       } as unknown as ReplyHandleParams["frame"],
       accountId: "default",
@@ -2826,7 +2892,7 @@ describe("createBotWsReplyHandle", () => {
     const newHandle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
-        headers: {},
+        headers: { req_id: "req-new-remainder-activation" },
         body: { from: { userid: "alice" }, chattype: "single" },
       } as unknown as ReplyHandleParams["frame"],
       accountId: "default",

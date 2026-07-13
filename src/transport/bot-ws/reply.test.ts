@@ -3235,9 +3235,11 @@ describe("createBotWsReplyHandle", () => {
   });
 
   it("shows a friendly notice without session internals when initialization still conflicts", async () => {
-    const conflict = new Error(
-      "reply session initialization conflicted for agent:main:wecom:direct:linky",
-    );
+    const conflict = new Error("OpenClaw dispatch failed", {
+      cause: new Error(
+        "reply session initialization conflicted for agent:main:wecom:direct:linky",
+      ),
+    });
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -3260,6 +3262,41 @@ describe("createBotWsReplyHandle", () => {
     const delivered = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
     expect(delivered).not.toContain("WeCom WS reply failed");
     expect(delivered).not.toContain("agent:main:wecom");
+  });
+
+  it("actively pushes the friendly conflict notice after the stream channel expires", async () => {
+    const expiredError = {
+      headers: { req_id: "req-init-conflict-expired" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-init-conflict-expired" },
+        body: { from: { userid: "linky" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "预览内容。".repeat(620) }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+    await handle.fail(
+      new Error(
+        "reply session initialization conflicted for agent:main:wecom:direct:linky",
+      ),
+    );
+
+    const pushed = mockClient.sendMessage.mock.calls.map((call) =>
+      String((call[1] as any).markdown.content),
+    );
+    expect(pushed).toContain("之前任务还在处理中，新指令冲突啦，请等几分钟后再试试");
+    expect(pushed.join("\n")).not.toContain("agent:main:wecom");
   });
 
   it("pushes a one-time failure notice when the reply channel died terminally", async () => {

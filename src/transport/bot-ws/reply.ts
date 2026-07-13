@@ -10,6 +10,7 @@ import {
 import { formatErrorMessage } from "openclaw/plugin-sdk/infra-runtime";
 import { resolveWecomMediaMaxBytes, resolveWecomMergedMediaLocalRoots } from "../../config/index.js";
 import { getBotWsPushHandle, getWecomRuntime } from "../../runtime.js";
+import { isReplySessionInitializationConflict } from "../../shared/reply-errors.js";
 import type { ReplyHandle, ReplyPayload } from "../../types/index.js";
 import {
   chunkWeComMarkdownV2,
@@ -99,10 +100,6 @@ function isReplyNoVisibleOutputError(error: unknown, formattedMessage: string): 
     name === "WeComReplyNoVisibleOutputError" ||
     formattedMessage.includes("WeCom Bot WS reply produced no visible output")
   );
-}
-
-function isReplySessionInitializationConflict(formattedMessage: string): boolean {
-  return /reply session initialization conflicted for \S+/iu.test(formattedMessage);
 }
 
 const recentFinalDeliveriesByPeer = new Map<string, number>();
@@ -2498,7 +2495,7 @@ export function createBotWsReplyHandle(params: {
       }
       const message = formatErrorMessage(error);
       const noVisibleOutput = isReplyNoVisibleOutputError(error, message);
-      const initConflict = isReplySessionInitializationConflict(message);
+      const initConflict = isReplySessionInitializationConflict(error);
       const failNoticeText = initConflict
         ? REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT
         : noVisibleOutput && lastPreviewText

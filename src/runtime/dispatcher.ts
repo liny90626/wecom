@@ -7,6 +7,7 @@ import type { WecomAuditLog } from "../observability/audit-log.js";
 import { buildRawEnvelopeSummary } from "../observability/raw-envelope-log.js";
 import type { ReplyHandle, UnifiedInboundEvent } from "../types/index.js";
 import type { WecomMediaService } from "../shared/media-service.js";
+import { isReplySessionInitializationConflict } from "../shared/reply-errors.js";
 import { registerActiveBotWsReplyHandle, unregisterActiveBotWsReplyHandle } from "../runtime.js";
 
 const PREPARE_INBOUND_SESSION_TIMEOUT_MS = 60_000;
@@ -52,26 +53,6 @@ function waitForRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
     timeout.unref?.();
     signal.addEventListener("abort", handleAbort, { once: true });
   });
-}
-
-function isReplySessionInitializationConflict(error: unknown): boolean {
-  let current = error;
-  for (let depth = 0; depth < 4 && current != null; depth += 1) {
-    const message =
-      current instanceof Error
-        ? current.message
-        : typeof current === "string"
-          ? current
-          : "";
-    if (/reply session initialization conflicted for \S+/iu.test(message)) {
-      return true;
-    }
-    current =
-      typeof current === "object" && "cause" in current
-        ? (current as { cause?: unknown }).cause
-        : undefined;
-  }
-  return false;
 }
 
 async function dispatchRuntimeReplyWithHandoffRetry(params: {

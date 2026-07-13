@@ -364,10 +364,11 @@ describe("dispatchInboundEvent", () => {
       const conflict = new Error(
         "reply session initialization conflicted for agent:ops_bot:wecom:acct:dm:alice",
       );
+      const wrappedConflict = new Error("OpenClaw dispatch failed", { cause: conflict });
       const dispatchReplyWithBufferedBlockDispatcher = vi
         .fn()
         .mockImplementationOnce(() => firstCore)
-        .mockRejectedValueOnce(conflict)
+        .mockRejectedValueOnce(wrappedConflict)
         .mockImplementationOnce(async (params) => {
           await params.dispatcherOptions.deliver({ text: "new task completed" }, { kind: "final" });
           return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };

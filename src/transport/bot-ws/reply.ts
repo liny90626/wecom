@@ -42,6 +42,8 @@ const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
 const PREVIEW_EXPIRED_NOTICE_TEXT =
   "⏳ 进度预览暂时无法继续刷新，任务仍在后台处理，完成后将以新消息发送。";
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
+const REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT =
+  "之前任务还在处理中，新指令冲突啦，请等几分钟后再试试";
 const FINAL_PUSH_RETRY_BASE_MS = 20_000;
 const FINAL_PUSH_MAX_RETRIES = 3;
 const THINK_TAG_RE = /<\/?think>/gi;
@@ -97,6 +99,10 @@ function isReplyNoVisibleOutputError(error: unknown, formattedMessage: string): 
     name === "WeComReplyNoVisibleOutputError" ||
     formattedMessage.includes("WeCom Bot WS reply produced no visible output")
   );
+}
+
+function isReplySessionInitializationConflict(formattedMessage: string): boolean {
+  return /reply session initialization conflicted for \S+/iu.test(formattedMessage);
 }
 
 const recentFinalDeliveriesByPeer = new Map<string, number>();
@@ -2492,11 +2498,13 @@ export function createBotWsReplyHandle(params: {
       }
       const message = formatErrorMessage(error);
       const noVisibleOutput = isReplyNoVisibleOutputError(error, message);
-      const failNoticeText =
-        noVisibleOutput && lastPreviewText
+      const initConflict = isReplySessionInitializationConflict(message);
+      const failNoticeText = initConflict
+        ? REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT
+        : noVisibleOutput && lastPreviewText
           ? appendFailureNoticeToProgress(lastPreviewText, REPLY_FAIL_NOTICE_TEXT)
           : REPLY_FAIL_NOTICE_TEXT;
-      const text = noVisibleOutput
+      const text = initConflict || noVisibleOutput
         ? failNoticeText
         : `WeCom WS reply failed: ${message}`;
       const sendFailNoticeOnce = async (): Promise<void> => {

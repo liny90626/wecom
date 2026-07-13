@@ -3234,6 +3234,34 @@ describe("createBotWsReplyHandle", () => {
     expect(onFail).toHaveBeenCalledWith(abortError);
   });
 
+  it("shows a friendly notice without session internals when initialization still conflicts", async () => {
+    const conflict = new Error(
+      "reply session initialization conflicted for agent:main:wecom:direct:linky",
+    );
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-init-conflict" },
+        body: { from: { userid: "linky" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.fail(conflict);
+
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      "之前任务还在处理中，新指令冲突啦，请等几分钟后再试试",
+      true,
+    );
+    const delivered = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
+    expect(delivered).not.toContain("WeCom WS reply failed");
+    expect(delivered).not.toContain("agent:main:wecom");
+  });
+
   it("pushes a one-time failure notice when the reply channel died terminally", async () => {
     const onFail = vi.fn();
     const handle = createBotWsReplyHandle({

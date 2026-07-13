@@ -23,7 +23,7 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-`v2.5.110-136` 以 `released/2.5.110-118` 为稳定骨架重新开发选定修复，不直接继承 v135 的复杂回复状态机。未采用的 v119-v135 与中间开发分支已清理；主线不恢复分钟级 handoff、init-conflict 长重试、per-peer 熔断器或 synthetic thinking。当前发布标签为 `released/2.5.110-136`。
+`v2.5.110-137` 延续 v136 基于 `released/2.5.110-118` 重建的稳定骨架，针对新消息接管长任务时的 OpenClaw session 初始化冲突增加一次精确、可取消的短重试，并隐藏用户侧内部 session 标识。主线仍不恢复分钟级 handoff、重试阶梯、per-peer 熔断器或 synthetic thinking。当前发布标签为 `released/2.5.110-137`。
 
 - B1：修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
 - B2：优化 Bot WebSocket 长文本回复投递。正文过长时会按企业微信限制分段发送，并对流式预览与最终正文之间的重复片段做去重处理，降低长文本重复和截断风险。
@@ -198,6 +198,11 @@ npx vitest run
 
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 v2.5.110-137（2026-07-13，LinKy fork 维护版）
+- **[长任务接管] 修复 OpenClaw session 初始化冲突**：新消息接管同一 Bot WS 会话的旧长任务后，仅在 OpenClaw 明确返回初始化冲突时等待 500ms 并重试一次；正常接管不再固定等待，第三条消息可取消尚未发生的重试。
+- **[错误脱敏] 冲突提示改为用户可理解的文案**：持续冲突不再显示 `WeCom WS reply failed`、agent 名称或 session key；原气泡和流窗口失效后的主动推送统一提示“之前任务还在处理中，新指令冲突啦，请等几分钟后再试试”。
+- **[范围控制] 不重复执行工具、不扩大重试面**：该冲突发生在 agent run 初始化之前；非 Bot WS、没有接管旧回复、非精确冲突均保持原行为。完整说明见 [`changelog/v2.5.110-137.md`](./changelog/v2.5.110-137.md)。
+
 #### 📌 v2.5.110-136（2026-07-12，LinKy fork 重做版）
 - **[稳定主线重建] 基于 v118 重做而非继续叠加 v135**：保留 v118 轻量投递骨架，只重新实现有复现证据的 OpenClaw 6.11、ACK、late-final、Fast/no-output 和 Agent exactly-once 修复；未采用的 v119-v135 开发线不进入主线。
 - **[回复完整性] 不再截掉重复标题后的唯一后文**：仅在结构化标题重新开始时删除其连续同序的精确重复尾段；pending preview、thinking 预算、长 final 尾段续传、空 final、中断提示和 late final 均按确认送达状态处理。
@@ -216,10 +221,6 @@ npx vitest run
 #### 📌 v2.5.110-116（2026-06-28，LinKy fork 维护版）
 - **[Bot WS 可靠性] 出站 stream 更新增加本地超时兜底** 🛡️ 当企业微信 SDK 的 `replyStream` 偶发长期 pending 时，插件不再一直卡住后续 final，而是标记当前 stream 不可靠并在 final 阶段主动续发剩余正文。
 - **[完成标识] `（已完成）` 调整为 `（回复完毕）`** 🧾 降低“任务已完成”和“本次回复输出结束”的语义混淆。完整说明见 [`changelog/v2.5.110-116.md`](./changelog/v2.5.110-116.md)。
-
-#### 📌 v2.5.110-115（2026-06-27，LinKy fork 维护版）
-- **[Manifest 修复] 声明运行时注册工具 contracts.tools** 🧩 `openclaw.plugin.json` 顶层补充 `contracts.tools`，覆盖 `wecom_doc`、`wecom_calendar`、`wecom_mcp`，适配新版 OpenClaw 插件诊断规范。
-- **[诊断清理] 消除 registerTool 未声明告警** 🧪 新增 manifest 回归测试，避免后续打包时运行时工具注册和 manifest 声明再次脱节。完整说明见 [`changelog/v2.5.110-115.md`](./changelog/v2.5.110-115.md)。
 
 > B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)，reasoning 思考块系列修复见 [`changelog/v2.5.110-113.md`](./changelog/v2.5.110-113.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
 

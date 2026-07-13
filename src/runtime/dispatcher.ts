@@ -10,7 +10,7 @@ import type { WecomMediaService } from "../shared/media-service.js";
 import { registerActiveBotWsReplyHandle, unregisterActiveBotWsReplyHandle } from "../runtime.js";
 
 const PREPARE_INBOUND_SESSION_TIMEOUT_MS = 60_000;
-const SUPERSEDED_CORE_QUIET_GRACE_MS = 250;
+const SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS = 500;
 
 function createPrepareTimeoutError(timeoutMs: number): Error {
   const error = new Error(`WeCom inbound session prepare timed out after ${timeoutMs}ms`);
@@ -34,12 +34,7 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
   return Promise.race([promise, abortPromise]).finally(cleanup);
 }
 
-function waitForSupersededCoreQuietGrace(
-  supersededAt: number,
-  signal: AbortSignal,
-): Promise<void> {
-  const remainingMs = supersededAt + SUPERSEDED_CORE_QUIET_GRACE_MS - Date.now();
-  if (remainingMs <= 0) return Promise.resolve();
+function waitForRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(signal.reason ?? new Error("WeCom Bot WS reply aborted."));
@@ -53,10 +48,64 @@ function waitForSupersededCoreQuietGrace(
     timeout = setTimeout(() => {
       signal.removeEventListener("abort", handleAbort);
       resolve();
-    }, remainingMs);
+    }, ms);
     timeout.unref?.();
     signal.addEventListener("abort", handleAbort, { once: true });
   });
+}
+
+function isReplySessionInitializationConflict(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 4 && current != null; depth += 1) {
+    const message =
+      current instanceof Error
+        ? current.message
+        : typeof current === "string"
+          ? current
+          : "";
+    if (/reply session initialization conflicted for \S+/iu.test(message)) {
+      return true;
+    }
+    current =
+      typeof current === "object" && "cause" in current
+        ? (current as { cause?: unknown }).cause
+        : undefined;
+  }
+  return false;
+}
+
+async function dispatchRuntimeReplyWithHandoffRetry(params: {
+  core: PluginRuntime;
+  cfg: OpenClawConfig;
+  session: Awaited<ReturnType<typeof prepareInboundSession>>;
+  replyHandle: ReplyHandle;
+  abortSignal: AbortSignal;
+  retryInitConflict: boolean;
+}): Promise<void> {
+  const { retryInitConflict, replyHandle, ...dispatchParams } = params;
+  const firstAttemptHandle: ReplyHandle = retryInitConflict
+    ? {
+        ...replyHandle,
+        fail: async (error) => {
+          if (isReplySessionInitializationConflict(error)) return;
+          await replyHandle.fail?.(error);
+        },
+      }
+    : replyHandle;
+  try {
+    await dispatchRuntimeReply({ ...dispatchParams, replyHandle: firstAttemptHandle });
+    return;
+  } catch (error) {
+    if (!retryInitConflict || !isReplySessionInitializationConflict(error)) {
+      throw error;
+    }
+    console.warn(
+      `[wecom-b3] dispatch-init-conflict-handoff-retry delayMs=${SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS} sessionKey=${params.session.ctx.SessionKey ?? params.session.route.sessionKey}`,
+    );
+  }
+  // OpenClaw raises this conflict before starting the agent run, so retrying cannot repeat tools.
+  await waitForRetryDelay(SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS, params.abortSignal);
+  await dispatchRuntimeReply({ ...dispatchParams, replyHandle });
 }
 
 async function prepareInboundSessionWithTimeout(
@@ -131,7 +180,7 @@ export async function dispatchInboundEvent(params: {
   const isBotWsReplySession =
     event.transport === "bot-ws" && replyHandle.context.transport === "bot-ws";
   let sessionKey: string | undefined;
-  let supersededPreviousAt: number | undefined;
+  let supersededPreviousSamePeer = false;
   let coreDispatchStarted = false;
 
   if (isBotWsReplySession) {
@@ -146,7 +195,7 @@ export async function dispatchInboundEvent(params: {
         handle: activeReplyHandle,
       })
     ) {
-      supersededPreviousAt = Date.now();
+      supersededPreviousSamePeer = true;
     }
   }
 
@@ -159,13 +208,6 @@ export async function dispatchInboundEvent(params: {
       abortController,
     });
     sessionKey = session.ctx.SessionKey ?? session.route.sessionKey;
-    if (abortController.signal.aborted) return;
-    if (supersededPreviousAt !== undefined) {
-      await waitForSupersededCoreQuietGrace(
-        supersededPreviousAt,
-        abortController.signal,
-      );
-    }
     if (abortController.signal.aborted) return;
 
     if (isBotWsReplySession) {
@@ -181,12 +223,13 @@ export async function dispatchInboundEvent(params: {
       `[wecom-b3] dispatch-core-start account=${event.accountId} messageId=${event.messageId} sessionKey=${sessionKey} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
     );
     coreDispatchStarted = true;
-    const dispatchPromise = dispatchRuntimeReply({
+    const dispatchPromise = dispatchRuntimeReplyWithHandoffRetry({
       core,
       cfg,
       session,
       replyHandle: activeReplyHandle,
       abortSignal: abortController.signal,
+      retryInitConflict: isBotWsReplySession && supersededPreviousSamePeer,
     });
     if (isBotWsReplySession) {
       await awaitWithAbort(dispatchPromise, abortController.signal);

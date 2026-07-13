@@ -292,7 +292,7 @@ describe("dispatchInboundEvent", () => {
     }
   });
 
-  it("waits at most 250ms when the superseded core ignores abort", async () => {
+  it("does not delay a newer dispatch when OpenClaw accepts the handoff", async () => {
     vi.useFakeTimers();
     try {
       let releaseFirstCore!: () => void;
@@ -341,15 +341,233 @@ describe("dispatchInboundEvent", () => {
       });
       await first;
 
-      await vi.advanceTimersByTimeAsync(249);
-      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(1);
       await second;
       expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
 
       releaseFirstCore();
       await Promise.resolve();
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers a transient init conflict while a superseded long task settles", async () => {
+    vi.useFakeTimers();
+    let releaseFirstCore: (() => void) | undefined;
+    try {
+      const firstCore = new Promise<{ queuedFinal: true; counts: { block: 0; final: 1; tool: 0 } }>(
+        (resolve) => {
+          releaseFirstCore = () =>
+            resolve({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+        },
+      );
+      const conflict = new Error(
+        "reply session initialization conflicted for agent:ops_bot:wecom:acct:dm:alice",
+      );
+      const dispatchReplyWithBufferedBlockDispatcher = vi
+        .fn()
+        .mockImplementationOnce(() => firstCore)
+        .mockRejectedValueOnce(conflict)
+        .mockImplementationOnce(async (params) => {
+          await params.dispatcherOptions.deliver({ text: "new task completed" }, { kind: "final" });
+          return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+        });
+      const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+      const store = makeStore();
+      const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+      const mediaService = {
+        normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+        saveInboundAttachment: vi.fn(),
+      };
+      const first = dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: mediaService as any,
+        event: makeEvent("msg-conflict-a", "long task"),
+        replyHandle: makeReplyHandle(),
+      });
+      await vi.waitFor(() =>
+        expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1),
+      );
+
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const fail = vi.fn().mockResolvedValue(undefined);
+      const second = dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: mediaService as any,
+        event: makeEvent("msg-conflict-b", "new message"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver, fail }),
+      });
+      const secondOutcome = second.then(
+        () => ({ ok: true as const }),
+        (error) => ({ ok: false as const, error }),
+      );
+      await first;
+      setTimeout(() => releaseFirstCore?.(), 400);
+
+      await vi.advanceTimersByTimeAsync(499);
+      expect(fail).not.toHaveBeenCalled();
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(secondOutcome).resolves.toEqual({ ok: true });
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(3);
+      expect(deliver).toHaveBeenCalledWith(
+        { text: "new task completed" },
+        { kind: "final" },
+      );
+    } finally {
+      releaseFirstCore?.();
+      await Promise.resolve();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a persistent handoff conflict once and reports it once", async () => {
+    vi.useFakeTimers();
+    let releaseFirstCore: (() => void) | undefined;
+    try {
+      const firstCore = new Promise<{ queuedFinal: true; counts: { block: 0; final: 1; tool: 0 } }>(
+        (resolve) => {
+          releaseFirstCore = () =>
+            resolve({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+        },
+      );
+      const conflict = new Error(
+        "reply session initialization conflicted for agent:ops_bot:wecom:acct:dm:alice",
+      );
+      const dispatchReplyWithBufferedBlockDispatcher = vi
+        .fn()
+        .mockImplementationOnce(() => firstCore)
+        .mockRejectedValueOnce(conflict)
+        .mockRejectedValueOnce(conflict);
+      const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+      const store = makeStore();
+      const common = {
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+      };
+      const first = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-persistent-a", "long task"),
+        replyHandle: makeReplyHandle(),
+      });
+      await vi.waitFor(() =>
+        expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1),
+      );
+
+      const fail = vi.fn().mockResolvedValue(undefined);
+      const second = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-persistent-b", "new message"),
+        replyHandle: makeReplyHandle(vi.fn(), { fail }),
+      });
+      const secondOutcome = second.then(
+        () => ({ ok: true as const }),
+        (error) => ({ ok: false as const, error }),
+      );
+      await first;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+      expect(fail).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(secondOutcome).resolves.toEqual({ ok: false, error: conflict });
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(3);
+      expect(fail).toHaveBeenCalledOnce();
+      expect(fail).toHaveBeenCalledWith(conflict);
+    } finally {
+      releaseFirstCore?.();
+      await Promise.resolve();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending conflict retry when an even newer message takes over", async () => {
+    vi.useFakeTimers();
+    let releaseFirstCore: (() => void) | undefined;
+    try {
+      const firstCore = new Promise<{ queuedFinal: true; counts: { block: 0; final: 1; tool: 0 } }>(
+        (resolve) => {
+          releaseFirstCore = () =>
+            resolve({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+        },
+      );
+      const conflict = new Error(
+        "reply session initialization conflicted for agent:ops_bot:wecom:acct:dm:alice",
+      );
+      const dispatchReplyWithBufferedBlockDispatcher = vi
+        .fn()
+        .mockImplementationOnce(() => firstCore)
+        .mockRejectedValueOnce(conflict)
+        .mockImplementationOnce(async (params) => {
+          await params.dispatcherOptions.deliver({ text: "latest task completed" }, { kind: "final" });
+          return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+        });
+      const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+      const store = makeStore();
+      const common = {
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+      };
+      const first = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-burst-a", "long task"),
+        replyHandle: makeReplyHandle(),
+      });
+      await vi.waitFor(() =>
+        expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1),
+      );
+
+      const secondDeliver = vi.fn().mockResolvedValue(undefined);
+      const secondFail = vi.fn().mockResolvedValue(undefined);
+      const second = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-burst-b", "first follow-up"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver: secondDeliver, fail: secondFail }),
+      });
+      await first;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+
+      const latestDeliver = vi.fn().mockResolvedValue(undefined);
+      const latestFail = vi.fn().mockResolvedValue(undefined);
+      const latest = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-burst-c", "latest follow-up"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver: latestDeliver, fail: latestFail }),
+      });
+
+      await Promise.all([second, latest]);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(3);
+      expect(secondDeliver).not.toHaveBeenCalled();
+      expect(secondFail).not.toHaveBeenCalled();
+      expect(latestFail).not.toHaveBeenCalled();
+      expect(latestDeliver).toHaveBeenCalledWith(
+        { text: "latest task completed" },
+        { kind: "final" },
+      );
+    } finally {
+      releaseFirstCore?.();
+      await Promise.resolve();
       vi.useRealTimers();
     }
   });

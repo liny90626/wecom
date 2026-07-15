@@ -1,4 +1,8 @@
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
+import {
+  abortAndDrainAgentHarnessRun,
+  resolveActiveEmbeddedRunSessionId,
+} from "openclaw/plugin-sdk/agent-harness";
 
 import { prepareInboundSession } from "./session-manager.js";
 import { dispatchRuntimeReply } from "./reply-orchestrator.js";
@@ -8,10 +12,16 @@ import { buildRawEnvelopeSummary } from "../observability/raw-envelope-log.js";
 import type { ReplyHandle, UnifiedInboundEvent } from "../types/index.js";
 import type { WecomMediaService } from "../shared/media-service.js";
 import { isReplySessionInitializationConflict } from "../shared/reply-errors.js";
-import { registerActiveBotWsReplyHandle, unregisterActiveBotWsReplyHandle } from "../runtime.js";
+import {
+  getActiveBotWsReplyHandle,
+  registerActiveBotWsReplyHandle,
+  unregisterActiveBotWsReplyHandle,
+} from "../runtime.js";
 
 const PREPARE_INBOUND_SESSION_TIMEOUT_MS = 60_000;
 const SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS = 500;
+const SUPERSEDED_RUN_DRAIN_TIMEOUT_MS = 5_000;
+const SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS = 5_000;
 
 function createPrepareTimeoutError(timeoutMs: number): Error {
   const error = new Error(`WeCom inbound session prepare timed out after ${timeoutMs}ms`);
@@ -55,6 +65,69 @@ function waitForRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+function awaitSupersedeDrain(promise: Promise<void>, signal: AbortSignal): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<void>((resolve) => {
+    timeout = setTimeout(() => {
+      console.warn(
+        `[wecom-b3] superseded-run-drain-wait-timeout timeoutMs=${SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS}`,
+      );
+      resolve();
+    }, SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS);
+    timeout.unref?.();
+  });
+  return awaitWithAbort(Promise.race([promise, timeoutPromise]), signal).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+
+async function drainSupersededOpenClawRun(params: {
+  sessionKey?: string;
+  sessionId?: string;
+}): Promise<void> {
+  const sessionKey = params.sessionKey?.trim();
+  let sessionId: string | undefined;
+  try {
+    sessionId =
+      (sessionKey ? resolveActiveEmbeddedRunSessionId(sessionKey) : undefined) ??
+      params.sessionId?.trim();
+  } catch (error) {
+    console.warn(
+      `[wecom-b3] superseded-run-lookup-failed sessionKey=${sessionKey ?? "n/a"} error=${String(error)}`,
+    );
+    return;
+  }
+  if (!sessionId) {
+    return;
+  }
+  try {
+    const result = await abortAndDrainAgentHarnessRun({
+      sessionId,
+      ...(sessionKey ? { sessionKey } : {}),
+      settleMs: SUPERSEDED_RUN_DRAIN_TIMEOUT_MS,
+      reason: "wecom-new-inbound",
+    });
+    console.info(
+      `[wecom-b3] superseded-run-drain sessionId=${sessionId} sessionKey=${sessionKey ?? "n/a"} drained=${String(result.drained)} forceCleared=${String(result.forceCleared)}`,
+    );
+  } catch (error) {
+    // The existing bounded init-conflict retry remains the fallback when the
+    // optional OpenClaw drain surface is unavailable or rejects.
+    console.warn(
+      `[wecom-b3] superseded-run-drain-failed sessionId=${sessionId} sessionKey=${sessionKey ?? "n/a"} error=${String(error)}`,
+    );
+  }
+}
+
+function resolvePreparedSessionId(ctx: unknown): string | undefined {
+  if (!ctx || typeof ctx !== "object") {
+    return undefined;
+  }
+  const value = (ctx as { SessionId?: unknown }).SessionId;
+  const sessionId = typeof value === "string" ? value.trim() : "";
+  return sessionId || undefined;
+}
+
 async function dispatchRuntimeReplyWithHandoffRetry(params: {
   core: PluginRuntime;
   cfg: OpenClawConfig;
@@ -84,6 +157,10 @@ async function dispatchRuntimeReplyWithHandoffRetry(params: {
       `[wecom-b3] dispatch-init-conflict-handoff-retry delayMs=${SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS} sessionKey=${params.session.ctx.SessionKey ?? params.session.route.sessionKey}`,
     );
   }
+  await drainSupersededOpenClawRun({
+    sessionKey: params.session.ctx.SessionKey ?? params.session.route.sessionKey,
+    sessionId: resolvePreparedSessionId(params.session.ctx),
+  });
   // OpenClaw raises this conflict before starting the agent run, so retrying cannot repeat tools.
   await waitForRetryDelay(SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS, params.abortSignal);
   await dispatchRuntimeReply({ ...dispatchParams, replyHandle });
@@ -142,12 +219,53 @@ export async function dispatchInboundEvent(params: {
   store.writeReplyContext(event.messageId, event.replyContext);
   const abortController = new AbortController();
   let obsoleteDispatch = false;
+  let previousSupersedeDrain: Promise<void> | undefined;
+  let supersedeDrainStarted = false;
+  let supersedeDrainSettled = false;
+  let resolveSupersedeDrain!: () => void;
+  const supersedeDrain = new Promise<void>((resolve) => {
+    resolveSupersedeDrain = resolve;
+  });
+  const settleSupersedeDrain = (): void => {
+    if (supersedeDrainSettled) {
+      return;
+    }
+    supersedeDrainSettled = true;
+    if (previousSupersedeDrain) {
+      void previousSupersedeDrain.then(resolveSupersedeDrain, resolveSupersedeDrain);
+      return;
+    }
+    resolveSupersedeDrain();
+  };
+  let sessionKey: string | undefined;
+  let sessionId: string | undefined;
+  let coreDispatchStarted = false;
+  const startSupersedeDrain = (): void => {
+    if (supersedeDrainStarted || !obsoleteDispatch) {
+      return;
+    }
+    if (!coreDispatchStarted || !sessionKey) {
+      // A message superseded during media/session preparation never entered
+      // OpenClaw, so there is no run to drain.
+      if (!coreDispatchStarted) {
+        settleSupersedeDrain();
+      }
+      return;
+    }
+    supersedeDrainStarted = true;
+    void drainSupersededOpenClawRun({ sessionKey, sessionId }).then(
+      settleSupersedeDrain,
+      settleSupersedeDrain,
+    );
+  };
   const abortObsoleteDispatch = (reason: Error): void => {
     obsoleteDispatch = true;
     if (!abortController.signal.aborted) abortController.abort(reason);
+    startSupersedeDrain();
   };
   const activeReplyHandle: ReplyHandle = {
     ...replyHandle,
+    waitForSupersede: () => supersedeDrain,
     supersedeByNewInbound: (meta) => {
       try {
         replyHandle.supersedeByNewInbound?.(meta);
@@ -160,14 +278,16 @@ export async function dispatchInboundEvent(params: {
   };
   const isBotWsReplySession =
     event.transport === "bot-ws" && replyHandle.context.transport === "bot-ws";
-  let sessionKey: string | undefined;
-  let supersededPreviousSamePeer = false;
-  let coreDispatchStarted = false;
 
   if (isBotWsReplySession) {
     console.info(
       `[wecom-b3] dispatch-register-early account=${event.accountId} messageId=${event.messageId} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
     );
+    const previousHandle = getActiveBotWsReplyHandle({
+      accountId: event.accountId,
+      peerKind: event.conversation.peerKind,
+      peerId: event.conversation.peerId,
+    });
     if (
       registerActiveBotWsReplyHandle({
         accountId: event.accountId,
@@ -176,7 +296,13 @@ export async function dispatchInboundEvent(params: {
         handle: activeReplyHandle,
       })
     ) {
-      supersededPreviousSamePeer = true;
+      try {
+        previousSupersedeDrain = previousHandle?.waitForSupersede?.();
+      } catch (error) {
+        console.warn(
+          `[wecom-b3] superseded-run-drain-handle-failed account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} error=${String(error)}`,
+        );
+      }
     }
   }
 
@@ -189,7 +315,16 @@ export async function dispatchInboundEvent(params: {
       abortController,
     });
     sessionKey = session.ctx.SessionKey ?? session.route.sessionKey;
-    if (abortController.signal.aborted) return;
+    sessionId = resolvePreparedSessionId(session.ctx);
+    if (abortController.signal.aborted) {
+      startSupersedeDrain();
+      return;
+    }
+
+    if (previousSupersedeDrain) {
+      await awaitSupersedeDrain(previousSupersedeDrain, abortController.signal);
+      if (abortController.signal.aborted) return;
+    }
 
     if (isBotWsReplySession) {
       registerActiveBotWsReplyHandle({
@@ -210,7 +345,7 @@ export async function dispatchInboundEvent(params: {
       session,
       replyHandle: activeReplyHandle,
       abortSignal: abortController.signal,
-      retryInitConflict: isBotWsReplySession && supersededPreviousSamePeer,
+      retryInitConflict: isBotWsReplySession,
     });
     if (isBotWsReplySession) {
       await awaitWithAbort(dispatchPromise, abortController.signal);
@@ -238,6 +373,9 @@ export async function dispatchInboundEvent(params: {
     }
     throw error;
   } finally {
+    if (obsoleteDispatch && !supersedeDrainStarted) {
+      settleSupersedeDrain();
+    }
     if (isBotWsReplySession) {
       unregisterActiveBotWsReplyHandle({
         accountId: event.accountId,

@@ -1,7 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 
+const openClawHandoffState = vi.hoisted(() => ({
+  resolveActiveEmbeddedRunSessionId: vi.fn(),
+  abortAndDrainAgentHarnessRun: vi.fn(),
+}));
+
+vi.mock("openclaw/plugin-sdk/agent-harness", () => openClawHandoffState);
+
 import { dispatchInboundEvent } from "./dispatcher.js";
 import type { ReplyHandle, UnifiedInboundEvent } from "../types/index.js";
+import {
+  registerActiveBotWsReplyHandle,
+  unregisterActiveBotWsReplyHandle,
+} from "../runtime.js";
 
 function makeEvent(messageId: string, text: string): UnifiedInboundEvent {
   return {
@@ -429,6 +440,183 @@ describe("dispatchInboundEvent", () => {
     }
   });
 
+  it("drains a superseded OpenClaw run before admitting the next message", async () => {
+    let releaseFirstRun: (() => void) | undefined;
+    let firstRunBusy = false;
+    let dispatchCount = 0;
+    const fallbackReleaseTimer = setTimeout(() => releaseFirstRun?.(), 1_000);
+    const result = { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } } as const;
+    const conflict = new Error(
+      "reply session initialization conflicted for agent:ops_bot:wecom:acct:dm:alice",
+    );
+
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-a");
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockImplementation(async () => {
+      releaseFirstRun?.();
+      return { aborted: true, drained: true, forceCleared: false };
+    });
+
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation((params) => {
+      dispatchCount += 1;
+      if (firstRunBusy) {
+        return Promise.reject(conflict);
+      }
+      if (dispatchCount > 1) {
+        return params.dispatcherOptions
+          .deliver({ text: "follow-up" }, { kind: "final" })
+          .then(() => result);
+      }
+      firstRunBusy = true;
+      return new Promise((resolve, reject) => {
+        releaseFirstRun = () => {
+          firstRunBusy = false;
+          resolve(result);
+        };
+        params.replyOptions?.abortSignal?.addEventListener(
+          "abort",
+          () => reject(params.replyOptions.abortSignal.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      });
+    });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const common = {
+      core: core as any,
+      cfg: {} as any,
+      store: makeStore() as any,
+      auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+    };
+
+    try {
+      const first = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-drain-a", "long task"),
+        replyHandle: makeReplyHandle(),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const fail = vi.fn().mockResolvedValue(undefined);
+      const second = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-drain-b", "follow-up"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver, fail }),
+      });
+      const secondOutcome = second.then(
+        () => ({ ok: true as const }),
+        (error) => ({ ok: false as const, error }),
+      );
+
+      await first;
+      await expect(secondOutcome).resolves.toEqual({ ok: true });
+      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "run-a", sessionKey: expect.any(String) }),
+      );
+      expect(deliver).toHaveBeenCalledWith({ text: "follow-up" }, { kind: "final" });
+      expect(fail).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(fallbackReleaseTimer);
+      releaseFirstRun?.();
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+    }
+  });
+
+  it("chains the drain barrier when a third message supersedes a waiting handoff", async () => {
+    let releaseDrain!: () => void;
+    let drainReleased = false;
+    const drain = new Promise<void>((resolve) => {
+      releaseDrain = () => {
+        drainReleased = true;
+        resolve();
+      };
+    });
+    const result = { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } } as const;
+    const conflict = new Error(
+      "reply session initialization conflicted for agent:ops_bot:wecom:acct:dm:alice",
+    );
+    let dispatchCount = 0;
+
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-a");
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockImplementation(async () => {
+      await drain;
+      return { aborted: true, drained: true, forceCleared: false };
+    });
+
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation((params) => {
+      dispatchCount += 1;
+      if (dispatchCount === 1) {
+        return new Promise((_resolve, reject) => {
+          params.replyOptions?.abortSignal?.addEventListener(
+            "abort",
+            () => reject(params.replyOptions.abortSignal.reason ?? new Error("aborted")),
+            { once: true },
+          );
+        });
+      }
+      if (!drainReleased) {
+        return Promise.reject(conflict);
+      }
+      return params.dispatcherOptions
+        .deliver({ text: "latest task completed" }, { kind: "final" })
+        .then(() => result);
+    });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const common = {
+      core: core as any,
+      cfg: {} as any,
+      store: makeStore() as any,
+      auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+    };
+
+    try {
+      const first = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-chain-a", "long task"),
+        replyHandle: makeReplyHandle(),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+
+      const second = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-chain-b", "first follow-up"),
+        replyHandle: makeReplyHandle(),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalledTimes(1);
+
+      const latestDeliver = vi.fn().mockResolvedValue(undefined);
+      const latest = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-chain-c", "latest follow-up"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver: latestDeliver }),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+
+      releaseDrain();
+      await Promise.allSettled([first, second, latest]);
+      expect(latestDeliver).toHaveBeenCalledWith(
+        { text: "latest task completed" },
+        { kind: "final" },
+      );
+    } finally {
+      releaseDrain();
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+    }
+  });
+
   it("retries a persistent handoff conflict once and reports it once", async () => {
     vi.useFakeTimers();
     let releaseFirstCore: (() => void) | undefined;
@@ -573,7 +761,98 @@ describe("dispatchInboundEvent", () => {
     }
   });
 
-  it("delegates persistent initialization conflicts without local retries", async () => {
+  it("recovers a stale OpenClaw run even when no prior WS handle is registered", async () => {
+    const conflict = new Error(
+      "reply session initialization conflicted for agent:ops_bot:wecom:acct:dm:alice",
+    );
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockRejectedValueOnce(conflict)
+      .mockImplementationOnce(async (params) => {
+        await params.dispatcherOptions.deliver({ text: "早上消息已恢复" }, { kind: "final" });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      });
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue(undefined);
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
+      aborted: true,
+      drained: true,
+      forceCleared: false,
+    });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    core.channel.reply.finalizeInboundContext = (ctx: Record<string, unknown>) => ({
+      ...ctx,
+      SessionId: "stale-reply-run",
+    });
+
+    try {
+      await dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: makeStore() as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-stale-run", "昨晚任务后的新消息"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver }),
+      });
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "stale-reply-run" }),
+      );
+      expect(deliver).toHaveBeenCalledWith({ text: "早上消息已恢复" }, { kind: "final" });
+    } finally {
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+    }
+  });
+
+  it("does not remain blocked behind a stale handoff barrier", async () => {
+    vi.useFakeTimers();
+    const staleHandle = makeReplyHandle({
+      waitForSupersede: () => new Promise<void>(() => undefined),
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
+      queuedFinal: true,
+      counts: { block: 0, final: 1, tool: 0 },
+    });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const registration = {
+      accountId: "acct",
+      peerKind: "direct" as const,
+      peerId: "alice",
+      sessionKey: "stale-session",
+      handle: staleHandle,
+    };
+    registerActiveBotWsReplyHandle(registration);
+
+    try {
+      const operation = dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: makeStore() as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-stale-barrier", "new message"),
+        replyHandle: makeReplyHandle(),
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await operation;
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+    } finally {
+      unregisterActiveBotWsReplyHandle(registration);
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a persistent initialization conflict after one recovery retry", async () => {
     const conflict = new Error(
       "reply session initialization conflicted for agent:ops_bot:wecom:acct:dm:alice",
     );
@@ -594,7 +873,7 @@ describe("dispatchInboundEvent", () => {
         replyHandle: makeReplyHandle(),
       }),
     ).rejects.toBe(conflict);
-    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
   });
 
   it("fails an activated Bot WS reply once when prepare rejects before core starts", async () => {

@@ -161,6 +161,113 @@ describe("BotWsSdkAdapter", () => {
     expect(sdkMockState.client?.replyStream).toHaveBeenCalledOnce();
   });
 
+  it("merges a media frame followed by a text frame before dispatching", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+
+    new BotWsSdkAdapter(runtime as any, {} as any).start();
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-file" },
+      body: {
+        msgid: "msg-file",
+        msgtype: "file",
+        chattype: "single",
+        from: { userid: "user-1" },
+        file: { url: "https://example.com/report.pdf", aeskey: "file-key" },
+      },
+    });
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-text" },
+      body: {
+        msgid: "msg-text",
+        msgtype: "text",
+        chattype: "single",
+        from: { userid: "user-1" },
+        text: { content: "请分析这个文件" },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(runtime.handleEvent).toHaveBeenCalledOnce();
+    const [event] = runtime.handleEvent.mock.calls[0] ?? [];
+    expect(event).toMatchObject({
+      messageId: "msg-text",
+      text: "请分析这个文件",
+      attachments: [
+        {
+          name: "file",
+          remoteUrl: "https://example.com/report.pdf",
+          aesKey: "file-key",
+        },
+      ],
+    });
+  });
+
+  it("flushes standalone media and keeps merge windows isolated per peer", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+    adapter.start();
+
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-media-only" },
+      body: {
+        msgid: "msg-media-only",
+        msgtype: "file",
+        chattype: "single",
+        from: { userid: "user-1" },
+        file: { url: "https://example.com/only.pdf", aeskey: "only-key" },
+      },
+    });
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-other-peer" },
+      body: {
+        msgid: "msg-other-peer",
+        msgtype: "text",
+        chattype: "single",
+        from: { userid: "user-2" },
+        text: { content: "另一位用户的消息" },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    expect(runtime.handleEvent).toHaveBeenCalledTimes(2);
+    expect(runtime.handleEvent.mock.calls.map(([event]) => event.text)).toEqual(
+      expect.arrayContaining(["[file] https://example.com/only.pdf", "另一位用户的消息"]),
+    );
+    adapter.stop();
+  });
+
   it("short-circuits enter_chat welcome events to a static ws welcome reply", async () => {
     process.on("unhandledRejection", onUnhandledRejection);
 

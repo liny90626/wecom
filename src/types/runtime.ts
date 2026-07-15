@@ -97,6 +97,8 @@ export type ReplyHandle = {
   deliver: (payload: ReplyPayload, info: ReplyDeliveryInfo) => Promise<void>;
   fail?: (error: unknown) => Promise<void>;
   markExternalActivity?: () => void;
+  /** Resolves after a superseded Bot WS run has released its OpenClaw session. */
+  waitForSupersede?: () => Promise<void>;
   supersedeByNewInbound?: (meta: {
     accountId: string;
     peerKind: "direct" | "group";

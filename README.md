@@ -23,7 +23,7 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-`v2.5.110-137` 延续 v136 基于 `released/2.5.110-118` 重建的稳定骨架，针对新消息接管长任务时的 OpenClaw session 初始化冲突增加一次精确、可取消的短重试，并隐藏用户侧内部 session 标识。主线仍不恢复分钟级 handoff、重试阶梯、per-peer 熔断器或 synthetic thinking。当前发布标签为 `released/2.5.110-137`。
+`v2.5.110-138` 延续 v137 基于 `released/2.5.110-118` 重建的稳定骨架，补齐 Bot WS 媒体后文字入站合并，并在新消息接管长任务时排空 OpenClaw 6.11 的旧 run，降低 session 初始化冲突和旧任务残留。主线仍不恢复分钟级 handoff、重试阶梯、per-peer 熔断器或 synthetic thinking。当前发布标签为 `released/2.5.110-138`。
 
 - B1：修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
 - B2：优化 Bot WebSocket 长文本回复投递。正文过长时会按企业微信限制分段发送，并对流式预览与最终正文之间的重复片段做去重处理，降低长文本重复和截断风险。
@@ -32,6 +32,7 @@ Fork 维护与修复贡献：**LinKy**
 - 重复正文防护：补充短文本、中等文本和长文本场景的 final/preview 去重逻辑，减少带思考块回复结束时再次输出正文的情况。
 - 自检与回归：增加并维护 B1/B2/B3、reasoning preview、长任务兜底、分段发送和去重相关测试，方便本 fork 后续迭代时快速发现回归。
 - v136 精简重做：对齐 OpenClaw 6.11 / 企微 SDK 1.0.6，修复 metadata 竞争、Fast auto-off 无正文、ACK/late-final 截断、保守正文去重和 Agent 重复发送；同时恢复 Bot webhook 短时间附件+文字保序合并。
+- v138 接管与入站收敛：同一 Bot WS 会话的媒体帧后文字帧在短窗口内合并，单独媒体仍按时落单；新消息接管旧长任务前排空 OpenClaw run，并串联 handoff barrier，避免旧 run 残留阻塞后续 dispatch。
 
 实验性能力仍受 OpenClaw 版本、模型服务是否透传 reasoning 内容、企业微信客户端渲染策略等外部因素影响。除上述修复外，本 fork 尽量保持原项目结构、配置方式和运行时行为不变。
 
@@ -198,6 +199,11 @@ npx vitest run
 
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 v2.5.110-138（2026-07-15，LinKy fork 维护版）
+- **[媒体入站完整性] 合并 Bot WS 媒体与后续文字**：文件/图片帧先到时短暂等待同一会话的文字帧，再以一次完整入站交给 OpenClaw；没有文字的媒体仍按窗口结束后独立投递，并按账号与会话隔离。
+- **[长任务接管] 排空旧 OpenClaw run**：新消息接管同一 Bot WS 会话前解析并中止旧 embedded run，等待有限时间完成排空，再进入新的 dispatch；连续接管会串联 barrier，避免旧清理操作与新 session 初始化竞争。
+- **[回归验证]**：覆盖文件+文字、单独媒体、跨会话隔离、第三条消息抢占、残留 run/barrier 与初始化冲突恢复。完整说明见 [`changelog/v2.5.110-138.md`](./changelog/v2.5.110-138.md)。
+
 #### 📌 v2.5.110-137（2026-07-13，LinKy fork 维护版）
 - **[长任务接管] 修复 OpenClaw session 初始化冲突**：新消息接管同一 Bot WS 会话的旧长任务后，仅在 OpenClaw 明确返回初始化冲突时等待 500ms 并重试一次；正常接管不再固定等待，第三条消息可取消尚未发生的重试。
 - **[错误脱敏] 冲突提示改为用户可理解的文案**：持续冲突不再显示 `WeCom WS reply failed`、agent 名称或 session key；原气泡和流窗口失效后的主动推送统一提示“之前任务还在处理中，新指令冲突啦，请等几分钟后再试试”。
@@ -217,10 +223,6 @@ npx vitest run
 #### 📌 v2.5.110-117（2026-06-29，LinKy fork 维护版）
 - **[Bot WS 可靠性] 避免 stream ACK 队列卡住后延迟刷旧气泡** 🛡️ 非 final 预览优先使用 SDK non-blocking stream 更新；final 到来时若同一 `req_id` 仍有 pending ACK，会先短暂等待队列释放，超时后改走主动 markdown 兜底，避免“用户再发一条消息后原气泡才继续流式输出”。
 - **[回归补强] 覆盖 pending ACK 与正常 ACK 恢复两条路径** 🧪 新增 Bot WS 回归用例，确保 pending 卡住时不再把 final 排入旧 stream 队列，同时 ACK 快速恢复时仍保留原气泡正常收尾。完整说明见 [`changelog/v2.5.110-117.md`](./changelog/v2.5.110-117.md)。
-
-#### 📌 v2.5.110-116（2026-06-28，LinKy fork 维护版）
-- **[Bot WS 可靠性] 出站 stream 更新增加本地超时兜底** 🛡️ 当企业微信 SDK 的 `replyStream` 偶发长期 pending 时，插件不再一直卡住后续 final，而是标记当前 stream 不可靠并在 final 阶段主动续发剩余正文。
-- **[完成标识] `（已完成）` 调整为 `（回复完毕）`** 🧾 降低“任务已完成”和“本次回复输出结束”的语义混淆。完整说明见 [`changelog/v2.5.110-116.md`](./changelog/v2.5.110-116.md)。
 
 > B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)，reasoning 思考块系列修复见 [`changelog/v2.5.110-113.md`](./changelog/v2.5.110-113.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
 

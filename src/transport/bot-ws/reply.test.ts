@@ -423,7 +423,7 @@ describe("createBotWsReplyHandle", () => {
     expect(String(nonBlockingClient.replyStreamNonBlocking.mock.calls[1]?.[2])).toContain("新版本");
   });
 
-  it("pushes one background notice when a pending preview never becomes writable", async () => {
+  it("starts recurring background status when a pending preview never becomes writable", async () => {
     const nonBlockingClient = mockClient as typeof mockClient & {
       hasPendingReplyAck: ReturnType<typeof vi.fn>;
       replyStreamNonBlocking: ReturnType<typeof vi.fn>;
@@ -452,11 +452,15 @@ describe("createBotWsReplyHandle", () => {
     await vi.advanceTimersByTimeAsync(9 * 60_000);
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
-    expect(String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content)).toContain(
-      "任务仍在后台处理",
+    expect(String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content)).toBe(
+      "执行长任务中，当前用时9m00s",
     );
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+    await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+    expect(String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content)).toBe(
+      "执行长任务中，当前用时10m00s",
+    );
   });
 
   it("streams non-reasoning block previews and sends the accumulated final once", async () => {
@@ -990,7 +994,7 @@ describe("createBotWsReplyHandle", () => {
     const firstPreview = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
     expect(firstPreview).toContain("预览内容。");
     expect(firstPreview).not.toContain("END-FROZEN");
-    expect(firstPreview).toContain("正在思考中...0s");
+    expect(firstPreview).toContain("执行长任务中，当前用时0s");
 
     await vi.advanceTimersByTimeAsync(15_000);
     await flushPromises();
@@ -998,7 +1002,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
     const secondPreview = String(mockClient.replyStream.mock.calls[1]?.[2] ?? "");
     expect(secondPreview).toContain("预览内容。");
-    expect(secondPreview).toContain("正在思考中...15s");
+    expect(secondPreview).toContain("执行长任务中，当前用时15s");
     expect(secondPreview).not.toContain("END-FROZEN");
   });
 
@@ -1030,7 +1034,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenLastCalledWith(
       expect.objectContaining({ headers: { req_id: "req-preview-time-freeze" } }),
       expect.any(String),
-      "正在查询数据源\n\n正在整理结果...5m00s",
+      "正在查询数据源\n\n执行长任务中，当前用时5m00s",
       false,
     );
 
@@ -1041,7 +1045,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenLastCalledWith(
       expect.objectContaining({ headers: { req_id: "req-preview-time-freeze" } }),
       expect.any(String),
-      "正在查询数据源\n\n正在整理结果...5m15s",
+      "正在查询数据源\n\n执行长任务中，当前用时5m15s",
       false,
     );
   });
@@ -1149,6 +1153,34 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain(FINAL_COMPLETION_MARKER);
     expect(pushed).not.toContain("<think>");
     expect(pushed).not.toContain("dbg-r");
+  });
+
+  it("continues with OpenClaw's LLM failure final after an expired visible preview", async () => {
+    const expiredError = {
+      headers: { req_id: "req-openclaw-llm-failed-final" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-openclaw-llm-failed-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "已完成前置工具调用", isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: "LLM request failed.", isReasoning: false }, { kind: "final" });
+
+    const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(pushed).toBe(`继续输出：\n\nLLM request failed.\n\n${FINAL_COMPLETION_MARKER}`);
+    expect(pushed).not.toContain("WeCom WS reply failed");
   });
 
   it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {
@@ -1955,7 +1987,7 @@ describe("createBotWsReplyHandle", () => {
     // The final landed well before the 9-minute mark, so the deferred
     // background notice must be skipped instead of promising a follow-up.
     expect(
-      pushedContents.some((content) => content.includes("进度预览暂时无法继续刷新")),
+      pushedContents.some((content) => content.includes("执行长任务中，当前用时")),
     ).toBe(false);
     const finalPush = pushedContents.find((content) => content.includes("压测结果完成"));
     expect(finalPush).toBeDefined();
@@ -1968,12 +2000,12 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
     expect(
       mockClient.sendMessage.mock.calls.some((call) =>
-        String((call[1] as any).markdown.content).includes("进度预览暂时无法继续刷新"),
+        String((call[1] as any).markdown.content).includes("执行长任务中，当前用时"),
       ),
     ).toBe(false);
   });
 
-  it("pushes the deferred background notice when the task is still running at nine minutes", async () => {
+  it("starts the recurring background status when the task is still running at nine minutes", async () => {
     const expiredError = {
       headers: { req_id: "req-nine-minute-notice" },
       errcode: 846608,
@@ -2003,25 +2035,166 @@ describe("createBotWsReplyHandle", () => {
     // Channel already dead at ~5m15s, but no notice before the 9-minute mark.
     expect(
       mockClient.sendMessage.mock.calls.some((call) =>
-        String((call[1] as any).markdown.content).includes("进度预览暂时无法继续刷新"),
+        String((call[1] as any).markdown.content).includes("执行长任务中，当前用时"),
       ),
     ).toBe(false);
 
     await vi.advanceTimersByTimeAsync(4 * 60_000);
     await flushPromises();
     const noticePushes = mockClient.sendMessage.mock.calls.filter((call) =>
-      String((call[1] as any).markdown.content).includes("进度预览暂时无法继续刷新"),
+      String((call[1] as any).markdown.content).includes("执行长任务中，当前用时"),
     );
     expect(noticePushes).toHaveLength(1);
 
-    // Still exactly one notice afterwards.
+    // The status keeps advancing once per minute while the task is active.
     await vi.advanceTimersByTimeAsync(5 * 60_000);
     await flushPromises();
     expect(
       mockClient.sendMessage.mock.calls.filter((call) =>
-        String((call[1] as any).markdown.content).includes("进度预览暂时无法继续刷新"),
+        String((call[1] as any).markdown.content).includes("执行长任务中，当前用时"),
       ),
-    ).toHaveLength(1);
+    ).toHaveLength(6);
+  });
+
+  it("repeats the expired-stream background status every minute until the final arrives", async () => {
+    const expiredError = {
+      headers: { req_id: "req-recurring-background-status" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValue(expiredError);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-recurring-background-status" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "长任务预览", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(300_000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(3 * 60_000 + 45_000);
+    await flushPromises();
+
+    const backgroundPushes = () =>
+      mockClient.sendMessage.mock.calls.filter((call) =>
+        String((call[1] as any).markdown.content).includes("执行长任务中，当前用时"),
+      );
+    expect(backgroundPushes()).toHaveLength(1);
+    expect(String((backgroundPushes()[0]?.[1] as any).markdown.content)).toBe(
+      "执行长任务中，当前用时9m00s",
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushPromises();
+    expect(backgroundPushes()).toHaveLength(2);
+    expect(String((backgroundPushes()[1]?.[1] as any).markdown.content)).toBe(
+      "执行长任务中，当前用时10m00s",
+    );
+
+    await handle.deliver({ text: "最终结果", isReasoning: false }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await flushPromises();
+    expect(backgroundPushes()).toHaveLength(2);
+  });
+
+  it("retries the recurring background status one minute after a push failure", async () => {
+    const expiredError = {
+      headers: { req_id: "req-recurring-status-retry" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValue(expiredError);
+    mockClient.sendMessage
+      .mockRejectedValueOnce(new Error("status push failed"))
+      .mockResolvedValue({} as any);
+    const onFail = vi.fn();
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-recurring-status-retry" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      onFail,
+    });
+
+    await handle.deliver({ text: "长任务预览", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(300_000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(3 * 60_000 + 45_000);
+    await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+    expect(String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content)).toBe(
+      "执行长任务中，当前用时10m00s",
+    );
+    expect(onFail).not.toHaveBeenCalled();
+  });
+
+  it("does not rearm recurring status after external activity while a push is in flight", async () => {
+    const expiredError = {
+      headers: { req_id: "req-recurring-status-external-activity" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    let releaseStatusPush: (() => void) | undefined;
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValue(expiredError);
+    mockClient.sendMessage.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseStatusPush = resolve;
+        }) as any,
+    );
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-recurring-status-external-activity" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "长任务预览", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(300_000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(3 * 60_000 + 45_000);
+    await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    handle.markExternalActivity?.();
+    releaseStatusPush?.();
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    await flushPromises();
+
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
   });
 
   it("drops the deferred background notice when a new message supersedes the task", async () => {
@@ -2062,7 +2235,7 @@ describe("createBotWsReplyHandle", () => {
 
     expect(
       mockClient.sendMessage.mock.calls.some((call) =>
-        String((call[1] as any).markdown.content).includes("进度预览暂时无法继续刷新"),
+        String((call[1] as any).markdown.content).includes("执行长任务中，当前用时"),
       ),
     ).toBe(false);
   });
@@ -2947,10 +3120,13 @@ describe("createBotWsReplyHandle", () => {
     const pushedContents = mockClient.sendMessage.mock.calls.map((call) =>
       String((call[1] as any).markdown.content),
     );
-    // The already-delivered first chunk must not be re-sent by the retry.
-    expect(pushedContents.filter((content) => content.includes("AAA段落")).length).toBe(1);
-    expect(pushedContents.filter((content) => content.includes("BBB段落")).length).toBe(2);
-    expect(pushedContents.filter((content) => content.includes("CCC段落")).length).toBe(1);
+    // The already-delivered first chunk must not be re-sent, while the exact
+    // failed second chunk is retried without resetting chunk progress.
+    expect(pushedContents.filter((content) => content === pushedContents[0]).length).toBe(1);
+    expect(pushedContents[2]).toBe(pushedContents[1]);
+    expect(pushedContents.join("\n")).toContain("AAA段落");
+    expect(pushedContents.join("\n")).toContain("BBB段落");
+    expect(pushedContents.join("\n")).toContain("CCC段落");
   });
 
   it("retries a failed normal-stream remainder without reopening the closed stream", async () => {
@@ -3555,7 +3731,7 @@ describe("createBotWsReplyHandle", () => {
     expect(nonBlockingClient.replyStreamNonBlocking.mock.calls.length).toBeGreaterThanOrEqual(2);
     const lastCall = nonBlockingClient.replyStreamNonBlocking.mock.calls.at(-1);
     expect(String(lastCall?.[2])).toContain("预览内容");
-    expect(String(lastCall?.[2])).toMatch(/正在(思考中|处理数据|整理结果)/);
+    expect(String(lastCall?.[2])).toContain("执行长任务中，当前用时");
   });
 
   it("sends a merge notice when superseded and later pushes the old final without updating the old stream", async () => {

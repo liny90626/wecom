@@ -95,6 +95,40 @@ describe("dispatchRuntimeReply", () => {
     );
   });
 
+  it("forwards OpenClaw's exhausted LLM failure final without inventing a WeCom error", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.dispatcherOptions.deliver(
+        { text: "LLM request failed." },
+        { kind: "final" },
+      );
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-llm-failed" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+        fail,
+      } as any,
+    });
+
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver).toHaveBeenCalledWith(
+      { text: "LLM request failed." },
+      { kind: "final" },
+    );
+    expect(fail).not.toHaveBeenCalled();
+  });
+
   it("synthesizes a final close for bot-ws when only block replies were queued", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
       queuedFinal: false,

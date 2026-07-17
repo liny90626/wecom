@@ -83,6 +83,11 @@ function utf8ByteLengthV2(value: unknown): number {
   return Buffer.byteLength(String(value ?? ""), "utf8");
 }
 
+// Prefer a later sentence boundary over a half-empty message. This keeps
+// long replies dense without changing the proven WeCom hard limits.
+const SOFT_SPLIT_MIN_FILL_RATIO = 0.7;
+const SOFT_SPLIT_FALLBACK_FILL_RATIO = 0.45;
+
 function trimToUtf8BytesV2(value: unknown, maxBytes: number): string {
   const text = String(value ?? "");
   if (utf8ByteLengthV2(text) <= maxBytes) return text;
@@ -114,13 +119,21 @@ function splitLongMarkdownCoreV2(markdown: unknown, maxChars: number, maxBytes: 
 
     if (take.length < rest.length) {
       let cut = -1;
+      let fallbackCut = -1;
       for (const sep of separators) {
         const idx = take.lastIndexOf(sep);
-        if (idx > Math.floor(take.length * 0.45)) {
+        if (idx > Math.floor(take.length * SOFT_SPLIT_MIN_FILL_RATIO)) {
           cut = idx + sep.length;
           break;
         }
+        if (
+          fallbackCut < 0 &&
+          idx > Math.floor(take.length * SOFT_SPLIT_FALLBACK_FILL_RATIO)
+        ) {
+          fallbackCut = idx + sep.length;
+        }
       }
+      if (cut < 0) cut = fallbackCut;
       if (cut > 0) take = take.slice(0, cut);
     }
 

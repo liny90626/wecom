@@ -40,12 +40,10 @@ const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const STRUCTURED_TAIL_MIN_DUPLICATE_LINES = 4;
 const FINAL_COMPLETION_MARKER = "（回复完毕）";
 const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
-const PREVIEW_EXPIRED_NOTICE_TEXT =
-  "⏳ 进度预览暂时无法继续刷新，任务仍在后台处理，完成后将以新消息发送。";
 // The background-processing notice is only worth a standalone message for
 // genuinely long tasks: hold it until the task has been running 9 minutes.
 const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = 9 * 60_000;
-const PREVIEW_EXPIRED_NOTICE_RETRY_MS = 30_000;
+const PREVIEW_EXPIRED_NOTICE_REPEAT_MS = 60_000;
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
 const REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT =
   "上一轮任务还在处理中或会话状态刚发生变化，这条消息未能处理，请稍后重新发送。";
@@ -562,15 +560,12 @@ function formatFallbackError(error: unknown): string {
 
 function formatElapsedStatus(elapsedMs: number): string {
   const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
-  if (elapsedSeconds < 30) {
-    return `正在思考中...${elapsedSeconds}s`;
-  }
   if (elapsedSeconds < 60) {
-    return `正在处理数据...${elapsedSeconds}s`;
+    return `执行长任务中，当前用时${elapsedSeconds}s`;
   }
   const elapsedMinutes = Math.floor(elapsedSeconds / 60);
   const remainingSeconds = elapsedSeconds % 60;
-  return `正在整理结果...${elapsedMinutes}m${String(remainingSeconds).padStart(2, "0")}s`;
+  return `执行长任务中，当前用时${elapsedMinutes}m${String(remainingSeconds).padStart(2, "0")}s`;
 }
 
 function appendFinalCompletionMarker(text: string): string {
@@ -891,7 +886,7 @@ export function createBotWsReplyHandle(params: {
     stopPlaceholderKeepalive();
     stopPreviewFreezeTimeout();
     stopPreviewStatusInterval();
-    stopPreviewExpiredNoticeTimer();
+    cancelPreviewExpiredNotice();
     clearPendingPreview();
   };
 
@@ -975,8 +970,8 @@ export function createBotWsReplyHandle(params: {
   let lastDeliveredBodySourceText = "";
   let lastPreviewUpdateAt = 0;
   let lastPreviewStatusAt = 0;
-  let previewExpiredNoticeSent = false;
-  let previewExpiredNoticeRetried = false;
+  let previewExpiredNoticeInFlight = false;
+  let previewExpiredNoticeCancelled = false;
   let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   const handleStartedAt = Date.now();
   let previewWatchdogExpired = false;
@@ -1707,15 +1702,41 @@ export function createBotWsReplyHandle(params: {
     }
   };
 
-  // One-time active push after the frozen preview channel dies (typically
+  const cancelPreviewExpiredNotice = (): void => {
+    previewExpiredNoticeCancelled = true;
+    stopPreviewExpiredNoticeTimer();
+  };
+
+  // Recurring active push after the frozen preview channel dies (typically
   // errcode 846608 once the WeCom stream window closes at ~6 min). Without
   // it the bubble goes silent forever while the task is still running. The
-  // push is held until the task has been processing for at least
-  // PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS: if the final lands earlier the
-  // notice is skipped entirely instead of promising a follow-up message.
+  // first push is held until the task has been processing for at least
+  // PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS, then repeats once per minute until
+  // final settlement or supersede. Recursive timeouts avoid overlapping
+  // sends when a push itself is slow.
+  const schedulePreviewExpiredNotice = (delayMs: number, allowUnfrozen: boolean): void => {
+    if (
+      previewExpiredNoticeTimer ||
+      previewExpiredNoticeInFlight ||
+      previewExpiredNoticeCancelled ||
+      streamSettled ||
+      finalDelivered ||
+      isEvent ||
+      supersededByNewInbound
+    ) {
+      return;
+    }
+    previewExpiredNoticeTimer = setTimeout(() => {
+      previewExpiredNoticeTimer = undefined;
+      maybeSendPreviewExpiredNotice(allowUnfrozen);
+    }, delayMs);
+    previewExpiredNoticeTimer.unref?.();
+  };
+
   const maybeSendPreviewExpiredNotice = (allowUnfrozen = false): void => {
     if (
-      previewExpiredNoticeSent ||
+      previewExpiredNoticeInFlight ||
+      previewExpiredNoticeCancelled ||
       (!previewFrozen && !allowUnfrozen) ||
       streamSettled ||
       finalDelivered ||
@@ -1731,42 +1752,29 @@ export function createBotWsReplyHandle(params: {
         console.info(
           `[wecom-preview] expired-notice-deferred delayMs=${remainingMs} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
         );
-        previewExpiredNoticeTimer = setTimeout(() => {
-          previewExpiredNoticeTimer = undefined;
-          maybeSendPreviewExpiredNotice(allowUnfrozen);
-        }, remainingMs);
-        previewExpiredNoticeTimer.unref?.();
+        schedulePreviewExpiredNotice(remainingMs, allowUnfrozen);
       }
       return;
     }
     stopPreviewExpiredNoticeTimer();
-    previewExpiredNoticeSent = true;
-    void sendMarkdownChunksViaActivePush(PREVIEW_EXPIRED_NOTICE_TEXT, {
+    previewExpiredNoticeInFlight = true;
+    const elapsedMs = Date.now() - (previewStartedAt ?? handleStartedAt);
+    void sendMarkdownChunksViaActivePush(formatElapsedStatus(elapsedMs), {
       reason: "preview-expired",
     })
       .then(() => {
         console.info(
-          `[wecom-preview] expired-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+          `[wecom-preview] expired-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${elapsedMs}`,
         );
       })
       .catch((error) => {
         console.warn(
           `[wecom-preview] expired-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
         );
-        // No trigger fires again on its own once the channel is dead, so a
-        // failed push must arm its own single delayed re-attempt.
-        if (previewExpiredNoticeRetried || streamSettled || supersededByNewInbound) {
-          return;
-        }
-        previewExpiredNoticeRetried = true;
-        previewExpiredNoticeSent = false;
-        if (!previewExpiredNoticeTimer) {
-          previewExpiredNoticeTimer = setTimeout(() => {
-            previewExpiredNoticeTimer = undefined;
-            maybeSendPreviewExpiredNotice(allowUnfrozen);
-          }, PREVIEW_EXPIRED_NOTICE_RETRY_MS);
-          previewExpiredNoticeTimer.unref?.();
-        }
+      })
+      .finally(() => {
+        previewExpiredNoticeInFlight = false;
+        schedulePreviewExpiredNotice(PREVIEW_EXPIRED_NOTICE_REPEAT_MS, allowUnfrozen);
       });
   };
 
@@ -2716,7 +2724,7 @@ export function createBotWsReplyHandle(params: {
       stopPlaceholderKeepalive();
       stopPreviewFreezeTimeout();
       stopPreviewStatusInterval();
-      stopPreviewExpiredNoticeTimer();
+      cancelPreviewExpiredNotice();
       clearPendingPreview();
     },
     supersedeByNewInbound: (meta) => {
@@ -2740,7 +2748,7 @@ export function createBotWsReplyHandle(params: {
       stopPlaceholderKeepalive();
       stopPreviewFreezeTimeout();
       stopPreviewStatusInterval();
-      stopPreviewExpiredNoticeTimer();
+      cancelPreviewExpiredNotice();
       // Confirmed visible old replies must not revive. A wholly invisible
       // final keeps its bounded retry so the result is not lost permanently.
       if (suppressSupersededFinalPush) {

@@ -76,6 +76,25 @@ describe("toWeComMarkdownV2", () => {
     expect(restored).toBe(formatted);
   });
 
+  it("does not cut a long chunk near half capacity when a later sentence boundary fits", () => {
+    const input = `${"甲".repeat(1_000)}\n\n${"乙。".repeat(1_000)}`;
+    const chunks = chunkWeComMarkdownV2(input, 2_000, 12_000);
+    const firstBody = (chunks[0] ?? "").replace(/\n\n【第\d+\/\d+段】$/, "");
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(firstBody.length).toBeGreaterThanOrEqual(1_500);
+    expect(chunks.every((chunk) => chunk.length <= 2_000)).toBe(true);
+    expect(chunks.every((chunk) => Buffer.byteLength(chunk, "utf8") <= 12_000)).toBe(true);
+  });
+
+  it("falls back to an earlier safe paragraph boundary instead of hard-splitting a long line", () => {
+    const input = `${"甲".repeat(1_000)}\n\n${"乙".repeat(2_000)}`;
+    const chunks = chunkWeComMarkdownV2(input, 2_000, 12_000);
+    const firstBody = (chunks[0] ?? "").replace(/\n\n【第\d+\/\d+段】$/, "");
+
+    expect(firstBody).toBe(`${"甲".repeat(1_000)}\n\n`);
+  });
+
   it("keeps preview text free of chunk markers", () => {
     const preview = previewWeComMarkdownV2("预览内容。".repeat(260), 120, 480);
 

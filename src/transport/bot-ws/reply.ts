@@ -10,7 +10,7 @@ import {
 import { formatErrorMessage } from "openclaw/plugin-sdk/infra-runtime";
 import { resolveWecomMediaMaxBytes, resolveWecomMergedMediaLocalRoots } from "../../config/index.js";
 import { getBotWsPushHandle, getWecomRuntime } from "../../runtime.js";
-import { isReplySessionInitializationConflict } from "../../shared/reply-errors.js";
+import { isRetryableReplySessionAdmissionError } from "../../shared/reply-errors.js";
 import type { ReplyHandle, ReplyPayload } from "../../types/index.js";
 import {
   chunkWeComMarkdownV2,
@@ -42,9 +42,13 @@ const FINAL_COMPLETION_MARKER = "（回复完毕）";
 const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
 const PREVIEW_EXPIRED_NOTICE_TEXT =
   "⏳ 进度预览暂时无法继续刷新，任务仍在后台处理，完成后将以新消息发送。";
+// The background-processing notice is only worth a standalone message for
+// genuinely long tasks: hold it until the task has been running 9 minutes.
+const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = 9 * 60_000;
+const PREVIEW_EXPIRED_NOTICE_RETRY_MS = 30_000;
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
 const REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT =
-  "之前任务还在处理中，新指令冲突啦，请等几分钟后再试试";
+  "上一轮任务还在处理中或会话状态刚发生变化，这条消息未能处理，请稍后重新发送。";
 const FINAL_PUSH_RETRY_BASE_MS = 20_000;
 const FINAL_PUSH_MAX_RETRIES = 3;
 const THINK_TAG_RE = /<\/?think>/gi;
@@ -887,6 +891,7 @@ export function createBotWsReplyHandle(params: {
     stopPlaceholderKeepalive();
     stopPreviewFreezeTimeout();
     stopPreviewStatusInterval();
+    stopPreviewExpiredNoticeTimer();
     clearPendingPreview();
   };
 
@@ -971,6 +976,9 @@ export function createBotWsReplyHandle(params: {
   let lastPreviewUpdateAt = 0;
   let lastPreviewStatusAt = 0;
   let previewExpiredNoticeSent = false;
+  let previewExpiredNoticeRetried = false;
+  let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+  const handleStartedAt = Date.now();
   let previewWatchdogExpired = false;
   let failNoticeSent = false;
   let finalPushRetryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1205,7 +1213,11 @@ export function createBotWsReplyHandle(params: {
         obsoleteFinalRetry = true;
         finishPendingFinalRetry(true);
       },
-      shouldCancelForNewActivation: () => visibleReplyStarted,
+      // Only a final the user has actually seen part of may be dropped for a
+      // new activation; an entirely undelivered final keeps its retry, else
+      // the next message would destroy the answer instead of releasing it.
+      shouldCancelForNewActivation: () =>
+        visibleReplyStarted && (finalPushProgress?.delivered ?? 0) > 0,
     });
     return true;
   };
@@ -1223,7 +1235,15 @@ export function createBotWsReplyHandle(params: {
       );
       return;
     }
-    if (supersededByNewInbound && suppressSupersededFinalPush) {
+    if (
+      supersededByNewInbound &&
+      (suppressSupersededFinalPush ||
+        (visibleReplyStarted && (finalPushProgress?.delivered ?? 0) > 0))
+    ) {
+      // Recompute suppression at fire time: a superseded final that became
+      // partially visible mid-push (chunks confirmed after the supersede
+      // froze suppressSupersededFinalPush=false) must not revive its
+      // remaining chunks into the newest conversation.
       finishPendingFinalRetry(true);
       console.info(
         `[wecom-b3] final-retry-skip-superseded account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
@@ -1272,31 +1292,50 @@ export function createBotWsReplyHandle(params: {
         );
         return;
       }
-      if (isAmbiguousActivePushDeliveryError(error)) {
-        finishPendingFinalRetry(false);
-        console.warn(
-          `[wecom-b3] final-retry-stop-ambiguous account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
-        );
-        params.onFail?.(error);
-        return;
-      }
-      if (!retry.alreadyMarkedDelivered) {
+      const ambiguous = isAmbiguousActivePushDeliveryError(error);
+      if (!ambiguous && !retry.alreadyMarkedDelivered) {
         rollbackFinalDelivered(retry.deliveryKey, { peerDedup: retry.peerDedup });
         pendingFinalRetryClaim = undefined;
       }
       console.warn(
-        `[wecom-b3] final-retry-failed attempt=${finalPushRetryCount}/${FINAL_PUSH_MAX_RETRIES} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+        `[wecom-b3] final-retry-failed attempt=${finalPushRetryCount}/${FINAL_PUSH_MAX_RETRIES} ambiguous=${String(ambiguous)} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
       );
       if (finalPushRetryCount >= FINAL_PUSH_MAX_RETRIES) {
         finishPendingFinalRetry(true);
         console.warn(
           `[wecom-b3] final-retry-exhausted account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
         );
+        sendRetryExhaustedNoticeOnce();
         params.onFail?.(error);
         return;
       }
-      scheduleFinalPushRetry(retry);
+      // Ambiguous failures (ack/local timeout, dropped socket) MAY have
+      // reached the user; keep the delivery claim so the next attempt only
+      // resends unconfirmed chunks via the tracked push progress. Stopping
+      // here instead used to silently destroy the whole answer.
+      scheduleFinalPushRetry(
+        ambiguous ? { ...retry, alreadyMarkedDelivered: true, preserveDeliveryClaim: true } : retry,
+      );
     }
+  };
+
+  // Closes the dangling "完成后将以新消息发送"/placeholder promise when every
+  // final delivery attempt is spent; without it the answer disappears with
+  // only a log line.
+  const sendRetryExhaustedNoticeOnce = (): void => {
+    if (isEvent || failNoticeSent || supersededByNewInbound || !isCurrentReplyActivation()) {
+      // A superseded/obsolete chain must not push a stale failure notice
+      // into the middle of the successor conversation.
+      return;
+    }
+    failNoticeSent = true;
+    void sendMarkdownChunksViaActivePush(REPLY_FAIL_NOTICE_TEXT, {
+      reason: "fail-notice",
+    }).catch((noticeError) => {
+      console.warn(
+        `[wecom-reply] fail-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(noticeError)}`,
+      );
+    });
   };
 
   const scheduleFinalPushRetry = (retry: FinalPushRetryRequest): void => {
@@ -1348,7 +1387,7 @@ export function createBotWsReplyHandle(params: {
       deliveryKey: string;
       peerDedup: boolean;
     },
-  ): Promise<boolean | "retry-scheduled" | "ambiguous-failure"> => {
+  ): Promise<boolean | "retry-scheduled"> => {
     const markdownChunks = withOptionalCompletionMarker(
       chunkWeComMarkdownV2(
         finalText,
@@ -1365,11 +1404,26 @@ export function createBotWsReplyHandle(params: {
       hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
     });
     const fallbackText = resolveStreamFallbackText(finalText);
-    const settleActivePushFailure = (
-      error: unknown,
-    ): false | "ambiguous-failure" => {
+    // The fallback retry must reuse the EXACT identity of the failed push
+    // (text/marker/default limits): any drift would reset the tracked chunk
+    // progress and re-push chunks the user already confirmed-received.
+    const fallbackRetryRequest = (): FinalPushRetryRequest => ({
+      text: fallbackText,
+      deliveryKey: options.deliveryKey,
+      peerDedup: options.peerDedup,
+      appendCompletionMarker: true,
+      alreadyMarkedDelivered: true,
+      preserveDeliveryClaim: true,
+    });
+    const settleActivePushFailure = (error: unknown): false | "retry-scheduled" => {
       params.onFail?.(error);
-      return isAmbiguousActivePushDeliveryError(error) ? "ambiguous-failure" : false;
+      if (isAmbiguousActivePushDeliveryError(error)) {
+        // The push MAY have reached the user; keep the delivery claim and
+        // retry only the unconfirmed chunks instead of dropping the answer.
+        scheduleFinalPushRetry(fallbackRetryRequest());
+        return "retry-scheduled";
+      }
+      return false;
     };
     // Re-check supersede after the await gap above (up to 5.5s): a new
     // inbound may have superseded this handle while we waited for the pending
@@ -1522,16 +1576,12 @@ export function createBotWsReplyHandle(params: {
           finishPendingFinalRetry(true);
           return "retry-scheduled";
         }
-        if (isAmbiguousActivePushDeliveryError(error)) {
-          finishPendingFinalRetry(false);
-          console.warn(
-            `[wecom-b2] stream-remainder-stop-ambiguous account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} error=${formatFallbackError(error)}`,
-          );
-          params.onFail?.(error);
-          return "ambiguous-failure";
-        }
+        // Ambiguous failures reschedule the SAME retryRequest as non-ambiguous
+        // ones: rebuilding the retry with a different text/marker/limit
+        // identity would reset the tracked chunk progress and re-push already
+        // confirmed chunks from zero.
         console.warn(
-          `[wecom-b2] stream-remainder-retry account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} error=${formatFallbackError(error)}`,
+          `[wecom-b2] stream-remainder-retry ambiguous=${String(isAmbiguousActivePushDeliveryError(error))} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} error=${formatFallbackError(error)}`,
         );
         scheduleFinalPushRetry(retryRequest);
         return "retry-scheduled";
@@ -1546,7 +1596,9 @@ export function createBotWsReplyHandle(params: {
     }
     const finalStreamId = streamId;
     settleStream();
-    if (!finalStreamId || isEvent || supersededByNewInbound) {
+    if (!finalStreamId || isEvent || supersededByNewInbound || streamUpdateUnreliable) {
+      // A dead stream would reject the empty close with a guaranteed 846608;
+      // settling locally is all the cleanup an expired window needs.
       return;
     }
     const pendingAckCleared = await waitForPendingReplyAckToClear({
@@ -1648,9 +1700,19 @@ export function createBotWsReplyHandle(params: {
     return visibleChunks.length <= 1 && visibleChunks[0] === visibleBodyText ? sourceLimit : "";
   };
 
+  const stopPreviewExpiredNoticeTimer = (): void => {
+    if (previewExpiredNoticeTimer) {
+      clearTimeout(previewExpiredNoticeTimer);
+      previewExpiredNoticeTimer = undefined;
+    }
+  };
+
   // One-time active push after the frozen preview channel dies (typically
   // errcode 846608 once the WeCom stream window closes at ~6 min). Without
-  // it the bubble goes silent forever while the task is still running.
+  // it the bubble goes silent forever while the task is still running. The
+  // push is held until the task has been processing for at least
+  // PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS: if the final lands earlier the
+  // notice is skipped entirely instead of promising a follow-up message.
   const maybeSendPreviewExpiredNotice = (allowUnfrozen = false): void => {
     if (
       previewExpiredNoticeSent ||
@@ -1662,6 +1724,22 @@ export function createBotWsReplyHandle(params: {
     ) {
       return;
     }
+    const taskElapsedMs = Date.now() - handleStartedAt;
+    if (taskElapsedMs < PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS) {
+      if (!previewExpiredNoticeTimer) {
+        const remainingMs = PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS - taskElapsedMs;
+        console.info(
+          `[wecom-preview] expired-notice-deferred delayMs=${remainingMs} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+        );
+        previewExpiredNoticeTimer = setTimeout(() => {
+          previewExpiredNoticeTimer = undefined;
+          maybeSendPreviewExpiredNotice(allowUnfrozen);
+        }, remainingMs);
+        previewExpiredNoticeTimer.unref?.();
+      }
+      return;
+    }
+    stopPreviewExpiredNoticeTimer();
     previewExpiredNoticeSent = true;
     void sendMarkdownChunksViaActivePush(PREVIEW_EXPIRED_NOTICE_TEXT, {
       reason: "preview-expired",
@@ -1675,6 +1753,20 @@ export function createBotWsReplyHandle(params: {
         console.warn(
           `[wecom-preview] expired-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
         );
+        // No trigger fires again on its own once the channel is dead, so a
+        // failed push must arm its own single delayed re-attempt.
+        if (previewExpiredNoticeRetried || streamSettled || supersededByNewInbound) {
+          return;
+        }
+        previewExpiredNoticeRetried = true;
+        previewExpiredNoticeSent = false;
+        if (!previewExpiredNoticeTimer) {
+          previewExpiredNoticeTimer = setTimeout(() => {
+            previewExpiredNoticeTimer = undefined;
+            maybeSendPreviewExpiredNotice(allowUnfrozen);
+          }, PREVIEW_EXPIRED_NOTICE_RETRY_MS);
+          previewExpiredNoticeTimer.unref?.();
+        }
       });
   };
 
@@ -1690,6 +1782,17 @@ export function createBotWsReplyHandle(params: {
     }
   };
 
+  // Reasoning-only previews render as a collapsed <think> block: the user has
+  // not seen any visible reply body yet. Treating them as "visible reply
+  // started" made supersede silently discard the run's real final answer.
+  // Body-carrying callers always pass a bodySourceText STRING — possibly ""
+  // when the markdown adapter transformed the body beyond source mapping — so
+  // presence (not truthiness) is the visibility signal; only the pure
+  // reasoning snapshot passes undefined.
+  const previewShowsVisibleBody = (
+    options?: { bodySourceText?: string; progressOnly?: boolean },
+  ): boolean => Boolean(options && (options.bodySourceText !== undefined || options.progressOnly));
+
   const recordDeliveredPreview = (
     previewText: string,
     now: number,
@@ -1699,7 +1802,9 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     stopPlaceholderKeepalive();
-    visibleReplyStarted = true;
+    if (previewShowsVisibleBody(options)) {
+      visibleReplyStarted = true;
+    }
     lastPreviewText = previewText;
     lastPreviewUpdateAt = now;
     recordDeliveredBodySource(options);
@@ -1768,7 +1873,9 @@ export function createBotWsReplyHandle(params: {
                 return;
               }
               if (streamSettled) {
-                visibleReplyStarted = true;
+                if (previewShowsVisibleBody(options)) {
+                  visibleReplyStarted = true;
+                }
                 recordDeliveredBodySource(options);
               } else {
                 recordDeliveredPreview(previewText, now, options);
@@ -1787,7 +1894,10 @@ export function createBotWsReplyHandle(params: {
         clearPendingPreview();
         stopPreviewFreezeTimeout();
         stopPreviewStatusInterval();
-        maybeSendPreviewExpiredNotice();
+        // allowUnfrozen: reasoning-only bubbles (and pre-freeze deaths) never
+        // freeze the preview, yet their tasks equally deserve the deferred
+        // background notice — the 9-minute gate itself filters short tasks.
+        maybeSendPreviewExpiredNotice(true);
         return false;
       }
       console.warn(
@@ -1805,7 +1915,9 @@ export function createBotWsReplyHandle(params: {
       return false;
     }
     if (streamSettled || streamUpdateUnreliable) {
-      visibleReplyStarted = true;
+      if (previewShowsVisibleBody(options)) {
+        visibleReplyStarted = true;
+      }
       recordDeliveredBodySource(options);
       return false;
     }
@@ -2345,7 +2457,10 @@ export function createBotWsReplyHandle(params: {
             reasoningOnly: reasoningOnlyFinal,
           });
         if (!isEvent) {
-          if (!finalText && reasoningOnlyFinal) {
+          // A superseded reasoning-only handle must stay silent: promoting
+          // the marker here would actively push a stray "（回复完毕）" bubble
+          // into the newer conversation.
+          if (!finalText && reasoningOnlyFinal && !supersededByNewInbound) {
             finalText = FINAL_COMPLETION_MARKER;
           }
         }
@@ -2414,7 +2529,17 @@ export function createBotWsReplyHandle(params: {
             });
           } catch (error) {
             if (isAmbiguousActivePushDeliveryError(error)) {
+              // A wholly invisible superseded final keeps its bounded retry;
+              // dropping it here would silently lose the old run's answer.
               params.onFail?.(error);
+              scheduleFinalPushRetry({
+                text: textToSend,
+                deliveryKey: currentFinalDeliveryKey,
+                peerDedup: currentFinalUsesPeerDedup,
+                appendCompletionMarker: finalAppendCompletionMarker,
+                alreadyMarkedDelivered: true,
+                preserveDeliveryClaim: true,
+              });
               return;
             }
             rollbackFinalDelivered(currentFinalDeliveryKey, {
@@ -2436,9 +2561,6 @@ export function createBotWsReplyHandle(params: {
             peerDedup: currentFinalUsesPeerDedup,
           });
           if (normalFinalResult === "retry-scheduled") {
-            return;
-          }
-          if (normalFinalResult === "ambiguous-failure") {
             return;
           }
           if (!normalFinalResult) {
@@ -2495,11 +2617,15 @@ export function createBotWsReplyHandle(params: {
       }
       const message = formatErrorMessage(error);
       const noVisibleOutput = isReplyNoVisibleOutputError(error, message);
-      const initConflict = isReplySessionInitializationConflict(error);
+      const initConflict = isRetryableReplySessionAdmissionError(error);
+      // Only append the notice to previews that carried visible body text,
+      // and rebuild the progress from the body-only source: lastPreviewText
+      // can embed the <think> block, whose wrapper the markdown sanitizer
+      // strips — promoting raw reasoning summaries to visible text.
       const failNoticeText = initConflict
         ? REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT
-        : noVisibleOutput && lastPreviewText
-          ? appendFailureNoticeToProgress(lastPreviewText, REPLY_FAIL_NOTICE_TEXT)
+        : noVisibleOutput && lastPreviewText && accumulatedText
+          ? appendFailureNoticeToProgress(accumulatedText, REPLY_FAIL_NOTICE_TEXT)
           : REPLY_FAIL_NOTICE_TEXT;
       const text = initConflict || noVisibleOutput
         ? failNoticeText
@@ -2590,6 +2716,7 @@ export function createBotWsReplyHandle(params: {
       stopPlaceholderKeepalive();
       stopPreviewFreezeTimeout();
       stopPreviewStatusInterval();
+      stopPreviewExpiredNoticeTimer();
       clearPendingPreview();
     },
     supersedeByNewInbound: (meta) => {
@@ -2613,6 +2740,7 @@ export function createBotWsReplyHandle(params: {
       stopPlaceholderKeepalive();
       stopPreviewFreezeTimeout();
       stopPreviewStatusInterval();
+      stopPreviewExpiredNoticeTimer();
       // Confirmed visible old replies must not revive. A wholly invisible
       // final keeps its bounded retry so the result is not lost permanently.
       if (suppressSupersededFinalPush) {

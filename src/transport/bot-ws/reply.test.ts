@@ -14,6 +14,12 @@ vi.mock("./media.js", () => ({
 type ReplyHandleParams = Parameters<typeof createBotWsReplyHandle>[0];
 const FINAL_COMPLETION_MARKER = "（回复完毕）";
 
+// This suite is fake-timer heavy: individual tests advance simulated hours
+// and flush hundreds of microtasks, so their WALL-CLOCK time under a fully
+// parallel cold-cache run can exceed the default 5s without anything being
+// hung. Scoped here so real hangs elsewhere still fail fast.
+vi.setConfig({ testTimeout: 30_000 });
+
 describe("createBotWsReplyHandle", () => {
   let mockClient: import("vitest").Mocked<WSClient>;
   const uploadAndSendBotWsMediaMock = vi.mocked(uploadAndSendBotWsMedia);
@@ -439,11 +445,17 @@ describe("createBotWsReplyHandle", () => {
     await vi.advanceTimersByTimeAsync(5_600);
     await flushPromises();
 
+    // The channel died early, but the background notice is held until the
+    // task has been processing for 9 minutes.
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(9 * 60_000);
+    await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
     expect(String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content)).toContain(
       "任务仍在后台处理",
     );
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
   });
 
@@ -1667,7 +1679,8 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver(payload, { kind: "final" });
 
     expect(uploadAndSendBotWsMediaMock).toHaveBeenCalledTimes(1);
-    expect(mockClient.sendMessage).toHaveBeenCalledTimes(4);
+    // 4 text delivery attempts plus the one-time exhaustion failure notice.
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(5);
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
   });
 
@@ -1704,7 +1717,8 @@ describe("createBotWsReplyHandle", () => {
 
     expect(uploadAndSendBotWsMediaMock).toHaveBeenCalledTimes(1);
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
-    expect(mockClient.sendMessage).toHaveBeenCalledTimes(4);
+    // 4 remainder delivery attempts plus the one-time exhaustion notice.
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(5);
   });
 
   it("does not claim a media final before configuration is resolved", async () => {
@@ -1938,12 +1952,119 @@ describe("createBotWsReplyHandle", () => {
     const pushedContents = mockClient.sendMessage.mock.calls.map((call) =>
       String((call[1] as any).markdown.content),
     );
-    // The dead preview channel triggers a one-time expired notice first.
-    expect(pushedContents[0]).toContain("进度预览暂时无法继续刷新");
+    // The final landed well before the 9-minute mark, so the deferred
+    // background notice must be skipped instead of promising a follow-up.
+    expect(
+      pushedContents.some((content) => content.includes("进度预览暂时无法继续刷新")),
+    ).toBe(false);
     const finalPush = pushedContents.find((content) => content.includes("压测结果完成"));
     expect(finalPush).toBeDefined();
     expect(finalPush).toContain("继续输出：");
     expect(finalPush).toContain(FINAL_COMPLETION_MARKER);
+
+    // And it stays suppressed after the 9-minute mark: the final settled the
+    // stream, so the deferred timer must never fire.
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await flushPromises();
+    expect(
+      mockClient.sendMessage.mock.calls.some((call) =>
+        String((call[1] as any).markdown.content).includes("进度预览暂时无法继续刷新"),
+      ),
+    ).toBe(false);
+  });
+
+  it("pushes the deferred background notice when the task is still running at nine minutes", async () => {
+    const expiredError = {
+      headers: { req_id: "req-nine-minute-notice" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValue(expiredError);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-nine-minute-notice" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "长任务预览", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(300_000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+
+    // Channel already dead at ~5m15s, but no notice before the 9-minute mark.
+    expect(
+      mockClient.sendMessage.mock.calls.some((call) =>
+        String((call[1] as any).markdown.content).includes("进度预览暂时无法继续刷新"),
+      ),
+    ).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    await flushPromises();
+    const noticePushes = mockClient.sendMessage.mock.calls.filter((call) =>
+      String((call[1] as any).markdown.content).includes("进度预览暂时无法继续刷新"),
+    );
+    expect(noticePushes).toHaveLength(1);
+
+    // Still exactly one notice afterwards.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await flushPromises();
+    expect(
+      mockClient.sendMessage.mock.calls.filter((call) =>
+        String((call[1] as any).markdown.content).includes("进度预览暂时无法继续刷新"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("drops the deferred background notice when a new message supersedes the task", async () => {
+    const expiredError = {
+      headers: { req_id: "req-nine-minute-superseded" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValue(expiredError);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-nine-minute-superseded" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "长任务预览", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(300_000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await vi.advanceTimersByTimeAsync(9 * 60_000);
+    await flushPromises();
+
+    expect(
+      mockClient.sendMessage.mock.calls.some((call) =>
+        String((call[1] as any).markdown.content).includes("进度预览暂时无法继续刷新"),
+      ),
+    ).toBe(false);
   });
 
   it("pushes only the continuation when a frozen preview stream has expired", async () => {
@@ -2468,8 +2589,11 @@ describe("createBotWsReplyHandle", () => {
     ["ambiguous failure", new Error("socket closed after active push send")],
     ["SDK cancellation", new Error("Reply aibot_send_msg active push cancelled")],
   ])(
-    "does not retry an active-push %s with an ambiguous delivery outcome",
+    "retries an active-push %s while keeping the delivery claim",
     async (_label, pushError) => {
+      // The push MAY have reached the user, but permanently dropping the
+      // answer proved worse in production than a bounded, progress-tracked
+      // re-push of the unconfirmed chunks.
       const expiredError = {
         headers: { req_id: "req-active-push-ack-timeout" },
         errcode: 846608,
@@ -2504,14 +2628,18 @@ describe("createBotWsReplyHandle", () => {
       expect(sendMarkdown).toHaveBeenCalledTimes(1);
       expect(mockClient.sendMessage).not.toHaveBeenCalled();
       expect(onDeliver).not.toHaveBeenCalled();
+      expect(onFail).toHaveBeenCalledWith(pushError);
 
-      await vi.advanceTimersByTimeAsync(80_000);
+      await vi.advanceTimersByTimeAsync(20_000);
       await flushPromises();
 
-      expect(sendMarkdown).toHaveBeenCalledTimes(1);
-      expect(mockClient.sendMessage).not.toHaveBeenCalled();
-      expect(onDeliver).not.toHaveBeenCalled();
-      expect(onFail).toHaveBeenCalledWith(pushError);
+      expect(sendMarkdown).toHaveBeenCalledTimes(2);
+      expect(onDeliver).toHaveBeenCalledTimes(1);
+
+      // No further pushes once the retry landed.
+      await vi.advanceTimersByTimeAsync(400_000);
+      await flushPromises();
+      expect(sendMarkdown).toHaveBeenCalledTimes(2);
     },
   );
 
@@ -2552,11 +2680,12 @@ describe("createBotWsReplyHandle", () => {
 
     await vi.advanceTimersByTimeAsync(80_000);
     await flushPromises();
-    expect(mockClient.sendMessage).toHaveBeenCalledTimes(4);
+    // 4 delivery attempts plus the one-time exhaustion failure notice.
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(5);
 
     await vi.advanceTimersByTimeAsync(400_000);
     await flushPromises();
-    expect(mockClient.sendMessage).toHaveBeenCalledTimes(4);
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(5);
     expect(onDeliver).not.toHaveBeenCalled();
     expect(onFail).toHaveBeenCalledTimes(2);
   });
@@ -3256,7 +3385,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledWith(
       expect.anything(),
       expect.any(String),
-      "之前任务还在处理中，新指令冲突啦，请等几分钟后再试试",
+      "上一轮任务还在处理中或会话状态刚发生变化，这条消息未能处理，请稍后重新发送。",
       true,
     );
     const delivered = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
@@ -3295,7 +3424,7 @@ describe("createBotWsReplyHandle", () => {
     const pushed = mockClient.sendMessage.mock.calls.map((call) =>
       String((call[1] as any).markdown.content),
     );
-    expect(pushed).toContain("之前任务还在处理中，新指令冲突啦，请等几分钟后再试试");
+    expect(pushed).toContain("上一轮任务还在处理中或会话状态刚发生变化，这条消息未能处理，请稍后重新发送。");
     expect(pushed.join("\n")).not.toContain("agent:main:wecom");
   });
 
@@ -3470,6 +3599,422 @@ describe("createBotWsReplyHandle", () => {
       msgtype: "markdown",
       markdown: { content: "A 的最终答案" },
     });
+  });
+
+  it("retries an ambiguous final push failure instead of silently losing the answer", async () => {
+    const ackTimeout = new Error("Reply ack timeout (5000ms) for reqId: req-ambiguous-final");
+    const expiredError = {
+      headers: { req_id: "req-ambiguous-final" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    // placeholder ok; preview dies terminally; final skips the stream and the
+    // first active push fails ambiguously; the retry push then succeeds.
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    mockClient.sendMessage.mockRejectedValueOnce(ackTimeout);
+    mockClient.sendMessage.mockResolvedValue({} as any);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-ambiguous-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "预览片段", isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: "完整答案正文", isReasoning: false }, { kind: "final" });
+    await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drainChunkTimers();
+
+    // The ambiguous first attempt is also recorded on the mock; the retry
+    // must produce a SECOND push that succeeds.
+    const attempts = mockClient.sendMessage.mock.calls.filter((call) =>
+      String((call[1] as any).markdown.content).includes("完整答案正文"),
+    );
+    expect(attempts.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("resends only unconfirmed chunks when the stream remainder push fails ambiguously", async () => {
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const ackTimeout = new Error("Reply ack timeout (5000ms) for reqId: req-remainder-ambiguous");
+    // First chunk streams fine; the remainder active push fails ambiguously
+    // once and then succeeds on the scheduled retry.
+    mockClient.sendMessage.mockRejectedValueOnce(ackTimeout);
+    mockClient.sendMessage.mockResolvedValue({} as any);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-remainder-ambiguous" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const finalText = `HEAD-MARK${"正文内容。".repeat(500)}TAIL-MARK`;
+    const delivery = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(800);
+    await delivery;
+    await flushPromises();
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(String(mockClient.replyStream.mock.calls[0]?.[2])).toContain("HEAD-MARK");
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drainChunkTimers();
+
+    const pushedBodies = mockClient.sendMessage.mock.calls.map((call) =>
+      String((call[1] as any).markdown.content),
+    );
+    // The stream-confirmed first chunk must never be re-pushed (a progress
+    // identity drift would restart from chunk 0); the unconfirmed remainder
+    // must be attempted twice: the ambiguous failure plus the retry.
+    expect(pushedBodies.some((body) => body.includes("HEAD-MARK"))).toBe(false);
+    expect(pushedBodies.filter((body) => body.includes("TAIL-MARK")).length).toBeGreaterThanOrEqual(
+      2,
+    );
+  });
+
+  it("does not revive a partially visible superseded final through an ambiguous retry", async () => {
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const ackTimeout = new Error("Reply ack timeout (5000ms) for reqId: req-superseded-partial");
+    // Superseded-final push: chunk 1 confirms, chunk 2 fails ambiguously.
+    mockClient.sendMessage.mockResolvedValueOnce({} as any);
+    mockClient.sendMessage.mockRejectedValueOnce(ackTimeout);
+    mockClient.sendMessage.mockResolvedValue({} as any);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-superseded-partial" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "推理摘要", isReasoning: true }, { kind: "block" });
+    await flushPromises();
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+
+    const finalText = `${"旧任务正文。".repeat(700)}TAIL-MARK-OLD`;
+    const delivery = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+    await delivery;
+    const tailAttemptsBefore = mockClient.sendMessage.mock.calls.filter((call) =>
+      String((call[1] as any).markdown.content).includes("TAIL-MARK-OLD"),
+    ).length;
+
+    // The user has already seen chunk 1 of the old answer; a later retry must
+    // not push the stale remainder into the newest conversation.
+    await vi.advanceTimersByTimeAsync(140_000);
+    await drainChunkTimers();
+    const tailAttemptsAfter = mockClient.sendMessage.mock.calls.filter((call) =>
+      String((call[1] as any).markdown.content).includes("TAIL-MARK-OLD"),
+    ).length;
+    expect(tailAttemptsAfter).toBe(tailAttemptsBefore);
+  });
+
+  it("pushes one failure notice after the final retry chain is exhausted", async () => {
+    const pushError = Object.assign(new Error("push rejected"), { errcode: 95001 });
+    const expiredError = {
+      headers: { req_id: "req-retry-exhausted-notice" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockResolvedValueOnce({} as any);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    mockClient.sendMessage.mockRejectedValue(pushError);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-retry-exhausted-notice" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "预览片段", isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: "重要答案", isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+    // Exhaust the 20/40/80s retry chain.
+    for (let i = 0; i < 4; i += 1) {
+      await vi.advanceTimersByTimeAsync(80_000);
+      await flushPromises();
+    }
+
+    mockClient.sendMessage.mockResolvedValue({} as any);
+    const noticeAttempts = mockClient.sendMessage.mock.calls.filter((call) =>
+      String((call[1] as any).markdown.content).includes("本次回复投递中断"),
+    );
+    expect(noticeAttempts).toHaveLength(1);
+  });
+
+  it("keeps an undelivered final retry alive across a new activation on the same peer", async () => {
+    const pushError = Object.assign(new Error("push rejected"), { errcode: 95001 });
+    const expiredError = {
+      headers: { req_id: "req-survive-activation" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.sendMessage.mockRejectedValueOnce(pushError);
+    mockClient.sendMessage.mockResolvedValue({} as any);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-survive-activation" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    // Preview delivered and VISIBLE, but no final chunk ever reached the user:
+    // the visible-preview flag alone must no longer let a new activation
+    // destroy the pending final retry.
+    await handle.deliver({ text: "预览片段", isReasoning: false }, { kind: "block" });
+    await flushPromises();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    await handle.deliver({ text: "迟到的完整答案", isReasoning: false }, { kind: "final" });
+    await flushPromises();
+
+    // A new message activates a fresh handle for the same peer.
+    createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-survive-activation-next" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    }).activate?.();
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drainChunkTimers();
+
+    // First attempt failed (still recorded on the mock); the surviving retry
+    // must produce a SECOND, successful push of the same final.
+    const attempts = mockClient.sendMessage.mock.calls.filter((call) =>
+      String((call[1] as any).markdown.content).includes("迟到的完整答案"),
+    );
+    expect(attempts.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("stays silent when a superseded reasoning-only handle receives an empty final", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-superseded-reasoning-empty-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "推理摘要", isReasoning: true }, { kind: "block" });
+    await flushPromises();
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+
+    await handle.deliver({ text: "", isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+
+    // No stray "（回复完毕）" bubble may be pushed into the newer conversation.
+    expect(
+      mockClient.sendMessage.mock.calls.some((call) =>
+        String((call[1] as any).markdown.content).includes(FINAL_COMPLETION_MARKER),
+      ),
+    ).toBe(false);
+  });
+
+  it("pushes the superseded final after reasoning previews even on an unreliable stream", async () => {
+    const expiredError = {
+      headers: { req_id: "req-unreliable-reasoning-superseded" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    // Reasoning preview send dies terminally, latching streamUpdateUnreliable
+    // through the settled/unreliable guard path.
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    mockClient.replyStream.mockResolvedValue({} as any);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-unreliable-reasoning-superseded" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "推理摘要", isReasoning: true }, { kind: "block" });
+    await flushPromises();
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+
+    await handle.deliver({ text: "真实结论正文", isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+
+    expect(
+      mockClient.sendMessage.mock.calls.some((call) =>
+        String((call[1] as any).markdown.content).includes("真实结论正文"),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps visible body context without reasoning in the no-visible-output failure bubble", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-mixed-preview-fail" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+    });
+    await flushPromises();
+
+    await handle.deliver({ text: "Analyzing rollout plan", isReasoning: true }, { kind: "block" });
+    await flushPromises();
+    await handle.deliver({ text: "已完成前置检查。", isReasoning: false }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(3_100);
+    await flushPromises();
+
+    const noVisibleOutput = new Error(
+      "WeCom Bot WS reply produced no visible output for agent:main:wecom:direct:alice.",
+    );
+    noVisibleOutput.name = "WeComReplyNoVisibleOutputError";
+    const failResult = handle.fail?.(noVisibleOutput);
+    await vi.advanceTimersByTimeAsync(6_000);
+    await failResult;
+
+    const finalCall = mockClient.replyStream.mock.calls.at(-1);
+    expect(finalCall?.[3]).toBe(true);
+    const bubble = String(finalCall?.[2]);
+    expect(bubble).toContain("已完成前置检查。");
+    expect(bubble).toContain("本次回复投递中断");
+    expect(bubble).not.toContain("Analyzing rollout plan");
+  });
+
+  it("sends only the failure notice when a no-visible-output reply had shown reasoning previews", async () => {
+    // Production regression: the fail path used to append the notice to the
+    // reasoning preview, and the markdown sanitizer stripped the <think> tags,
+    // promoting raw English reasoning summaries to visible bubble text.
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-reasoning-fail-notice" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+    });
+    await flushPromises();
+
+    await handle.deliver(
+      { text: "Testing session creation with labeled keys", isReasoning: true },
+      { kind: "block" },
+    );
+    await flushPromises();
+    await handle.deliver(
+      { text: "Implementing yield for pending completion", isReasoning: true },
+      { kind: "block" },
+    );
+    await flushPromises();
+
+    const noVisibleOutput = new Error(
+      "WeCom Bot WS reply produced no visible output for agent:main:wecom:direct:alice.",
+    );
+    noVisibleOutput.name = "WeComReplyNoVisibleOutputError";
+    const failResult = handle.fail?.(noVisibleOutput);
+    await vi.advanceTimersByTimeAsync(6_000);
+    await failResult;
+
+    const finalCall = mockClient.replyStream.mock.calls.at(-1);
+    expect(finalCall?.[3]).toBe(true);
+    expect(finalCall?.[2]).toBe("⚠️ 本次回复投递中断，请稍后重试或重新发起提问。");
+    expect(String(finalCall?.[2])).not.toContain("Testing session creation");
+  });
+
+  it("pushes the superseded final after only reasoning previews were shown", async () => {
+    // A bubble that only ever showed collapsed thinking has no visible reply;
+    // superseding it must not silently discard the run's real answer.
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-reasoning-superseded-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+    });
+    await flushPromises();
+
+    await handle.deliver({ text: "分析用户排班问题", isReasoning: true }, { kind: "block" });
+    await flushPromises();
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    await flushPromises();
+
+    await handle.deliver({ text: "排班结果：晓艳周三补班。", isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+
+    expect(mockClient.sendMessage).toHaveBeenCalledWith(
+      "alice",
+      expect.objectContaining({
+        msgtype: "markdown",
+        markdown: expect.objectContaining({
+          content: expect.stringContaining("排班结果：晓艳周三补班。"),
+        }),
+      }),
+    );
   });
 
   it("does not queue a supersede notice onto an old stream while its ack is pending", async () => {

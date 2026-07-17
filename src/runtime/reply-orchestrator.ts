@@ -1,16 +1,30 @@
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
+import { resolveActiveEmbeddedRunSessionId } from "openclaw/plugin-sdk/agent-harness";
 import { hasVisibleReplyBody } from "../shared/reply-visibility.js";
 import type { ReplyHandle, ReplyPayload } from "../types/index.js";
 import type { PreparedSession } from "./session-manager.js";
 
 type DispatchReply = PluginRuntime["channel"]["reply"]["dispatchReplyWithBufferedBlockDispatcher"];
 type ReplyOptions = NonNullable<Parameters<DispatchReply>[0]["replyOptions"]>;
-type BotWsReplyOptions = ReplyOptions & { reasoningPreviewEnabled?: boolean };
+
+const BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT =
+  "⏳ 上一轮任务仍在进行，本条消息已并入当前任务，完成后一并回复；若长时间未收到回复，请重新发送。";
 
 export class WeComReplyNoVisibleOutputError extends Error {
   constructor(sessionKey?: string) {
     super(`WeCom Bot WS reply produced no visible output${sessionKey ? ` for ${sessionKey}` : ""}.`);
     this.name = "WeComReplyNoVisibleOutputError";
+  }
+}
+
+function resolveAbsorbingRunSessionId(sessionKey: string): string | undefined {
+  if (!sessionKey) {
+    return undefined;
+  }
+  try {
+    return resolveActiveEmbeddedRunSessionId(sessionKey) ?? undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -39,6 +53,7 @@ export async function dispatchRuntimeReply(params: {
   let visibleBodySeen = false;
   let finalDelivered = false;
   let observedReplyDelivery = false;
+  let runActivityObserved = false;
   let fastOffPending = false;
   let fastAutoOnText = "";
   let blockDeliveryError: unknown;
@@ -77,16 +92,16 @@ export async function dispatchRuntimeReply(params: {
     throw error;
   };
 
-  const botWsReplyOptions: BotWsReplyOptions | undefined = isBotWsReply
+  const botWsReplyOptions: ReplyOptions | undefined = isBotWsReply
     ? {
         disableBlockStreaming: false,
-        reasoningPreviewEnabled: true,
         allowProgressCallbacksWhenSourceDeliverySuppressed: true,
         abortSignal,
         onObservedReplyDelivery: () => {
           observedReplyDelivery = true;
         },
         onReasoningStream: async (payload) => {
+          runActivityObserved = true;
           await dispatchReplyPayload({
             replyHandle,
             payload: { text: payload.text ?? "", isReasoning: true },
@@ -94,6 +109,7 @@ export async function dispatchRuntimeReply(params: {
           });
         },
         onReasoningEnd: async () => {
+          runActivityObserved = true;
           await dispatchReplyPayload({
             replyHandle,
             payload: { text: "", isReasoning: true, channelData: { reasoningEnd: true } },
@@ -101,6 +117,7 @@ export async function dispatchRuntimeReply(params: {
           });
         },
         onToolResult: async (payload) => {
+          runActivityObserved = true;
           if (isFastProgress(payload)) {
             await deliverFastProgress(payload);
           }
@@ -120,6 +137,7 @@ export async function dispatchRuntimeReply(params: {
           : undefined,
       dispatcherOptions: {
         deliver: async (payload, info) => {
+          runActivityObserved = true;
           if (isBotWsReply && isFastProgress(payload)) {
             return;
           }
@@ -223,6 +241,44 @@ export async function dispatchRuntimeReply(params: {
     !sourceDeliverySuppressed &&
     !observedDelivery
   ) {
+    if (abortSignal?.aborted) {
+      // A superseded dispatch must not emit synthetic finals: a deferred
+      // close would push a stray "（回复完毕）" bubble, and the absorbed-run
+      // lookup could bind the successor's own freshly started run.
+      return;
+    }
+    if (runActivityObserved) {
+      // The turn ran (reasoning/tool/progress reached this dispatch) but
+      // deferred its visible reply — e.g. it yielded to a pending
+      // continuation whose answer arrives through a later run. Failing here
+      // would replace that answer with an error notice.
+      console.info(`[wecom-b3] dispatch-deferred-no-visible-reply sessionKey=${sessionKey}`);
+      await closeReply();
+      return;
+    }
+    const absorbingRunSessionId = resolveAbsorbingRunSessionId(sessionKey);
+    if (absorbingRunSessionId) {
+      // Nothing reached this dispatch and the session still has an active
+      // run: OpenClaw steered/queued the inbound into that run. Tell the
+      // user instead of reporting a delivery failure for a message that is
+      // actually being processed.
+      console.info(
+        `[wecom-b3] dispatch-absorbed-by-active-run sessionKey=${sessionKey} sessionId=${absorbingRunSessionId}`,
+      );
+      try {
+        await replyHandle.deliver(
+          { text: BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT },
+          { kind: "final" },
+        );
+      } catch (noticeError) {
+        // The notice is the only feedback for an absorbed message; fall back
+        // to the fail path so its own delivery fallbacks can still reach the
+        // user rather than leaving the placeholder hanging.
+        return failAndThrow(noticeError);
+      }
+      finalDelivered = true;
+      return;
+    }
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
   }
   await closeReply();

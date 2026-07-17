@@ -1,7 +1,19 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const agentHarnessState = vi.hoisted(() => ({
+  resolveActiveEmbeddedRunSessionId: vi.fn(),
+}));
+
+vi.mock("openclaw/plugin-sdk/agent-harness", () => agentHarnessState);
+
 import { dispatchRuntimeReply } from "./reply-orchestrator.js";
 
 describe("dispatchRuntimeReply", () => {
+  beforeEach(() => {
+    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReset();
+    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue(undefined);
+  });
+
   it("enables block streaming for bot-ws replies", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi
       .fn()
@@ -32,7 +44,6 @@ describe("dispatchRuntimeReply", () => {
       expect.objectContaining({
         replyOptions: expect.objectContaining({
           disableBlockStreaming: false,
-          reasoningPreviewEnabled: true,
           allowProgressCallbacksWhenSourceDeliverySuppressed: true,
           onReasoningStream: expect.any(Function),
           onReasoningEnd: expect.any(Function),
@@ -73,7 +84,7 @@ describe("dispatchRuntimeReply", () => {
       } as any,
     });
 
-    expect(capturedReplyOptions.reasoningPreviewEnabled).toBe(true);
+    expect(typeof capturedReplyOptions.onReasoningStream).toBe("function");
     expect(deliver).toHaveBeenCalledWith(
       { text: "推理过程", isReasoning: true },
       { kind: "block" },
@@ -144,7 +155,10 @@ describe("dispatchRuntimeReply", () => {
     }
   });
 
-  it("rejects reasoning-only bot-ws runs without a visible final", async () => {
+  it("closes a reasoning-only bot-ws run without failing when the visible reply is deferred", async () => {
+    // OpenClaw resolves {noVisibleReplyFallbackEligible} for turns that ran but
+    // deferred their visible reply (e.g. yielded to a pending continuation).
+    // Failing here would replace the later answer with an error notice.
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
       await params.replyOptions.onReasoningStream({ text: "仍在分析" });
       return {
@@ -153,6 +167,8 @@ describe("dispatchRuntimeReply", () => {
         noVisibleReplyFallbackEligible: true,
       };
     });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
 
     await expect(
       dispatchRuntimeReply({
@@ -165,10 +181,153 @@ describe("dispatchRuntimeReply", () => {
             accountId: "default",
             raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
           },
-          deliver: vi.fn().mockResolvedValue(undefined),
+          deliver,
+          fail,
         } as any,
       }),
-    ).rejects.toThrow("no visible output");
+    ).resolves.toBeUndefined();
+
+    expect(fail).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenLastCalledWith({ text: "" }, { kind: "final" });
+  });
+
+  it("prefers the deferred close over the absorbed notice when both apply", async () => {
+    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onReasoningStream({ text: "分析中" });
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        noVisibleReplyFallbackEligible: true,
+      };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-priority" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    expect(deliver).toHaveBeenLastCalledWith({ text: "" }, { kind: "final" });
+    expect(
+      deliver.mock.calls.some((call) => String(call[0]?.text ?? "").includes("并入")),
+    ).toBe(false);
+  });
+
+  it("stays silent on the flag-empty result of a superseded dispatch", async () => {
+    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-of-successor");
+    const abortController = new AbortController();
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onReasoningStream({ text: "被接管前的推理" });
+      abortController.abort(new Error("superseded by a newer inbound message"));
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        noVisibleReplyFallbackEligible: true,
+      };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-superseded-flag-empty" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+        fail,
+      } as any,
+      abortSignal: abortController.signal,
+    });
+
+    expect(fail).not.toHaveBeenCalled();
+    // Only the reasoning block delivery — no synthetic final, no notice.
+    expect(deliver.mock.calls.every((call) => call[0]?.isReasoning === true)).toBe(true);
+  });
+
+  it("falls back to the fail path when the absorbed notice cannot be delivered", async () => {
+    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
+      queuedFinal: false,
+      counts: { block: 0, final: 0, tool: 0 },
+      noVisibleReplyFallbackEligible: true,
+    });
+    const deliverError = new Error("notice delivery failed");
+    const deliver = vi.fn().mockRejectedValue(deliverError);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-absorbed-notice-fails" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).rejects.toBe(deliverError);
+
+    expect(fail).toHaveBeenCalledWith(deliverError);
+  });
+
+  it("notifies that the inbound was absorbed when an active run holds the session", async () => {
+    // A busy session steers/queues the new message into the active run and the
+    // dispatch resolves with nothing delivered — indistinguishable from an
+    // empty turn except that the absorbing run is still registered.
+    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
+      queuedFinal: false,
+      counts: { block: 0, final: 0, tool: 0 },
+      noVisibleReplyFallbackEligible: true,
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-absorbed" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(fail).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    const [payload, info] = deliver.mock.calls[0] ?? [];
+    expect(info).toEqual({ kind: "final" });
+    expect(String(payload?.text)).toContain("并入");
+    expect(agentHarnessState.resolveActiveEmbeddedRunSessionId).toHaveBeenCalledWith(
+      "session-absorbed",
+    );
   });
 
   it("keeps Fast progress but rejects auto-off without a later body", async () => {

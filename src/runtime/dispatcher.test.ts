@@ -542,7 +542,11 @@ describe("dispatchInboundEvent", () => {
     );
     let dispatchCount = 0;
 
-    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-a");
+    // No lingering run exists before the first dispatch; "run-a" only becomes
+    // resolvable once the first core dispatch is running.
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockImplementation(() =>
+      dispatchCount >= 1 ? "run-a" : undefined,
+    );
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockImplementation(async () => {
       await drain;
       return { aborted: true, drained: true, forceCleared: false };
@@ -758,6 +762,229 @@ describe("dispatchInboundEvent", () => {
       releaseFirstCore?.();
       await Promise.resolve();
       vi.useRealTimers();
+    }
+  });
+
+  it("keeps the successor behind the barrier while a superseded pre-dispatch drain is in flight", async () => {
+    let releaseDrain!: () => void;
+    const drainGate = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    let drainCalls = 0;
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-lingering");
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockImplementation(async () => {
+      drainCalls += 1;
+      if (drainCalls === 1) {
+        await drainGate;
+      }
+      return { aborted: true, drained: true, forceCleared: false };
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.dispatcherOptions.deliver({ text: "后继消息完成" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const common = {
+      core: core as any,
+      cfg: {} as any,
+      store: makeStore() as any,
+      auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+    };
+
+    try {
+      const first = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-barrier-drain-a", "A"),
+        replyHandle: makeReplyHandle(),
+      });
+      // First message is parked inside its pre-dispatch drain.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(drainCalls).toBe(1);
+      expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+
+      const second = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-barrier-drain-b", "B"),
+        replyHandle: makeReplyHandle(),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      // The successor must not reach core while the superseded message's
+      // drain is still in flight — its abort could land on the new run.
+      expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+
+      releaseDrain();
+      await Promise.allSettled([first, second]);
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseDrain();
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+    }
+  });
+
+  it("does not drain or retry a superseded dispatch that fails with an admission error", async () => {
+    // Regression: the detached handoff-retry continuation of a superseded
+    // dispatch must not abort the session again — by then the sessionKey can
+    // already belong to the successor's freshly started run.
+    let rejectFirst!: (error: Error) => void;
+    const admissionError = new Error(
+      'Session "agent:ops_bot:wecom:acct:dm:alice" changed while starting work. Retry.',
+    );
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      )
+      .mockImplementationOnce(async (params) => {
+        await params.dispatcherOptions.deliver({ text: "后续消息完成" }, { kind: "final" });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      });
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-live");
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
+      aborted: true,
+      drained: true,
+      forceCleared: false,
+    });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const common = {
+      core: core as any,
+      cfg: {} as any,
+      store: makeStore() as any,
+      auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+    };
+
+    try {
+      const firstFail = vi.fn().mockResolvedValue(undefined);
+      const first = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-orphan-a", "long task"),
+        replyHandle: makeReplyHandle(vi.fn(), { fail: firstFail }),
+      });
+      await vi.waitFor(() =>
+        expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1),
+      );
+
+      await dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-orphan-b", "newer message"),
+        replyHandle: makeReplyHandle(),
+      });
+      await first;
+      const drainCallsBeforeOrphan =
+        openClawHandoffState.abortAndDrainAgentHarnessRun.mock.calls.length;
+
+      rejectFirst(admissionError);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalledTimes(
+        drainCallsBeforeOrphan,
+      );
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+      expect(firstFail).not.toHaveBeenCalled();
+    } finally {
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+    }
+  });
+
+  it("does not force clear a lingering run that refuses a graceful abort", async () => {
+    // OpenClaw ≥2026.7.1 freezes abort during a run's delivery phase, so a
+    // refused graceful abort usually means a HEALTHY dispatch is finishing.
+    // Force-clearing it would stamp the run "run_failed" and surface the
+    // generic core failure text in the chat.
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-finishing");
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
+      aborted: false,
+      drained: false,
+      forceCleared: false,
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementation(async (params) => {
+        await params.dispatcherOptions.deliver({ text: "正常回复" }, { kind: "final" });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+
+    try {
+      await dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: makeStore() as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-no-force-clear", "新消息"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver }),
+      });
+
+      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalledTimes(1);
+      const drainParams = openClawHandoffState.abortAndDrainAgentHarnessRun.mock.calls[0]?.[0];
+      expect(drainParams?.forceClear).not.toBe(true);
+      expect(deliver).toHaveBeenCalledWith({ text: "正常回复" }, { kind: "final" });
+    } finally {
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+    }
+  });
+
+  it("notifies instead of failing when the new message is absorbed by an active run", async () => {
+    // End-to-end production scenario: the lingering run refuses the abort,
+    // OpenClaw steers the new message into it, and the dispatch resolves with
+    // nothing delivered plus noVisibleReplyFallbackEligible.
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
+      aborted: false,
+      drained: false,
+      forceCleared: false,
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
+      queuedFinal: false,
+      counts: { block: 0, final: 0, tool: 0 },
+      noVisibleReplyFallbackEligible: true,
+    });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+
+    try {
+      await dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: makeStore() as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-absorbed", "目前徕事找晓艳了吗？"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver, fail }),
+      });
+
+      expect(fail).not.toHaveBeenCalled();
+      expect(deliver).toHaveBeenCalledTimes(1);
+      const [payload, info] = deliver.mock.calls[0] ?? [];
+      expect(info).toEqual({ kind: "final" });
+      expect(String(payload?.text)).toContain("并入");
+    } finally {
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
     }
   });
 

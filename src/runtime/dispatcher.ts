@@ -11,7 +11,7 @@ import type { WecomAuditLog } from "../observability/audit-log.js";
 import { buildRawEnvelopeSummary } from "../observability/raw-envelope-log.js";
 import type { ReplyHandle, UnifiedInboundEvent } from "../types/index.js";
 import type { WecomMediaService } from "../shared/media-service.js";
-import { isReplySessionInitializationConflict } from "../shared/reply-errors.js";
+import { isRetryableReplySessionAdmissionError } from "../shared/reply-errors.js";
 import {
   getActiveBotWsReplyHandle,
   registerActiveBotWsReplyHandle,
@@ -22,6 +22,7 @@ const PREPARE_INBOUND_SESSION_TIMEOUT_MS = 60_000;
 const SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS = 500;
 const SUPERSEDED_RUN_DRAIN_TIMEOUT_MS = 5_000;
 const SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS = 5_000;
+const PRE_DISPATCH_RUN_DRAIN_SETTLE_MS = 1_000;
 
 function createPrepareTimeoutError(timeoutMs: number): Error {
   const error = new Error(`WeCom inbound session prepare timed out after ${timeoutMs}ms`);
@@ -65,12 +66,16 @@ function waitForRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function awaitSupersedeDrain(promise: Promise<void>, signal: AbortSignal): Promise<void> {
+function awaitDrainWithTimeout(
+  promise: Promise<void>,
+  signal: AbortSignal,
+  label: string,
+): Promise<void> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<void>((resolve) => {
     timeout = setTimeout(() => {
       console.warn(
-        `[wecom-b3] superseded-run-drain-wait-timeout timeoutMs=${SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS}`,
+        `[wecom-b3] ${label}-wait-timeout timeoutMs=${SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS}`,
       );
       resolve();
     }, SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS);
@@ -119,6 +124,55 @@ async function drainSupersededOpenClawRun(params: {
   }
 }
 
+// OpenClaw ≥2026.7.1 steers a new dispatch into any still-active run for the
+// same session and resolves it with nothing delivered. This guard runs right
+// before our own core dispatch: it gracefully aborts a lingering run and
+// grants a short settle so the new message can own the session. It must NOT
+// escalate to forceClear: 2026.7.1 freezes abort for the whole post-turn
+// delivery phase, so a refused abort usually means a HEALTHY dispatch is
+// finishing — forceClear would stamp it "run_failed" (surfacing the generic
+// core failure text in the chat) and, being identity-less, could even kill a
+// newer run that reuses the sessionId. If the run outlives the settle window,
+// the absorbed-inbound handling in the reply orchestrator covers the UX.
+async function drainLingeringOpenClawRunBeforeDispatch(params: {
+  sessionKey?: string;
+}): Promise<void> {
+  const sessionKey = params.sessionKey?.trim();
+  if (!sessionKey) {
+    return;
+  }
+  let activeSessionId: string | undefined;
+  try {
+    activeSessionId = resolveActiveEmbeddedRunSessionId(sessionKey) ?? undefined;
+  } catch (error) {
+    console.warn(
+      `[wecom-b3] pre-dispatch-run-lookup-failed sessionKey=${sessionKey} error=${String(error)}`,
+    );
+    return;
+  }
+  if (!activeSessionId) {
+    return;
+  }
+  console.info(
+    `[wecom-b3] pre-dispatch-run-drain sessionKey=${sessionKey} sessionId=${activeSessionId}`,
+  );
+  try {
+    const graceful = await abortAndDrainAgentHarnessRun({
+      sessionId: activeSessionId,
+      sessionKey,
+      settleMs: PRE_DISPATCH_RUN_DRAIN_SETTLE_MS,
+      reason: "wecom-new-inbound",
+    });
+    console.info(
+      `[wecom-b3] pre-dispatch-run-drain-result sessionKey=${sessionKey} sessionId=${activeSessionId} aborted=${String(graceful.aborted)} drained=${String(graceful.drained)}`,
+    );
+  } catch (error) {
+    console.warn(
+      `[wecom-b3] pre-dispatch-run-drain-failed sessionKey=${sessionKey} sessionId=${activeSessionId} error=${String(error)}`,
+    );
+  }
+}
+
 function resolvePreparedSessionId(ctx: unknown): string | undefined {
   if (!ctx || typeof ctx !== "object") {
     return undefined;
@@ -141,7 +195,7 @@ async function dispatchRuntimeReplyWithHandoffRetry(params: {
     ? {
         ...replyHandle,
         fail: async (error) => {
-          if (isReplySessionInitializationConflict(error)) return;
+          if (isRetryableReplySessionAdmissionError(error)) return;
           await replyHandle.fail?.(error);
         },
       }
@@ -150,7 +204,13 @@ async function dispatchRuntimeReplyWithHandoffRetry(params: {
     await dispatchRuntimeReply({ ...dispatchParams, replyHandle: firstAttemptHandle });
     return;
   } catch (error) {
-    if (!retryInitConflict || !isReplySessionInitializationConflict(error)) {
+    if (!retryInitConflict || !isRetryableReplySessionAdmissionError(error)) {
+      throw error;
+    }
+    if (params.abortSignal.aborted) {
+      // A superseded dispatch must not drain or retry: by now the sessionKey
+      // can already belong to the successor's freshly started run, and a late
+      // drain would abort that run mid-flight.
       throw error;
     }
     console.warn(
@@ -220,6 +280,7 @@ export async function dispatchInboundEvent(params: {
   const abortController = new AbortController();
   let obsoleteDispatch = false;
   let previousSupersedeDrain: Promise<void> | undefined;
+  let preDispatchDrain: Promise<void> | undefined;
   let supersedeDrainStarted = false;
   let supersedeDrainSettled = false;
   let resolveSupersedeDrain!: () => void;
@@ -231,8 +292,18 @@ export async function dispatchInboundEvent(params: {
       return;
     }
     supersedeDrainSettled = true;
+    // The next message's handoff barrier must also cover an in-flight
+    // pre-dispatch drain: its abort call could otherwise land on the
+    // successor's freshly started run.
+    const dependencies: Promise<unknown>[] = [];
+    if (preDispatchDrain) {
+      dependencies.push(preDispatchDrain);
+    }
     if (previousSupersedeDrain) {
-      void previousSupersedeDrain.then(resolveSupersedeDrain, resolveSupersedeDrain);
+      dependencies.push(previousSupersedeDrain);
+    }
+    if (dependencies.length > 0) {
+      void Promise.allSettled(dependencies).then(resolveSupersedeDrain, resolveSupersedeDrain);
       return;
     }
     resolveSupersedeDrain();
@@ -322,7 +393,11 @@ export async function dispatchInboundEvent(params: {
     }
 
     if (previousSupersedeDrain) {
-      await awaitSupersedeDrain(previousSupersedeDrain, abortController.signal);
+      await awaitDrainWithTimeout(
+        previousSupersedeDrain,
+        abortController.signal,
+        "superseded-run-drain",
+      );
       if (abortController.signal.aborted) return;
     }
 
@@ -334,6 +409,18 @@ export async function dispatchInboundEvent(params: {
         peerId: event.conversation.peerId,
         handle: activeReplyHandle,
       });
+      preDispatchDrain = drainLingeringOpenClawRunBeforeDispatch({ sessionKey });
+      await awaitDrainWithTimeout(
+        preDispatchDrain,
+        abortController.signal,
+        "pre-dispatch-run-drain",
+      );
+      if (abortController.signal.aborted) {
+        // A supersede can land in the microtask gap after the drain settles;
+        // the superseded message must not start a zombie core dispatch
+        // alongside its successor.
+        return;
+      }
     }
     console.info(
       `[wecom-b3] dispatch-core-start account=${event.accountId} messageId=${event.messageId} sessionKey=${sessionKey} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,

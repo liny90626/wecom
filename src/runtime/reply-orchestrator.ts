@@ -55,6 +55,7 @@ export async function dispatchRuntimeReply(params: {
   let observedReplyDelivery = false;
   let runActivityObserved = false;
   let fastOffPending = false;
+  let fastOffEmptyFinalSuppressed = false;
   let fastAutoOnText = "";
   let blockDeliveryError: unknown;
   let finalDeliveryError: unknown;
@@ -69,19 +70,26 @@ export async function dispatchRuntimeReply(params: {
     await replyHandle.deliver(payload, { kind: "block" });
     if (isAutoOn) {
       fastOffPending = false;
+      fastOffEmptyFinalSuppressed = false;
       fastAutoOnText = text;
     } else {
       fastOffPending = true;
+      fastOffEmptyFinalSuppressed = false;
       fastAutoOnText = "";
     }
   };
 
-  const closeReply = async (): Promise<void> => {
+  const closeReply = async (externalFinalDelivered = false): Promise<void> => {
     if (finalDelivered) {
       return;
     }
     await replyHandle.deliver(
-      { text: !visibleBodySeen && fastAutoOnText ? fastAutoOnText : "" },
+      {
+        text: !visibleBodySeen && fastAutoOnText ? fastAutoOnText : "",
+        ...(externalFinalDelivered
+          ? { channelData: { wecomExternalFinalDelivered: true } }
+          : {}),
+      },
       { kind: "final" },
     );
     finalDelivered = true;
@@ -144,6 +152,7 @@ export async function dispatchRuntimeReply(params: {
           const kind = info?.kind === "final" ? "final" : "block";
           const visibleBody = hasVisibleReplyBody(payload, info?.kind);
           if (isBotWsReply && kind === "final" && fastOffPending && !visibleBody) {
+            fastOffEmptyFinalSuppressed = true;
             return;
           }
           const deliveryPayload =
@@ -201,7 +210,11 @@ export async function dispatchRuntimeReply(params: {
   const observedDelivery = observedReplyDelivery || result.observedReplyDelivery === true;
   const successfulFinal = result.queuedFinal === true || (result.counts?.final ?? 0) > 0;
 
-  if (fastOffPending && !observedDelivery) {
+  if (
+    fastOffPending &&
+    !observedDelivery &&
+    (!successfulFinal || fastOffEmptyFinalSuppressed)
+  ) {
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
   }
   if (finalDelivered) {
@@ -211,6 +224,7 @@ export async function dispatchRuntimeReply(params: {
     return failAndThrow(finalDeliveryError);
   }
   if (successfulFinal) {
+    await closeReply(true);
     return;
   }
   if ((result.failedCounts?.final ?? 0) > 0) {

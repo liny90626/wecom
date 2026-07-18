@@ -496,6 +496,70 @@ describe("createBotWsReplyHandle", () => {
     );
   });
 
+  it("preserves a partial source reply when external delivery closes the stream", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-external-final-close" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "已输出一半", isReasoning: false }, { kind: "block" });
+    handle.markExternalActivity?.();
+    await handle.deliver(
+      {
+        text: "",
+        isReasoning: false,
+        channelData: { wecomExternalFinalDelivered: true },
+      },
+      { kind: "final" },
+    );
+
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-external-final-close" } }),
+      expect.any(String),
+      "已输出一半",
+      true,
+    );
+  });
+
+  it("does not re-push a partial source reply when external delivery closes an expired stream", async () => {
+    const expiredError = {
+      headers: { req_id: "req-external-expired-close" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-external-expired-close" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "已输出一半", isReasoning: false }, { kind: "block" });
+    handle.markExternalActivity?.();
+    await handle.deliver(
+      {
+        text: "",
+        isReasoning: false,
+        channelData: { wecomExternalFinalDelivered: true },
+      },
+      { kind: "final" },
+    );
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("does not duplicate cumulative block text when final repeats the full answer", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

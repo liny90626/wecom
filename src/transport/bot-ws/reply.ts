@@ -1585,14 +1585,14 @@ export function createBotWsReplyHandle(params: {
     return true;
   };
 
-  const closeOpenedStreamSilently = async (): Promise<void> => {
+  const closeOpenedStreamSilently = async (content = ""): Promise<void> => {
     if (streamSettled) {
       return;
     }
     const finalStreamId = streamId;
     settleStream();
     if (!finalStreamId || isEvent || supersededByNewInbound || streamUpdateUnreliable) {
-      // A dead stream would reject the empty close with a guaranteed 846608;
+      // A dead stream would reject the source-stream close with a guaranteed 846608;
       // settling locally is all the cleanup an expired window needs.
       return;
     }
@@ -1603,13 +1603,13 @@ export function createBotWsReplyHandle(params: {
       hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
     });
     if (!pendingAckCleared || supersededByNewInbound) {
-      params.onFail?.(new Error("WeCom empty final stream ACK did not clear."));
+      params.onFail?.(new Error("WeCom source final stream ACK did not clear."));
       return;
     }
     try {
       await withHandleSendTimeout(
-        params.client.replyStream(params.frame, finalStreamId, "", true),
-        "empty stream final",
+        params.client.replyStream(params.frame, finalStreamId, content, true),
+        "source stream final",
       );
       params.onDeliver?.();
     } catch (error) {
@@ -2295,6 +2295,17 @@ export function createBotWsReplyHandle(params: {
       notifyPeerActive();
       if (info.kind === "final") {
         clearPendingPreview();
+      }
+
+      if (
+        info.kind === "final" &&
+        payload.channelData?.wecomExternalFinalDelivered === true
+      ) {
+        // The answer is already visible in an active-push message. Finish only
+        // the source stream and never fall back by re-pushing its partial text.
+        finalDelivered = true;
+        await closeOpenedStreamSilently(lastPreviewText);
+        return;
       }
 
       if (payload.channelData?.openclawProgressKind === "fast-mode-auto") {

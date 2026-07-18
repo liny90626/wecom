@@ -257,6 +257,38 @@ describe("dispatchRuntimeReply", () => {
     ).toBe(false);
   });
 
+  it("closes the source stream after OpenClaw routes the final externally", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.dispatcherOptions.deliver({ text: "已输出一半" }, { kind: "block" });
+      return {
+        queuedFinal: true,
+        counts: { block: 1, final: 1, tool: 0 },
+      };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-routed-final" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    expect(deliver).toHaveBeenNthCalledWith(1, { text: "已输出一半" }, { kind: "block" });
+    expect(deliver).toHaveBeenNthCalledWith(
+      2,
+      { text: "", channelData: { wecomExternalFinalDelivered: true } },
+      { kind: "final" },
+    );
+  });
+
   it("stays silent on the flag-empty result of a superseded dispatch", async () => {
     agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-of-successor");
     const abortController = new AbortController();
@@ -394,6 +426,74 @@ describe("dispatchRuntimeReply", () => {
     expect(deliver).toHaveBeenCalledOnce();
     expect(fail).toHaveBeenCalledOnce();
     expect(fail.mock.calls[0]?.[0]).toMatchObject({ name: "WeComReplyNoVisibleOutputError" });
+  });
+
+  it("accepts a routed final after Fast auto-off progress", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onToolResult({
+        text: "Fast: auto-off(62s>=60s)",
+        channelData: { openclawProgressKind: "fast-mode-auto" },
+      });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-fast-off-routed-final" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(fail).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenLastCalledWith(
+      { text: "", channelData: { wecomExternalFinalDelivered: true } },
+      { kind: "final" },
+    );
+  });
+
+  it("rejects a counted empty final after Fast auto-off progress", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onToolResult({
+        text: "Fast: auto-off(62s>=60s)",
+        channelData: { openclawProgressKind: "fast-mode-auto" },
+      });
+      await params.dispatcherOptions.deliver({ text: "" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-fast-off-empty-final" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).rejects.toThrow("no visible output");
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(fail).toHaveBeenCalledOnce();
   });
 
   it("allows Fast auto-on to end without a body", async () => {

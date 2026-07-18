@@ -1,25 +1,27 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-07-17（v2.5.110-139 发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-07-18（v2.5.110-141 发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 维护版本：`2.5.110-139`，发布标签 `released/2.5.110-139`，包 `yanhaidao-wecom-2.5.110-139.tgz`（shasum `643e944f62954871ebff5129f3a5b1da8e36993c`）。
+- 维护版本：`2.5.110-141`，发布标签 `released/2.5.110-141`，包 `yanhaidao-wecom-2.5.110-141.tgz`（shasum `5464a07a986e610336046924d9b1666726706d34`）。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 与 peer 基线仍为 **2026.6.11**（`node_modules/openclaw`），代码需双版本兼容。
+- 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；提交邮箱已固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
 - 发版纪律：打包、打 tag、推远端、更新发布文档均需用户明确批准。
-- 测试基线：42 文件 / 373 测试全绿；`npm run build`、`npx tsc --noEmit`、`node scripts/patch-wecom-b3-merge-thinking.mjs --check`（B1/B2/B3 链）、`git diff --check` 全部通过。
+- 测试基线：42 文件 / 385 测试全绿；`npm run build`、`npx tsc --noEmit`、`node scripts/patch-wecom-b3-merge-thinking.mjs --check`（B1/B2/B3 链）、`git diff --check` 全部通过。
 - `reply.test.ts` 头部有 `vi.setConfig({ testTimeout: 30_000 })`：该套件 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s（历史上多次假超时、失败集合随机）。不要改回全局 timeout，也不要因单次全量超时怀疑回归——先单文件复跑。
 
-## 2. v139 事件档案（为什么改成现在这样）
+## 2. v141 事件档案（为什么改成现在这样）
 
-生产（OpenClaw 7.1 + v138）出现三类故障：
+`v140` 是未打标签的体验包，全部生产改动并入 `v141`。本版处理四类问题：
 
-1. **“思考碎片 + ⚠️投递中断”**：7.1 把繁忙会话的新消息静默并入活跃 run（steer，默认队列模式）或排入 followup 队列，回合也可能 yield 转后台；这些情形 dispatch 一律以 `{queuedFinal:false, noVisibleReplyFallbackEligible:true}` **正常返回**，与真空输出不可区分。旧代码一律抛 `WeComReplyNoVisibleOutputError`，且失败提示把 `<think>` 预览过 markdown 清洗（剥标签）拼进正文 → 英文思考摘要示众。
-2. **长任务答案永久静默丢失**：流窗 ~6 分钟死亡（846608）后 final 走主动推送；“结果不明”失败（ACK 超时/本地 8s 超时/断连）直接锁存 `finalDelivered` 放弃；重试耗尽仅留日志；新消息 activate 会取消“零分片送达”的 final 重试。
-3. **“正在思考...”久卡、发新消息旧答案才蹦出**：消息被 steer/排队后，唯一的排空触发是下一条入站（supersede-drain 中止占用 run → 核心 followup drain 以新 run 重算 → routeReply 主动推送，0.5~15s 后到达）。
+1. **routed final 成功但旧气泡不结束**：OpenClaw 已主动推送完整 final，插件却未给 source reply handle 发送 final；旧气泡停在“正在思考”或半截正文，直到新入站触发接管才刷新。
+2. **后台状态缺乏持续反馈**：流窗死亡后只在 9 分钟发一次提示，后续长时间无更新。
+3. **长 Markdown 分段偏稀疏**：45% 之后遇到语义边界就切分，可能产生半空消息。
+4. **OpenClaw 失败 final 被误判**：核心已经给出可见失败正文时，插件仍可能改写成 WeCom 投递错误。
 
-修复（详见 `changelog/v2.5.110-139.md`）：orchestrator 三路分诊（活动→静默收口 / 被并入→即时提示 / 死寂→保底失败）+ abort 守卫；fail 提示仅拼可见正文；纯思考预览不算“已可见”；ambiguous 推送失败按分片进度有界补发（最多 3 次）+ 耗尽一次性失败提示；孤儿 drain 竞态封堵；预派发排空去 forceClear；后台处理提示延至任务满 9 分钟。
+修复（详见 `changelog/v2.5.110-141.md`）：外部 final 成功后用内部标记显式结束旧流；健康流保留最后预览，过期/不可靠流只本地结算；Fast 空 final 保护保持不变；9 分钟后按分钟更新状态；长文本优先选择 70% 后的语义边界；OpenClaw 失败 final 保持原样；SDK 固定升级到 1.0.7。没有新增重试、轮询或强制中断。
 
 ## 3. OpenClaw 7.1 核心机制速查（源码级已验证）
 
@@ -35,7 +37,7 @@
 
 ## 4. 生产观察关键词
 
-`[wecom-b3] dispatch-absorbed-by-active-run`（消息被并入，用户收到提示）· `dispatch-deferred-no-visible-reply`（回合转后台）· `pre-dispatch-run-drain(-result|-failed)` · `dispatch-init-conflict-handoff-retry` · `final-retry-failed ambiguous=true|false` · `final-retry-exhausted`（随后应有一次 fail-notice）· `final-retry-skip-superseded` · `[wecom-preview] expired-notice-deferred`（9 分钟挂起）· `expired-notice-failed`（会自动补试一次）。
+`[wecom-b3] dispatch-absorbed-by-active-run`（消息被并入，用户收到提示）· `dispatch-deferred-no-visible-reply`（回合转后台）· `pre-dispatch-run-drain(-result|-failed)` · `dispatch-init-conflict-handoff-retry` · `final-retry-failed ambiguous=true|false` · `final-retry-exhausted`（随后应有一次 fail-notice）· `final-retry-skip-superseded` · `[wecom-preview] expired-notice-deferred`（9 分钟挂起）· `expired-notice-failed`（任务未结算时下一分钟再试）。
 若 `dispatch-absorbed-by-active-run` 后长期无答复：占用 run 是僵尸——等 7.1 诊断自愈或再发一条消息触发接管排空。
 
 ## 5. 禁改事项（每条都对应真实事故）
@@ -59,4 +61,4 @@
 
 ## 7. 版本脉络备忘
 
-`v118`（稳定基线）→ v119-135 开发线**未入主线**（v133 灾难：全消息 init conflict；v134 修复但复杂度过高）→ `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并、接管排空（遗留孤儿 drain 竞态，v139 修复）→ `v139` OpenClaw 7.1 适配 + 投递抗丢失 + 9 分钟提示（当前）。
+`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并、接管排空 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + 持续长任务状态 + SDK 1.0.7（当前）。

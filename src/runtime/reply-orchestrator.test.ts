@@ -95,6 +95,153 @@ describe("dispatchRuntimeReply", () => {
     );
   });
 
+  it("does not let a blocked reasoning delivery trip the OpenClaw idle watchdog", async () => {
+    let releaseReasoning!: () => void;
+    const blockedReasoningDelivery = new Promise<void>((resolve) => {
+      releaseReasoning = resolve;
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      const reasoning = params.replyOptions.onReasoningStream({ text: "长任务思考中" });
+      const watchdog = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("LLM idle timeout (120s): no response from model")), 10);
+      });
+      await Promise.race([reasoning, watchdog]);
+      await params.dispatcherOptions.deliver({ text: "任务正文" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockImplementationOnce(() => blockedReasoningDelivery).mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    try {
+      await expect(
+        dispatchRuntimeReply({
+          core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+          cfg: {} as any,
+          session: { ctx: { SessionKey: "session-reasoning-backpressure" } } as any,
+          replyHandle: {
+            context: {
+              transport: "bot-ws",
+              accountId: "default",
+              raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+            },
+            deliver,
+            fail,
+          } as any,
+        }),
+      ).resolves.toBeUndefined();
+      expect(deliver).toHaveBeenCalledWith({ text: "任务正文" }, { kind: "final" });
+      expect(fail).not.toHaveBeenCalled();
+    } finally {
+      releaseReasoning();
+    }
+  });
+
+  it("keeps a later final when an asynchronous reasoning delivery rejects", async () => {
+    const previewError = new Error("preview ACK failed");
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      params.replyOptions.onReasoningStream({ text: "思考预览" });
+      await params.dispatcherOptions.deliver({ text: "正文仍然完成" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockRejectedValueOnce(previewError).mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-reasoning-reject" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(deliver).toHaveBeenCalledWith({ text: "正文仍然完成" }, { kind: "final" });
+    expect(fail).not.toHaveBeenCalled();
+  });
+
+  it("still reports a reasoning delivery failure when no final exists", async () => {
+    const previewError = new Error("preview ACK failed");
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      params.replyOptions.onReasoningStream({ text: "只有思考没有正文" });
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        noVisibleReplyFallbackEligible: true,
+      };
+    });
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-reasoning-reject-no-final" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver: vi.fn().mockRejectedValueOnce(previewError),
+          fail,
+        } as any,
+      }),
+    ).rejects.toBe(previewError);
+    expect(fail).toHaveBeenCalledWith(previewError);
+  });
+
+  it("does not let a blocked Fast progress delivery trip the OpenClaw idle watchdog", async () => {
+    let releaseProgress!: () => void;
+    const blockedProgressDelivery = new Promise<void>((resolve) => {
+      releaseProgress = resolve;
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      const progress = params.replyOptions.onToolResult({
+        text: "Fast: auto-off(62s>=60s)",
+        channelData: { openclawProgressKind: "fast-mode-auto" },
+      });
+      const watchdog = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("LLM idle timeout (120s): no response from model")), 10);
+      });
+      await Promise.race([progress, watchdog]);
+      await params.dispatcherOptions.deliver({ text: "Fast 后正文" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockImplementationOnce(() => blockedProgressDelivery).mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    try {
+      await expect(
+        dispatchRuntimeReply({
+          core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+          cfg: {} as any,
+          session: { ctx: { SessionKey: "session-fast-backpressure" } } as any,
+          replyHandle: {
+            context: {
+              transport: "bot-ws",
+              accountId: "default",
+              raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+            },
+            deliver,
+            fail,
+          } as any,
+        }),
+      ).resolves.toBeUndefined();
+      expect(deliver).toHaveBeenCalledWith({ text: "Fast 后正文" }, { kind: "final" });
+      expect(fail).not.toHaveBeenCalled();
+    } finally {
+      releaseProgress();
+    }
+  });
+
   it("forwards OpenClaw's exhausted LLM failure final without inventing a WeCom error", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
       await params.dispatcherOptions.deliver(

@@ -67,7 +67,6 @@ export async function dispatchRuntimeReply(params: {
       return;
     }
     const isAutoOn = /\bauto-on\b/i.test(text);
-    await replyHandle.deliver(payload, { kind: "block" });
     if (isAutoOn) {
       fastOffPending = false;
       fastOffEmptyFinalSuppressed = false;
@@ -77,6 +76,7 @@ export async function dispatchRuntimeReply(params: {
       fastOffEmptyFinalSuppressed = false;
       fastAutoOnText = "";
     }
+    await replyHandle.deliver(payload, { kind: "block" });
   };
 
   const closeReply = async (externalFinalDelivered = false): Promise<void> => {
@@ -100,6 +100,29 @@ export async function dispatchRuntimeReply(params: {
     throw error;
   };
 
+  // OpenClaw awaits progress callbacks while consuming the model stream. A
+  // WeCom ACK/network stall must not turn that side-channel into model
+  // backpressure (which can trip the core idle watchdog before the final).
+  const recordProgressDeliveryError = (error: unknown, kind: "block" | "tool"): void => {
+    if (abortSignal?.aborted) {
+      return;
+    }
+    if (kind === "tool") {
+      toolDeliveryError ??= error;
+    } else {
+      blockDeliveryError ??= error;
+    }
+    console.warn(
+      `[wecom-b3] progress-delivery-failed sessionKey=${sessionKey} kind=${kind} error=${String(error)}`,
+    );
+  };
+
+  const dispatchProgressPayload = (payload: ReplyPayload): void => {
+    void dispatchReplyPayload({ replyHandle, payload, kind: "block" }).catch((error) => {
+      recordProgressDeliveryError(error, "block");
+    });
+  };
+
   const botWsReplyOptions: ReplyOptions | undefined = isBotWsReply
     ? {
         disableBlockStreaming: false,
@@ -108,26 +131,24 @@ export async function dispatchRuntimeReply(params: {
         onObservedReplyDelivery: () => {
           observedReplyDelivery = true;
         },
-        onReasoningStream: async (payload) => {
+        onReasoningStream: (payload) => {
           runActivityObserved = true;
-          await dispatchReplyPayload({
-            replyHandle,
-            payload: { text: payload.text ?? "", isReasoning: true },
-            kind: "block",
+          dispatchProgressPayload({ text: payload.text ?? "", isReasoning: true });
+        },
+        onReasoningEnd: () => {
+          runActivityObserved = true;
+          dispatchProgressPayload({
+            text: "",
+            isReasoning: true,
+            channelData: { reasoningEnd: true },
           });
         },
-        onReasoningEnd: async () => {
-          runActivityObserved = true;
-          await dispatchReplyPayload({
-            replyHandle,
-            payload: { text: "", isReasoning: true, channelData: { reasoningEnd: true } },
-            kind: "block",
-          });
-        },
-        onToolResult: async (payload) => {
+        onToolResult: (payload) => {
           runActivityObserved = true;
           if (isFastProgress(payload)) {
-            await deliverFastProgress(payload);
+            void deliverFastProgress(payload).catch((error) => {
+              recordProgressDeliveryError(error, "tool");
+            });
           }
         },
       }
@@ -211,6 +232,14 @@ export async function dispatchRuntimeReply(params: {
   if (abortSignal?.aborted) {
     // An aborted dispatch can still resolve with counts or delivery errors;
     // none of those belong to the successor's conversation.
+    return;
+  }
+
+  // Let already-settled best-effort progress deliveries publish their error
+  // before the no-visible-output triage below; this yields only a microtask and
+  // never waits on a live WeCom/network request.
+  await Promise.resolve();
+  if (abortSignal?.aborted) {
     return;
   }
 

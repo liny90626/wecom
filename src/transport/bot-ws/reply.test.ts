@@ -1280,6 +1280,51 @@ describe("createBotWsReplyHandle", () => {
     });
   });
 
+  it("recognizes OpenClaw's prompt-timeout wording as a model timeout", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-prompt-timeout-notice" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.fail?.(new Error("Request timed out before a response was generated."));
+
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-prompt-timeout-notice" } }),
+      expect.any(String),
+      "⚠️ 模型响应超时，本次任务未完成，请稍后重试。",
+      true,
+    );
+  });
+
+  it("recognizes a wrapped OpenClaw turn-idle timeout", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-wrapped-turn-timeout" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const cause = new Error("codex app-server turn idle timed out waiting for turn/completed");
+
+    await handle.fail?.(new Error("Operation aborted", { cause }));
+
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.objectContaining({ headers: { req_id: "req-wrapped-turn-timeout" } }),
+      expect.any(String),
+      "⚠️ 模型响应超时，本次任务未完成，请稍后重试。",
+      true,
+    );
+  });
+
   it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

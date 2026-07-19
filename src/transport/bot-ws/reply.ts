@@ -111,7 +111,13 @@ function isOpenClawModelTimeoutError(error: unknown, formattedMessage: string): 
     message.includes("llm idle timeout") ||
     message.includes("model idle timeout") ||
     message.includes("llm request timed out") ||
-    message.includes("model did not produce a response before")
+    message.includes("model did not produce a response before") ||
+    message.includes("request timed out before a response was generated") ||
+    message.includes("codex app-server turn idle timed out") ||
+    message.includes("codex app-server attempt timed out") ||
+    message.includes("turn_completion_idle_timeout") ||
+    message.includes("turn_progress_idle_timeout") ||
+    message.includes("turn_terminal_idle_timeout")
   );
 }
 

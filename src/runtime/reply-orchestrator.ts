@@ -270,6 +270,12 @@ export async function dispatchRuntimeReply(params: {
             return;
           }
           const kind = info?.kind === "final" ? "final" : "block";
+          if (isBotWsReply && kind === "final") {
+            await sealProgress();
+            if (abortSignal?.aborted) {
+              return;
+            }
+          }
           const visibleBody = hasVisibleReplyBody(payload, info?.kind);
           if (isBotWsReply && kind === "final" && fastOffPending && !visibleBody) {
             fastOffEmptyFinalSuppressed = true;

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { WSClient } from "@wecom/aibot-node-sdk";
 
 const agentHarnessState = vi.hoisted(() => ({
   resolveActiveEmbeddedRunSessionId: vi.fn(),
@@ -7,6 +8,10 @@ const agentHarnessState = vi.hoisted(() => ({
 vi.mock("openclaw/plugin-sdk/agent-harness", () => agentHarnessState);
 
 import { dispatchRuntimeReply } from "./reply-orchestrator.js";
+import {
+  __resetBotWsReplyTestState,
+  createBotWsReplyHandle,
+} from "../transport/bot-ws/reply.js";
 
 describe("dispatchRuntimeReply", () => {
   beforeEach(() => {
@@ -136,6 +141,138 @@ describe("dispatchRuntimeReply", () => {
     }
   });
 
+  it("delivers the final through a real Bot WS handle while the reasoning ACK is pending", async () => {
+    __resetBotWsReplyTestState();
+    let pendingAck = false;
+    let releaseReasoningAck!: () => void;
+    const client = {
+      replyStreamNonBlocking: vi.fn(() => {
+        pendingAck = true;
+        return new Promise((resolve) => {
+          releaseReasoningAck = () => resolve({});
+        });
+      }),
+      hasPendingReplyAck: vi.fn(() => pendingAck),
+      replyStream: vi.fn().mockResolvedValue({}),
+      sendMessage: vi.fn().mockResolvedValue({}),
+      replyWelcome: vi.fn().mockResolvedValue({}),
+    } as unknown as WSClient;
+    const replyHandle = createBotWsReplyHandle({
+      client,
+      frame: {
+        headers: { req_id: "req-real-handle-pending-reasoning" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as any,
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      let callbackTimedOut = false;
+      const reasoningCallback = params.replyOptions.onReasoningStream({ text: "长任务思考中" });
+      await Promise.race([
+        Promise.resolve(reasoningCallback),
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            callbackTimedOut = true;
+            resolve();
+          }, 5);
+        }),
+      ]);
+      expect(callbackTimedOut).toBe(false);
+
+      setTimeout(() => {
+        pendingAck = false;
+        releaseReasoningAck();
+      }, 20);
+      await params.dispatcherOptions.deliver({ text: "任务最终正文" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-real-handle-pending-reasoning" } } as any,
+        replyHandle,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect((client as any).replyStreamNonBlocking).toHaveBeenCalledTimes(1);
+    expect((client as any).replyStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        headers: { req_id: "req-real-handle-pending-reasoning" },
+      }),
+      expect.any(String),
+      "任务最终正文",
+      true,
+    );
+    expect((client as any).sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("falls back to active push when a real Bot WS reasoning ACK stays blocked", async () => {
+    vi.useFakeTimers();
+    __resetBotWsReplyTestState();
+    let pendingAck = false;
+    let releaseReasoningAck: () => void = () => undefined;
+    try {
+      const client = {
+        replyStreamNonBlocking: vi.fn(() => {
+          pendingAck = true;
+          return new Promise((resolve) => {
+            releaseReasoningAck = () => resolve({});
+          });
+        }),
+        hasPendingReplyAck: vi.fn(() => pendingAck),
+        replyStream: vi.fn().mockResolvedValue({}),
+        sendMessage: vi.fn().mockResolvedValue({}),
+        replyWelcome: vi.fn().mockResolvedValue({}),
+      } as unknown as WSClient;
+      const replyHandle = createBotWsReplyHandle({
+        client,
+        frame: {
+          headers: { req_id: "req-real-handle-stuck-reasoning" },
+          body: { from: { userid: "alice" }, chattype: "single" },
+        } as any,
+        accountId: "default",
+        inboundKind: "text",
+        autoSendPlaceholder: false,
+      });
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+        params.replyOptions.onReasoningStream({ text: "长任务思考中" });
+        await params.dispatcherOptions.deliver({ text: "不能丢失的最终正文" }, { kind: "final" });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      });
+
+      const dispatch = dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-real-handle-stuck-reasoning" } } as any,
+        replyHandle,
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(5_500);
+      await dispatch;
+
+      expect((client as any).replyStream).not.toHaveBeenCalled();
+      expect((client as any).sendMessage).toHaveBeenCalledWith(
+        "alice",
+        expect.objectContaining({
+          msgtype: "markdown",
+          markdown: expect.objectContaining({
+            content: expect.stringContaining("不能丢失的最终正文"),
+          }),
+        }),
+      );
+    } finally {
+      pendingAck = false;
+      releaseReasoningAck();
+      await Promise.resolve();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("drains detached progress before closing a deferred Bot WS turn", async () => {
     let releaseReasoning!: () => void;
     const reasoningDelivery = new Promise<void>((resolve) => {
@@ -176,6 +313,51 @@ describe("dispatchRuntimeReply", () => {
     releaseReasoning();
     await dispatch;
     expect(order).toEqual(["block:reasoning", "final:final"]);
+  });
+
+  it("drains detached progress before delivering an ordinary final", async () => {
+    let releaseReasoning!: () => void;
+    const reasoningDelivery = new Promise<void>((resolve) => {
+      releaseReasoning = resolve;
+    });
+    const order: string[] = [];
+    let finalStartedBeforeReasoningReleased = false;
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      params.replyOptions.onReasoningStream({ text: "最终正文前的思考" });
+      const finalDelivery = params.dispatcherOptions.deliver(
+        { text: "任务最终正文" },
+        { kind: "final" },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      finalStartedBeforeReasoningReleased = order.includes("final:final");
+      releaseReasoning();
+      await finalDelivery;
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockImplementation(async (payload, info) => {
+      order.push(`${info.kind}:${payload.isReasoning ? "reasoning" : "final"}`);
+      if (payload.isReasoning) await reasoningDelivery;
+    });
+
+    try {
+      await dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-progress-ordinary-final-barrier" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+        } as any,
+      });
+      expect(finalStartedBeforeReasoningReleased).toBe(false);
+      expect(order).toEqual(["block:reasoning", "final:final"]);
+    } finally {
+      releaseReasoning();
+    }
   });
 
   it("drains detached progress before publishing a dispatch failure", async () => {

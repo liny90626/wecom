@@ -7,6 +7,11 @@ import type { PreparedSession } from "./session-manager.js";
 type DispatchReply = PluginRuntime["channel"]["reply"]["dispatchReplyWithBufferedBlockDispatcher"];
 type ReplyOptions = NonNullable<Parameters<DispatchReply>[0]["replyOptions"]>;
 
+// Progress callbacks are intentionally detached from OpenClaw's model stream,
+// but the detached lane still needs ordering at turn close. Keep the barrier
+// short so a broken ACK cannot hold the actual reply indefinitely.
+const DETACHED_PROGRESS_DRAIN_GRACE_MS = 500;
+
 const BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT =
   "⏳ 上一轮任务仍在进行，本条消息已并入当前任务，完成后一并回复；若长时间未收到回复，请重新发送。";
 
@@ -61,10 +66,17 @@ export async function dispatchRuntimeReply(params: {
   let finalDeliveryError: unknown;
   let toolDeliveryError: unknown;
 
-  const deliverFastProgress = async (payload: ReplyPayload): Promise<void> => {
+  let progressAccepting = isBotWsReply;
+  let progressCancelled = false;
+  let progressPendingCount = 0;
+  let progressTail = Promise.resolve();
+  let progressSealPromise: Promise<void> | undefined;
+  let pendingReasoningSlot: { payload: ReplyPayload } | undefined;
+
+  const updateFastProgressState = (payload: ReplyPayload): boolean => {
     const text = payload.text?.trim() ?? "";
     if (!text) {
-      return;
+      return false;
     }
     const isAutoOn = /\bauto-on\b/i.test(text);
     if (isAutoOn) {
@@ -76,10 +88,117 @@ export async function dispatchRuntimeReply(params: {
       fastOffEmptyFinalSuppressed = false;
       fastAutoOnText = "";
     }
-    await replyHandle.deliver(payload, { kind: "block" });
+    return true;
+  };
+
+  const recordProgressDeliveryError = (error: unknown, kind: "block" | "tool"): void => {
+    if (abortSignal?.aborted) {
+      return;
+    }
+    if (kind === "tool") {
+      toolDeliveryError ??= error;
+    } else {
+      blockDeliveryError ??= error;
+    }
+    console.warn(
+      `[wecom-b3] progress-delivery-failed sessionKey=${sessionKey} kind=${kind} error=${String(error)}`,
+    );
+  };
+
+  const appendProgress = (
+    resolvePayload: () => ReplyPayload,
+    errorKind: "block" | "tool",
+  ): void => {
+    if (!progressAccepting || abortSignal?.aborted) {
+      return;
+    }
+    progressPendingCount += 1;
+    const deliverProgress = async (): Promise<void> => {
+      if (progressCancelled || abortSignal?.aborted) {
+        return;
+      }
+      try {
+        await dispatchReplyPayload({ replyHandle, payload: resolvePayload(), kind: "block" });
+      } catch (error) {
+        recordProgressDeliveryError(error, errorKind);
+      }
+    };
+    progressTail = (progressPendingCount === 1
+      ? deliverProgress()
+      : progressTail.then(deliverProgress)
+    ).finally(() => {
+      progressPendingCount = Math.max(0, progressPendingCount - 1);
+    });
+  };
+
+  const enqueueReasoning = (payload: ReplyPayload): void => {
+    if (!progressAccepting || abortSignal?.aborted) {
+      return;
+    }
+    if (pendingReasoningSlot) {
+      pendingReasoningSlot.payload = payload;
+      return;
+    }
+    const slot = { payload };
+    pendingReasoningSlot = slot;
+    appendProgress(() => {
+      if (pendingReasoningSlot === slot) {
+        pendingReasoningSlot = undefined;
+      }
+      return slot.payload;
+    }, "block");
+  };
+
+  const enqueueProgress = (payload: ReplyPayload, errorKind: "block" | "tool"): void => {
+    pendingReasoningSlot = undefined;
+    appendProgress(() => payload, errorKind);
+  };
+
+  const dropPendingProgress = (): void => {
+    progressAccepting = false;
+    progressCancelled = true;
+    pendingReasoningSlot = undefined;
+  };
+
+  const sealProgress = async (): Promise<void> => {
+    if (!isBotWsReply) {
+      return;
+    }
+    if (progressSealPromise) {
+      return progressSealPromise;
+    }
+    progressAccepting = false;
+    progressSealPromise = (async () => {
+      if (abortSignal?.aborted) {
+        dropPendingProgress();
+        return;
+      }
+      if (progressPendingCount === 0) {
+        return;
+      }
+      const drain = progressTail;
+      let drainTimeout: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<boolean>((resolve) => {
+        drainTimeout = setTimeout(() => resolve(false), DETACHED_PROGRESS_DRAIN_GRACE_MS);
+        drainTimeout.unref?.();
+      });
+      const drained = await Promise.race([drain.then(() => true), timeoutPromise]);
+      if (drainTimeout) {
+        clearTimeout(drainTimeout);
+      }
+      if (!drained) {
+        progressCancelled = true;
+        pendingReasoningSlot = undefined;
+        console.warn(
+          `[wecom-b3] progress-drain-timeout sessionKey=${sessionKey} graceMs=${DETACHED_PROGRESS_DRAIN_GRACE_MS}`,
+        );
+      }
+    })();
+    return progressSealPromise;
   };
 
   const closeReply = async (externalFinalDelivered = false): Promise<void> => {
+    await sealProgress();
     if (finalDelivered) {
       return;
     }
@@ -96,31 +215,9 @@ export async function dispatchRuntimeReply(params: {
   };
 
   const failAndThrow = async (error: unknown): Promise<never> => {
+    await sealProgress();
     await replyHandle.fail?.(error);
     throw error;
-  };
-
-  // OpenClaw awaits progress callbacks while consuming the model stream. A
-  // WeCom ACK/network stall must not turn that side-channel into model
-  // backpressure (which can trip the core idle watchdog before the final).
-  const recordProgressDeliveryError = (error: unknown, kind: "block" | "tool"): void => {
-    if (abortSignal?.aborted) {
-      return;
-    }
-    if (kind === "tool") {
-      toolDeliveryError ??= error;
-    } else {
-      blockDeliveryError ??= error;
-    }
-    console.warn(
-      `[wecom-b3] progress-delivery-failed sessionKey=${sessionKey} kind=${kind} error=${String(error)}`,
-    );
-  };
-
-  const dispatchProgressPayload = (payload: ReplyPayload): void => {
-    void dispatchReplyPayload({ replyHandle, payload, kind: "block" }).catch((error) => {
-      recordProgressDeliveryError(error, "block");
-    });
   };
 
   const botWsReplyOptions: ReplyOptions | undefined = isBotWsReply
@@ -133,22 +230,24 @@ export async function dispatchRuntimeReply(params: {
         },
         onReasoningStream: (payload) => {
           runActivityObserved = true;
-          dispatchProgressPayload({ text: payload.text ?? "", isReasoning: true });
+          enqueueReasoning({ text: payload.text ?? "", isReasoning: true });
         },
         onReasoningEnd: () => {
           runActivityObserved = true;
-          dispatchProgressPayload({
-            text: "",
-            isReasoning: true,
-            channelData: { reasoningEnd: true },
-          });
+          enqueueProgress(
+            { text: "", isReasoning: true, channelData: { reasoningEnd: true } },
+            "block",
+          );
         },
         onToolResult: (payload) => {
           runActivityObserved = true;
-          if (isFastProgress(payload)) {
-            void deliverFastProgress(payload).catch((error) => {
-              recordProgressDeliveryError(error, "tool");
-            });
+          if (
+            progressAccepting &&
+            !abortSignal?.aborted &&
+            isFastProgress(payload) &&
+            updateFastProgressState(payload)
+          ) {
+            enqueueProgress(payload, "tool");
           }
         },
       }
@@ -211,9 +310,11 @@ export async function dispatchRuntimeReply(params: {
     if (abortSignal?.aborted) {
       // OpenClaw may reject after a supersede instead of resolving its empty
       // dispatch result. The old handle is no longer allowed to fail or close.
+      dropPendingProgress();
       return;
     }
     if (finalDelivered) {
+      dropPendingProgress();
       return;
     }
     if (observedReplyDelivery) {
@@ -227,19 +328,26 @@ export async function dispatchRuntimeReply(params: {
     return;
   }
   if (!result) {
+    await sealProgress();
     return;
   }
   if (abortSignal?.aborted) {
     // An aborted dispatch can still resolve with counts or delivery errors;
     // none of those belong to the successor's conversation.
+    dropPendingProgress();
+    return;
+  }
+  if (finalDelivered) {
+    dropPendingProgress();
     return;
   }
 
-  // Let already-settled best-effort progress deliveries publish their error
-  // before the no-visible-output triage below; this yields only a microtask and
-  // never waits on a live WeCom/network request.
-  await Promise.resolve();
+  // The callbacks above stay nonblocking for OpenClaw's model stream. Once the
+  // core turn returns, stop accepting progress and briefly drain that lane so
+  // a synthetic final/failure cannot overtake an already-started snapshot.
+  await sealProgress();
   if (abortSignal?.aborted) {
+    dropPendingProgress();
     return;
   }
 
@@ -258,9 +366,6 @@ export async function dispatchRuntimeReply(params: {
     result.noVisibleReplyFallbackEligible !== true
   ) {
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
-  }
-  if (finalDelivered) {
-    return;
   }
   if (finalDeliveryError !== undefined) {
     return failAndThrow(finalDeliveryError);

@@ -136,6 +136,192 @@ describe("dispatchRuntimeReply", () => {
     }
   });
 
+  it("drains detached progress before closing a deferred Bot WS turn", async () => {
+    let releaseReasoning!: () => void;
+    const reasoningDelivery = new Promise<void>((resolve) => {
+      releaseReasoning = resolve;
+    });
+    const order: string[] = [];
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      params.replyOptions.onReasoningStream({ text: "仍在思考" });
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        noVisibleReplyFallbackEligible: true,
+      };
+    });
+    const deliver = vi.fn().mockImplementation(async (payload, info) => {
+      order.push(`${info.kind}:${payload.isReasoning ? "reasoning" : "final"}`);
+      if (payload.isReasoning) await reasoningDelivery;
+    });
+
+    const dispatch = dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-progress-final-barrier" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual(["block:reasoning"]);
+    expect(order).not.toContain("final:final");
+
+    releaseReasoning();
+    await dispatch;
+    expect(order).toEqual(["block:reasoning", "final:final"]);
+  });
+
+  it("drains detached progress before publishing a dispatch failure", async () => {
+    let releaseReasoning!: () => void;
+    const reasoningDelivery = new Promise<void>((resolve) => {
+      releaseReasoning = resolve;
+    });
+    const dispatchError = new Error("model stream failed");
+    const order: string[] = [];
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      params.replyOptions.onReasoningStream({ text: "失败前的思考" });
+      throw dispatchError;
+    });
+    const deliver = vi.fn().mockImplementation(async (payload, info) => {
+      order.push(`${info.kind}:${payload.isReasoning ? "reasoning" : "final"}`);
+      if (payload.isReasoning) await reasoningDelivery;
+    });
+    const fail = vi.fn().mockImplementation(async () => {
+      order.push("fail:error");
+    });
+
+    const dispatch = dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-progress-failure-barrier" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+        fail,
+      } as any,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual(["block:reasoning"]);
+
+    releaseReasoning();
+    await expect(dispatch).rejects.toBe(dispatchError);
+    expect(order).toEqual(["block:reasoning", "fail:error"]);
+  });
+
+  it("serializes detached progress and coalesces adjacent reasoning snapshots", async () => {
+    let releaseFirst!: () => void;
+    const firstDelivery = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const fastProgress = {
+      text: "Fast: auto-off(62s>=60s)",
+      channelData: { openclawProgressKind: "fast-mode-auto" },
+    };
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      params.replyOptions.onReasoningStream({ text: "第一版思考" });
+      params.replyOptions.onReasoningStream({ text: "第二版思考" });
+      params.replyOptions.onReasoningStream({ text: "最新思考" });
+      params.replyOptions.onToolResult(fastProgress);
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 1 },
+        noVisibleReplyFallbackEligible: true,
+      };
+    });
+    const deliver = vi
+      .fn()
+      .mockImplementationOnce(async () => firstDelivery)
+      .mockResolvedValue(undefined);
+
+    const dispatch = dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-progress-coalescing" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deliver).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await dispatch;
+
+    expect(deliver.mock.calls.map((call) => call[0])).toEqual([
+      { text: "第一版思考", isReasoning: true },
+      { text: "最新思考", isReasoning: true },
+      fastProgress,
+      { text: "" },
+    ]);
+  });
+
+  it("drops queued progress after the bounded close barrier expires", async () => {
+    vi.useFakeTimers();
+    let releaseFirst: () => void = () => undefined;
+    try {
+      const firstDelivery = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const deliveredTexts: string[] = [];
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+        params.replyOptions.onReasoningStream({ text: "已经开始投递" });
+        params.replyOptions.onReasoningStream({ text: "仍在队列中的旧进度" });
+        return {
+          queuedFinal: false,
+          counts: { block: 0, final: 0, tool: 0 },
+          noVisibleReplyFallbackEligible: true,
+        };
+      });
+      const deliver = vi.fn().mockImplementation(async (payload) => {
+        deliveredTexts.push(String(payload.text ?? ""));
+        if (payload.isReasoning) await firstDelivery;
+      });
+
+      const dispatch = dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-progress-bounded-close" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+        } as any,
+      });
+
+      await vi.advanceTimersByTimeAsync(500);
+      await dispatch;
+      expect(deliveredTexts).toEqual(["已经开始投递", ""]);
+
+      releaseFirst();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(deliveredTexts).toEqual(["已经开始投递", ""]);
+    } finally {
+      releaseFirst();
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps a later final when an asynchronous reasoning delivery rejects", async () => {
     const previewError = new Error("preview ACK failed");
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {

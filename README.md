@@ -23,7 +23,7 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-`v2.5.110-141` 汇总未发布的 v140 体验线并修复 OpenClaw routed final 已主动推送、原 Bot WS 气泡却未收口的问题：长任务满 9 分钟后按分钟更新实际用时，长文本分段更紧凑，OpenClaw 原始失败 final 保持原样交付；企微 SDK 同步固定升级到 `1.0.7`。主线仍不恢复分钟级 handoff、重试阶梯、per-peer 熔断器或 synthetic thinking。当前发布标签为 `released/2.5.110-141`。
+`v2.5.110-142` 根治长任务 reasoning/Fast 进度投递对 OpenClaw 模型流的反向阻塞：企微 ACK 变慢时不再拖住模型事件消费，进度快照串行合并，final 前执行 500ms 有界封口，持续阻塞则沿用主动推送兜底。长任务耗时统一从任务创建时计数，首屏不再显示 `0s`，健康流每 15 秒推进状态。主线仍不恢复分钟级 handoff、重试阶梯、per-peer 熔断器或 synthetic thinking。当前发布标签为 `released/2.5.110-142`。
 
 - B1：修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
 - B2：优化 Bot WebSocket 长文本回复投递。正文过长时会按企业微信限制分段发送，并对流式预览与最终正文之间的重复片段做去重处理，降低长文本重复和截断风险。
@@ -201,6 +201,12 @@ npx vitest run
 
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 v2.5.110-142（2026-07-19，LinKy fork 维护版）
+- **[根因修复] 企微进度 ACK 不再阻塞 OpenClaw 模型流**：reasoning 与 Fast 回调改为非阻塞接入，插件内部串行投递并合并连续 reasoning 快照，避免企微网络延迟触发 OpenClaw idle timeout。
+- **[有序收口] final 不越过在途进度**：普通 final、合成 final 和失败路径在进入 ReplyHandle 前执行最多 `500ms` 的有界封口；ACK 持续阻塞时停止旧进度并沿用主动推送兜底，完整正文不会被进度气泡截断。
+- **[长任务计时] 修正 `0s` 和计时重置**：耗时统一从 ReplyHandle 创建时计算，首个可见值最低 `1s`；冻结预览在健康流内每 15 秒更新，已验证 `1m05s → 1m20s → 1m35s`。
+- **[异常分诊] 保留 Fast 与真实模型错误语义**：OpenClaw 延后回复时不再把 Fast auto-off 误判为无正文中断；真实模型超时与企微投递失败分别提示，被新消息接管的旧回合不再产生迟到失败气泡。完整说明见 [`changelog/v2.5.110-142.md`](./changelog/v2.5.110-142.md)。
+
 #### 📌 v2.5.110-141（2026-07-18，LinKy fork 维护版）
 - **[回复收口] routed final 不再留下“正在思考”或半截气泡**：OpenClaw 已通过主动路由成功发送 final 时，插件会显式结束原 Bot WS 流；健康流保留最后一次已确认预览，过期或不可靠流只本地结算，不重新主动推送半截正文。
 - **[长任务状态] 9 分钟后按分钟更新实际用时**：流窗口失效且任务仍在执行时，从 `9m00s` 开始每分钟推送一次当前用时；final、外部活动或新消息接管后立即停止，慢推送采用串行定时避免重叠。
@@ -222,12 +228,6 @@ npx vitest run
 - **[长任务接管] 修复 OpenClaw session 初始化冲突**：新消息接管同一 Bot WS 会话的旧长任务后，仅在 OpenClaw 明确返回初始化冲突时等待 500ms 并重试一次；正常接管不再固定等待，第三条消息可取消尚未发生的重试。
 - **[错误脱敏] 冲突提示改为用户可理解的文案**：持续冲突不再显示 `WeCom WS reply failed`、agent 名称或 session key；原气泡和流窗口失效后的主动推送统一提示“之前任务还在处理中，新指令冲突啦，请等几分钟后再试试”。
 - **[范围控制] 不重复执行工具、不扩大重试面**：该冲突发生在 agent run 初始化之前；非 Bot WS、没有接管旧回复、非精确冲突均保持原行为。完整说明见 [`changelog/v2.5.110-137.md`](./changelog/v2.5.110-137.md)。
-
-#### 📌 v2.5.110-136（2026-07-12，LinKy fork 重做版）
-- **[稳定主线重建] 基于 v118 重做而非继续叠加 v135**：保留 v118 轻量投递骨架，只重新实现有复现证据的 OpenClaw 6.11、ACK、late-final、Fast/no-output 和 Agent exactly-once 修复；未采用的 v119-v135 开发线不进入主线。
-- **[回复完整性] 不再截掉重复标题后的唯一后文**：仅在结构化标题重新开始时删除其连续同序的精确重复尾段；pending preview、thinking 预算、长 final 尾段续传、空 final、中断提示和 late final 均按确认送达状态处理。
-- **[速度与并发] 单次 dispatch、短 quiet grace**：prepare 前即可被新消息抢占，不引入本地 OpenClaw retry、熔断器或分钟级等待；final 兜底重试保持后台 detached。
-- **[Fast 与附件] 进度保留、异常不静默**：冻结预览仍保留 auto-off/auto-on；auto-off 后没有正文会显示中断，auto-on 可正常无正文结束；Bot webhook 的短时附件+文字会保序合并，失败附件进入上下文。完整说明见 [`changelog/v2.5.110-136.md`](./changelog/v2.5.110-136.md)。
 
 > B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)，reasoning 思考块系列修复见 [`changelog/v2.5.110-113.md`](./changelog/v2.5.110-113.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
 

@@ -464,6 +464,56 @@ describe("dispatchRuntimeReply", () => {
     expect(fail.mock.calls[0]?.[0]).toMatchObject({ name: "WeComReplyNoVisibleOutputError" });
   });
 
+  it("does not fail a Fast auto-off turn that OpenClaw deferred after activity", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onReasoningStream({ text: "正在执行长任务" });
+      await params.replyOptions.onToolResult({
+        text: "Fast: auto-off(62s>=60s)",
+        channelData: { openclawProgressKind: "fast-mode-auto" },
+      });
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 1 },
+        noVisibleReplyFallbackEligible: true,
+      };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-fast-deferred" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(fail).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenNthCalledWith(
+      1,
+      { text: "正在执行长任务", isReasoning: true },
+      { kind: "block" },
+    );
+    expect(deliver).toHaveBeenNthCalledWith(
+      2,
+      {
+        text: "Fast: auto-off(62s>=60s)",
+        channelData: { openclawProgressKind: "fast-mode-auto" },
+      },
+      { kind: "block" },
+    );
+    expect(deliver).toHaveBeenLastCalledWith({ text: "" }, { kind: "final" });
+  });
+
   it("accepts a routed final after Fast auto-off progress", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
       await params.replyOptions.onToolResult({

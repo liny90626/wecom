@@ -210,10 +210,13 @@ export async function dispatchRuntimeReply(params: {
   const observedDelivery = observedReplyDelivery || result.observedReplyDelivery === true;
   const successfulFinal = result.queuedFinal === true || (result.counts?.final ?? 0) > 0;
 
+  // OpenClaw marks yielded/deferred turns as fallback-eligible; let the
+  // activity/active-run triage below decide instead of failing on Fast off.
   if (
     fastOffPending &&
     !observedDelivery &&
-    (!successfulFinal || fastOffEmptyFinalSuppressed)
+    (!successfulFinal || fastOffEmptyFinalSuppressed) &&
+    result.noVisibleReplyFallbackEligible !== true
   ) {
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
   }

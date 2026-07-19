@@ -576,7 +576,9 @@ function formatFallbackError(error: unknown): string {
 }
 
 function formatElapsedStatus(elapsedMs: number): string {
-  const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  // A zero-duration measurement is not useful to the user; keep a one-second
+  // minimum while retaining the existing whole-second display precision.
+  const elapsedSeconds = Math.max(1, Math.floor(Math.max(0, elapsedMs) / 1000));
   if (elapsedSeconds < 60) {
     return `执行长任务中，当前用时${elapsedSeconds}s`;
   }
@@ -978,7 +980,9 @@ export function createBotWsReplyHandle(params: {
   let supersededAt: number | undefined;
   let visibleReplyStarted = false;
   let streamUpdateUnreliable = false;
-  let previewStartedAt: number | undefined;
+  // Start the progress clock with the task, not with the first visible block.
+  // Tool/reasoning work can precede that block by several minutes.
+  const handleStartedAt = Date.now();
   let previewFrozen = false;
   let previewFrozenSourceText = "";
   let previewFrozenDeliveredSourceText = "";
@@ -990,7 +994,6 @@ export function createBotWsReplyHandle(params: {
   let previewExpiredNoticeInFlight = false;
   let previewExpiredNoticeCancelled = false;
   let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
-  const handleStartedAt = Date.now();
   let previewWatchdogExpired = false;
   let failNoticeSent = false;
   let finalPushRetryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1639,8 +1642,7 @@ export function createBotWsReplyHandle(params: {
       return "";
     }
     const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
-    previewStartedAt ??= now;
-    const elapsedMs = now - previewStartedAt;
+    const elapsedMs = now - handleStartedAt;
     if (!previewFrozen && (elapsedMs >= BLOCK_PREVIEW_MAX_MS || text.length >= BLOCK_PREVIEW_MAX_CHARS)) {
       previewFrozen = true;
       previewFrozenSourceText = text.slice(0, BLOCK_PREVIEW_MAX_CHARS);
@@ -1677,10 +1679,7 @@ export function createBotWsReplyHandle(params: {
       return "";
     }
     const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
-    const statusText =
-      previewFrozen && previewStartedAt !== undefined
-        ? formatElapsedStatus(now - previewStartedAt)
-        : "";
+    const statusText = previewFrozen ? formatElapsedStatus(now - handleStartedAt) : "";
     const bodyLimits = statusText
       ? {
           maxChars: Math.max(100, thinkingLimits.maxChars - statusText.length - 2),
@@ -1775,7 +1774,7 @@ export function createBotWsReplyHandle(params: {
     }
     stopPreviewExpiredNoticeTimer();
     previewExpiredNoticeInFlight = true;
-    const elapsedMs = Date.now() - (previewStartedAt ?? handleStartedAt);
+    const elapsedMs = Date.now() - handleStartedAt;
     void sendMarkdownChunksViaActivePush(formatElapsedStatus(elapsedMs), {
       reason: "preview-expired",
     })
@@ -2065,10 +2064,10 @@ export function createBotWsReplyHandle(params: {
       stopPreviewStatusInterval();
       return true;
     }
-    if (previewStartedAt !== undefined && now - previewStartedAt >= PREVIEW_WATCHDOG_MAX_MS) {
+    if (now - handleStartedAt >= PREVIEW_WATCHDOG_MAX_MS) {
       previewWatchdogExpired = true;
       console.warn(
-        `[wecom-preview] status-watchdog-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${now - previewStartedAt}`,
+        `[wecom-preview] status-watchdog-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${now - handleStartedAt}`,
       );
       stopPreviewStatusInterval();
       return true;
@@ -2139,14 +2138,13 @@ export function createBotWsReplyHandle(params: {
       previewFreezeTimeout ||
       streamSettled ||
       previewFrozen ||
-      previewStartedAt === undefined ||
       !lastPreviewText ||
       isEvent ||
       supersededByNewInbound
     ) {
       return;
     }
-    const delayMs = Math.max(0, BLOCK_PREVIEW_MAX_MS - (now - previewStartedAt));
+    const delayMs = Math.max(0, BLOCK_PREVIEW_MAX_MS - (now - handleStartedAt));
     previewFreezeTimeout = setTimeout(() => {
       previewFreezeTimeout = undefined;
       void freezePreviewByTimeout();
@@ -2159,7 +2157,7 @@ export function createBotWsReplyHandle(params: {
     }
     if (
       !previewFrozen &&
-      ((previewStartedAt !== undefined && now - previewStartedAt >= BLOCK_PREVIEW_MAX_MS) ||
+      (now - handleStartedAt >= BLOCK_PREVIEW_MAX_MS ||
         text.length >= BLOCK_PREVIEW_MAX_CHARS)
     ) {
       return true;

@@ -1058,7 +1058,7 @@ describe("createBotWsReplyHandle", () => {
     const firstPreview = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
     expect(firstPreview).toContain("预览内容。");
     expect(firstPreview).not.toContain("END-FROZEN");
-    expect(firstPreview).toContain("执行长任务中，当前用时0s");
+    expect(firstPreview).toContain("执行长任务中，当前用时1s");
 
     await vi.advanceTimersByTimeAsync(15_000);
     await flushPromises();
@@ -1068,6 +1068,38 @@ describe("createBotWsReplyHandle", () => {
     expect(secondPreview).toContain("预览内容。");
     expect(secondPreview).toContain("执行长任务中，当前用时15s");
     expect(secondPreview).not.toContain("END-FROZEN");
+  });
+
+  it("anchors frozen preview elapsed time to task start and keeps it advancing", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-preview-task-clock" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    // Tool/reasoning work can run for a while before the first visible block.
+    // The progress clock must not restart when that block freezes the preview.
+    await vi.advanceTimersByTimeAsync(65_000);
+    const longBlock = "预览内容。".repeat(700);
+    await handle.deliver({ text: longBlock, isReasoning: false }, { kind: "block" });
+
+    const statusContents = () =>
+      mockClient.replyStream.mock.calls.map((call) => String(call[2] ?? ""));
+    expect(statusContents().at(-1)).toContain("执行长任务中，当前用时1m05s");
+    expect(statusContents().at(-1)).not.toContain("当前用时0s");
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+    expect(statusContents().at(-1)).toContain("执行长任务中，当前用时1m20s");
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+    expect(statusContents().at(-1)).toContain("执行长任务中，当前用时1m35s");
   });
 
   it("freezes short block previews by elapsed time and keeps the original text visible", async () => {

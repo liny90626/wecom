@@ -187,6 +187,11 @@ export async function dispatchRuntimeReply(params: {
     if (!isBotWsReply) {
       throw error;
     }
+    if (abortSignal?.aborted) {
+      // OpenClaw may reject after a supersede instead of resolving its empty
+      // dispatch result. The old handle is no longer allowed to fail or close.
+      return;
+    }
     if (finalDelivered) {
       return;
     }
@@ -201,6 +206,11 @@ export async function dispatchRuntimeReply(params: {
     return;
   }
   if (!result) {
+    return;
+  }
+  if (abortSignal?.aborted) {
+    // An aborted dispatch can still resolve with counts or delivery errors;
+    // none of those belong to the successor's conversation.
     return;
   }
 

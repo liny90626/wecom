@@ -361,6 +361,98 @@ describe("dispatchRuntimeReply", () => {
     expect(deliver.mock.calls.every((call) => call[0]?.isReasoning === true)).toBe(true);
   });
 
+  it("stays silent on a superseded flagless dispatch", async () => {
+    const abortController = new AbortController();
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async () => {
+      abortController.abort(new Error("superseded by a newer inbound message"));
+      return { queuedFinal: false, counts: { block: 0, final: 0, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-superseded-flagless" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+        fail,
+      } as any,
+      abortSignal: abortController.signal,
+    });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(fail).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when a superseded dispatch rejects after observed activity", async () => {
+    const abortController = new AbortController();
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onObservedReplyDelivery();
+      abortController.abort(new Error("superseded by a newer inbound message"));
+      throw new Error("Dispatch reply operation aborted");
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-superseded-rejected" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+        fail,
+      } as any,
+      abortSignal: abortController.signal,
+    });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(fail).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when a superseded dispatch returns failure counts", async () => {
+    const abortController = new AbortController();
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async () => {
+      abortController.abort(new Error("superseded by a newer inbound message"));
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        failedCounts: { final: 1 },
+      };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-superseded-failed-count" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+        fail,
+      } as any,
+      abortSignal: abortController.signal,
+    });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(fail).not.toHaveBeenCalled();
+  });
+
   it("falls back to the fail path when the absorbed notice cannot be delivered", async () => {
     agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({

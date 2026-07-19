@@ -1247,6 +1247,39 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).not.toContain("WeCom WS reply failed");
   });
 
+  it("keeps a model timeout distinct from a WeCom delivery interruption after the stream expires", async () => {
+    const expiredError = {
+      headers: { req_id: "req-idle-timeout-after-reasoning" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream
+      .mockResolvedValueOnce({} as any)
+      .mockRejectedValueOnce(expiredError);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-idle-timeout-after-reasoning" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "正在分析导出步骤", isReasoning: true }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(3_000);
+    await handle.deliver({ text: "继续检查下载链路", isReasoning: true }, { kind: "block" });
+    await handle.fail(new Error("LLM idle timeout (120s): no response from model"));
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.sendMessage).toHaveBeenLastCalledWith("alice", {
+      msgtype: "markdown",
+      markdown: { content: "⚠️ 模型响应超时，本次任务未完成，请稍后重试。" },
+    });
+  });
+
   it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

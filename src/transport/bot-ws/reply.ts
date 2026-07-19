@@ -45,6 +45,7 @@ const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
 const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = 9 * 60_000;
 const PREVIEW_EXPIRED_NOTICE_REPEAT_MS = 60_000;
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
+const REPLY_MODEL_TIMEOUT_NOTICE_TEXT = "⚠️ 模型响应超时，本次任务未完成，请稍后重试。";
 const REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT =
   "上一轮任务还在处理中或会话状态刚发生变化，这条消息未能处理，请稍后重新发送。";
 const FINAL_PUSH_RETRY_BASE_MS = 20_000;
@@ -101,6 +102,16 @@ function isReplyNoVisibleOutputError(error: unknown, formattedMessage: string): 
   return (
     name === "WeComReplyNoVisibleOutputError" ||
     formattedMessage.includes("WeCom Bot WS reply produced no visible output")
+  );
+}
+
+function isOpenClawModelTimeoutError(error: unknown, formattedMessage: string): boolean {
+  const message = `${formattedMessage} ${formatFallbackError(error)}`.toLowerCase();
+  return (
+    message.includes("llm idle timeout") ||
+    message.includes("model idle timeout") ||
+    message.includes("llm request timed out") ||
+    message.includes("model did not produce a response before")
   );
 }
 
@@ -2636,6 +2647,7 @@ export function createBotWsReplyHandle(params: {
       }
       const message = formatErrorMessage(error);
       const noVisibleOutput = isReplyNoVisibleOutputError(error, message);
+      const modelTimeout = isOpenClawModelTimeoutError(error, message);
       const initConflict = isRetryableReplySessionAdmissionError(error);
       // Only append the notice to previews that carried visible body text,
       // and rebuild the progress from the body-only source: lastPreviewText
@@ -2643,10 +2655,12 @@ export function createBotWsReplyHandle(params: {
       // strips — promoting raw reasoning summaries to visible text.
       const failNoticeText = initConflict
         ? REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT
-        : noVisibleOutput && lastPreviewText && accumulatedText
-          ? appendFailureNoticeToProgress(accumulatedText, REPLY_FAIL_NOTICE_TEXT)
-          : REPLY_FAIL_NOTICE_TEXT;
-      const text = initConflict || noVisibleOutput
+        : modelTimeout
+          ? REPLY_MODEL_TIMEOUT_NOTICE_TEXT
+          : noVisibleOutput && lastPreviewText && accumulatedText
+            ? appendFailureNoticeToProgress(accumulatedText, REPLY_FAIL_NOTICE_TEXT)
+            : REPLY_FAIL_NOTICE_TEXT;
+      const text = initConflict || modelTimeout || noVisibleOutput
         ? failNoticeText
         : `WeCom WS reply failed: ${message}`;
       const sendFailNoticeOnce = async (): Promise<void> => {

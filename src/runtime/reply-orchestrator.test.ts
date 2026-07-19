@@ -129,6 +129,42 @@ describe("dispatchRuntimeReply", () => {
     expect(fail).not.toHaveBeenCalled();
   });
 
+  it("forwards OpenClaw's model idle-timeout final as a visible final", async () => {
+    const timeoutText =
+      "The model did not produce a response before the model idle timeout. Please try again.";
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onReasoningStream({ text: "长任务分析中" });
+      await params.dispatcherOptions.deliver(
+        { text: timeoutText, isError: true },
+        { kind: "final" },
+      );
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-model-idle-timeout" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+        fail,
+      } as any,
+    });
+
+    expect(fail).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenLastCalledWith(
+      { text: timeoutText, isError: true },
+      { kind: "final" },
+    );
+  });
+
   it("synthesizes a final close for bot-ws when only block replies were queued", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
       queuedFinal: false,

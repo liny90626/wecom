@@ -58,6 +58,27 @@ describe("recordInboundSessionSettled", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("can detach tracked metadata without leaking a later rejection", async () => {
+    let rejectMetadata!: (error: Error) => void;
+    const metadataTask = new Promise<void>((_, reject) => {
+      rejectMetadata = reject;
+    });
+    const recordInboundSession = vi.fn(async (params) => {
+      params.trackSessionMetaTask?.(metadataTask);
+    });
+
+    await expect(
+      recordInboundSessionSettled(
+        { channel: { session: { recordInboundSession } } } as any,
+        makeParams(),
+        { waitForMetadata: false },
+      ),
+    ).resolves.toBeUndefined();
+
+    rejectMetadata(new Error("detached metadata write failed"));
+    await Promise.resolve();
+  });
+
   it("stops waiting when the caller aborts", async () => {
     const metadataTask = new Promise<void>(() => undefined);
     const recordInboundSession = vi.fn(async (params) => {
@@ -111,6 +132,30 @@ describe("recordInboundSessionSettled", () => {
 
       await vi.advanceTimersByTimeAsync(100);
       await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("can treat a metadata timeout as non-fatal", async () => {
+    vi.useFakeTimers();
+    try {
+      const metadataTask = new Promise<void>(() => undefined);
+      const recordInboundSession = vi.fn(async (params) => {
+        params.trackSessionMetaTask?.(metadataTask);
+      });
+      const onMetadataTimeout = vi.fn();
+      const operation = recordInboundSessionSettled(
+        { channel: { session: { recordInboundSession } } } as any,
+        makeParams(),
+        { timeoutMs: 100, onMetadataTimeout },
+      );
+
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(operation).resolves.toBeUndefined();
+      expect(onMetadataTimeout).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "WeComInboundSessionMetadataTimeoutError" }),
+      );
     } finally {
       vi.useRealTimers();
     }

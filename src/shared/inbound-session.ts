@@ -47,21 +47,30 @@ function waitWithAbortAndTimeout<T>(params: {
 export async function recordInboundSessionSettled(
   core: PluginRuntime,
   params: RecordInboundSessionParams,
-  options: { abortSignal?: AbortSignal; timeoutMs?: number } = {},
+  options: {
+    abortSignal?: AbortSignal;
+    timeoutMs?: number;
+    waitForMetadata?: boolean;
+    onMetadataTimeout?: (error: Error) => void;
+  } = {},
 ): Promise<void> {
   if (options.abortSignal?.aborted) {
     throw options.abortSignal.reason ?? new Error("WeCom inbound session aborted.");
   }
   const metadataTasks: Promise<unknown>[] = [];
-  const operation = (async () => {
-    await core.channel.session.recordInboundSession({
-      ...params,
-      trackSessionMetaTask: (task) => {
-        metadataTasks.push(task);
-      },
-    });
-    await Promise.allSettled(metadataTasks);
-  })();
+  await core.channel.session.recordInboundSession({
+    ...params,
+    trackSessionMetaTask: (task) => {
+      metadataTasks.push(task);
+    },
+  });
+  if (metadataTasks.length === 0) {
+    return;
+  }
+  const operation = Promise.allSettled(metadataTasks);
+  if (options.waitForMetadata === false) {
+    return;
+  }
   const timeoutMs =
     typeof options.timeoutMs === "number" &&
     Number.isFinite(options.timeoutMs) &&
@@ -69,9 +78,21 @@ export async function recordInboundSessionSettled(
       ? options.timeoutMs
       : DEFAULT_INBOUND_SESSION_METADATA_TIMEOUT_MS;
 
-  await waitWithAbortAndTimeout({
-    promise: operation,
-    abortSignal: options.abortSignal,
-    timeoutMs,
-  });
+  try {
+    await waitWithAbortAndTimeout({
+      promise: operation,
+      abortSignal: options.abortSignal,
+      timeoutMs,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.name === "WeComInboundSessionMetadataTimeoutError" &&
+      options.onMetadataTimeout
+    ) {
+      options.onMetadataTimeout(error);
+      return;
+    }
+    throw error;
+  }
 }

@@ -179,6 +179,7 @@ describe("prepareInboundSession", () => {
       releaseMetadata = resolve;
     });
     const { core, recordInboundSession } = createCore();
+    core.channel.session.readSessionUpdatedAt.mockReturnValueOnce(undefined);
     recordInboundSession.mockImplementationOnce(async (params) => {
       params.trackSessionMetaTask?.(metadataTask);
     });
@@ -209,5 +210,79 @@ describe("prepareInboundSession", () => {
     releaseMetadata();
     await operation;
     expect(settled).toBe(true);
+  });
+
+  it("does not wait for tracked metadata on a warm session", async () => {
+    getPeerContextToken.mockReturnValue(undefined);
+    let releaseMetadata!: () => void;
+    const metadataTask = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
+    const { core, recordInboundSession } = createCore();
+    recordInboundSession.mockImplementationOnce(async (params) => {
+      params.trackSessionMetaTask?.(metadataTask);
+    });
+
+    await expect(
+      prepareInboundSession({
+        core,
+        cfg: {} as any,
+        event: {
+          accountId: "default",
+          transport: "bot-ws",
+          messageId: "msg-metadata-warm",
+          conversation: {
+            peerKind: "direct",
+            peerId: "HiDaoMax",
+            senderId: "HiDaoMax",
+          },
+          text: "hello",
+        } as any,
+        mediaService: createMediaService(),
+      }),
+    ).resolves.toBeDefined();
+
+    releaseMetadata();
+  });
+
+  it("continues a cold session after the metadata grace period", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      getPeerContextToken.mockReturnValue(undefined);
+      const metadataTask = new Promise<void>(() => undefined);
+      const { core, recordInboundSession } = createCore();
+      core.channel.session.readSessionUpdatedAt.mockReturnValueOnce(undefined);
+      recordInboundSession.mockImplementationOnce(async (params) => {
+        params.trackSessionMetaTask?.(metadataTask);
+      });
+
+      const operation = prepareInboundSession({
+        core,
+        cfg: {} as any,
+        event: {
+          accountId: "default",
+          transport: "bot-ws",
+          messageId: "msg-metadata-cold-timeout",
+          conversation: {
+            peerKind: "direct",
+            peerId: "HiDaoMax",
+            senderId: "HiDaoMax",
+          },
+          text: "hello",
+        } as any,
+        mediaService: createMediaService(),
+      });
+
+      await vi.waitFor(() => expect(recordInboundSession).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(operation).resolves.toBeDefined();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("inbound-session-metadata-deferred"),
+      );
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });

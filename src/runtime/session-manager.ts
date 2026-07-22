@@ -13,6 +13,8 @@ export type PreparedSession = {
   storePath: string;
 };
 
+const COLD_SESSION_METADATA_GRACE_MS = 1_000;
+
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw signal.reason ?? new Error("WeCom inbound session prepare aborted.");
@@ -149,7 +151,19 @@ export async function prepareInboundSession(params: {
       ctx,
       onRecordError: () => {},
     },
-    { abortSignal },
+    {
+      abortSignal,
+      // OpenClaw records metadata as best effort. Only a cold session needs a
+      // short ordering grace; making every warm turn wait on the agent-wide
+      // store queue lets an unrelated stuck write block message dispatch.
+      waitForMetadata: previousTimestamp === undefined,
+      timeoutMs: COLD_SESSION_METADATA_GRACE_MS,
+      onMetadataTimeout: (error) => {
+        console.warn(
+          `[wecom-b3] inbound-session-metadata-deferred sessionKey=${ctx.SessionKey ?? route.sessionKey} graceMs=${COLD_SESSION_METADATA_GRACE_MS} error=${error.message}`,
+        );
+      },
+    },
   );
   throwIfAborted(abortSignal);
 

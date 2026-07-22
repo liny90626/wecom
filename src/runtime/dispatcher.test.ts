@@ -57,6 +57,7 @@ function makeReplyHandle(
 function makeCore(
   dispatchReplyWithBufferedBlockDispatcher: ReturnType<typeof vi.fn>,
   recordInboundSession = vi.fn().mockResolvedValue(undefined),
+  readSessionUpdatedAt = () => undefined as number | undefined,
 ) {
   return {
     channel: {
@@ -75,7 +76,7 @@ function makeCore(
       },
       session: {
         resolveStorePath: () => "/tmp/wecom-dispatcher-test",
-        readSessionUpdatedAt: () => undefined,
+        readSessionUpdatedAt,
         recordInboundSession,
       },
     },
@@ -1127,6 +1128,47 @@ describe("dispatchInboundEvent", () => {
     expect(fail).toHaveBeenCalledOnce();
     expect(fail).toHaveBeenCalledWith(prepareError);
     expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+  });
+
+  it("does not let warm-session metadata stall core dispatch", async () => {
+    let releaseMetadata!: () => void;
+    const metadataTask = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
+    const recordInboundSession = vi.fn(async (params) => {
+      params.trackSessionMetaTask?.(metadataTask);
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(
+      dispatchReplyWithBufferedBlockDispatcher,
+      recordInboundSession,
+      () => Date.now() - 1_000,
+    );
+    const operation = dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: makeStore() as any,
+      auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+      event: makeEvent("msg-warm-metadata-stall", "warm"),
+      replyHandle: makeReplyHandle(),
+    });
+
+    await vi.waitFor(() => expect(recordInboundSession).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    const dispatchedBeforeMetadataSettled =
+      dispatchReplyWithBufferedBlockDispatcher.mock.calls.length === 1;
+
+    releaseMetadata();
+    await operation;
+
+    expect(dispatchedBeforeMetadataSettled).toBe(true);
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
   });
 
   it("times out a stuck prepare after 60 seconds", async () => {

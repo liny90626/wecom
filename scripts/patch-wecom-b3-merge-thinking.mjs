@@ -63,10 +63,10 @@ function status() {
     reply.includes("hasPendingReplyAck(params.client, params.frame)") &&
     reply.includes("supersede-notice-failed") &&
     reply.includes("stream-final-terminal-fallback") &&
-    reply.includes("resolveStreamFallbackText(finalText)") &&
+    reply.includes("resolveStreamFallbackText(finalText,") &&
     reply.includes("await sendMarkdownChunksViaActivePush(fallbackText, {") &&
     reply.includes("reason: \"stream-fallback\"") &&
-    reply.includes("appendCompletionMarker: true") &&
+    reply.includes("appendCompletionMarker: fallbackAppendCompletionMarker") &&
     reply.includes("dedupeLongFinalText(finalText, { previewFrozen })") &&
     reply.includes("rollbackFinalDelivered(currentFinalDeliveryKey") &&
     reply.includes("markFinalDelivered(currentFinalDeliveryKey, { peerDedup: currentFinalUsesPeerDedup })") &&

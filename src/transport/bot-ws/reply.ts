@@ -46,6 +46,8 @@ const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = 9 * 60_000;
 const PREVIEW_EXPIRED_NOTICE_REPEAT_MS = 60_000;
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
 const REPLY_MODEL_TIMEOUT_NOTICE_TEXT = "⚠️ 模型响应超时，本次任务未完成，请稍后重试。";
+const REPLY_PREPARE_TIMEOUT_NOTICE_TEXT =
+  "⚠️ 会话准备超时，本条消息尚未开始处理，请稍后重新发送。";
 const REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT =
   "上一轮任务还在处理中或会话状态刚发生变化，这条消息未能处理，请稍后重新发送。";
 const FINAL_PUSH_RETRY_BASE_MS = 20_000;
@@ -118,6 +120,17 @@ function isOpenClawModelTimeoutError(error: unknown, formattedMessage: string): 
     message.includes("turn_completion_idle_timeout") ||
     message.includes("turn_progress_idle_timeout") ||
     message.includes("turn_terminal_idle_timeout")
+  );
+}
+
+function isPrepareTimeoutError(error: unknown, formattedMessage: string): boolean {
+  const name =
+    error && typeof error === "object" && "name" in error
+      ? String((error as { name?: unknown }).name ?? "")
+      : "";
+  return (
+    name === "WeComPrepareTimeoutError" ||
+    formattedMessage.includes("WeCom inbound session prepare timed out")
   );
 }
 
@@ -1380,19 +1393,21 @@ export function createBotWsReplyHandle(params: {
     }, delayMs);
   };
 
-  const resolveStreamFallbackText = (finalText: string): string => {
+  const resolveStreamFallbackText = (finalText: string, isError = false): string => {
     const deliveredSourceText = previewFrozenDeliveredSourceText || lastDeliveredBodySourceText;
     if (!deliveredSourceText || !finalText.startsWith(deliveredSourceText)) {
       return finalText;
     }
     const remainder = finalText.slice(deliveredSourceText.length).trimStart();
     if (!remainder) {
-      return "最终回复已完成，以上预览内容即为完整回复。";
+      return isError
+        ? "任务未完成，以上为本次已完成的进度。"
+        : "最终回复已完成，以上预览内容即为完整回复。";
     }
     if (remainder === FINAL_COMPLETION_MARKER) {
       return FINAL_COMPLETION_MARKER;
     }
-    return `继续输出：\n\n${remainder}`;
+    return `${isError ? "任务未完成" : "继续输出"}：\n\n${remainder}`;
   };
 
   const deliverNormalFinalViaStream = async (
@@ -1401,6 +1416,7 @@ export function createBotWsReplyHandle(params: {
       appendCompletionMarker: boolean;
       deliveryKey: string;
       peerDedup: boolean;
+      isError: boolean;
     },
   ): Promise<boolean | "retry-scheduled"> => {
     const markdownChunks = withOptionalCompletionMarker(
@@ -1418,7 +1434,8 @@ export function createBotWsReplyHandle(params: {
       frame: params.frame,
       hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
     });
-    const fallbackText = resolveStreamFallbackText(finalText);
+    const fallbackText = resolveStreamFallbackText(finalText, options.isError);
+    const fallbackAppendCompletionMarker = !options.isError;
     // The fallback retry must reuse the EXACT identity of the failed push
     // (text/marker/default limits): any drift would reset the tracked chunk
     // progress and re-push chunks the user already confirmed-received.
@@ -1426,7 +1443,7 @@ export function createBotWsReplyHandle(params: {
       text: fallbackText,
       deliveryKey: options.deliveryKey,
       peerDedup: options.peerDedup,
-      appendCompletionMarker: true,
+      appendCompletionMarker: fallbackAppendCompletionMarker,
       alreadyMarkedDelivered: true,
       preserveDeliveryClaim: true,
     });
@@ -1457,8 +1474,8 @@ export function createBotWsReplyHandle(params: {
       try {
         await sendMarkdownChunksViaActivePush(fallbackText, {
           reason: "superseded-final",
-          appendCompletionMarker: true,
-          progress: resolveFinalPushProgress(fallbackText, true),
+          appendCompletionMarker: fallbackAppendCompletionMarker,
+          progress: resolveFinalPushProgress(fallbackText, fallbackAppendCompletionMarker),
         });
         visibleReplyStarted = true;
       } catch (fallbackError) {
@@ -1473,8 +1490,8 @@ export function createBotWsReplyHandle(params: {
       try {
         await sendMarkdownChunksViaActivePush(fallbackText, {
           reason: "stream-fallback",
-          appendCompletionMarker: true,
-          progress: resolveFinalPushProgress(fallbackText, true),
+          appendCompletionMarker: fallbackAppendCompletionMarker,
+          progress: resolveFinalPushProgress(fallbackText, fallbackAppendCompletionMarker),
         });
         visibleReplyStarted = true;
       } catch (fallbackError) {
@@ -1489,8 +1506,8 @@ export function createBotWsReplyHandle(params: {
       try {
         await sendMarkdownChunksViaActivePush(fallbackText, {
           reason: "stream-fallback",
-          appendCompletionMarker: true,
-          progress: resolveFinalPushProgress(fallbackText, true),
+          appendCompletionMarker: fallbackAppendCompletionMarker,
+          progress: resolveFinalPushProgress(fallbackText, fallbackAppendCompletionMarker),
         });
         visibleReplyStarted = true;
       } catch (fallbackError) {
@@ -1516,8 +1533,8 @@ export function createBotWsReplyHandle(params: {
         try {
           await sendMarkdownChunksViaActivePush(fallbackText, {
             reason: "stream-fallback",
-            appendCompletionMarker: true,
-            progress: resolveFinalPushProgress(fallbackText, true),
+            appendCompletionMarker: fallbackAppendCompletionMarker,
+            progress: resolveFinalPushProgress(fallbackText, fallbackAppendCompletionMarker),
           });
           visibleReplyStarted = true;
         } catch (fallbackError) {
@@ -1531,8 +1548,8 @@ export function createBotWsReplyHandle(params: {
       try {
         await sendMarkdownChunksViaActivePush(fallbackText, {
           reason: "stream-fallback",
-          appendCompletionMarker: true,
-          progress: resolveFinalPushProgress(fallbackText, true),
+          appendCompletionMarker: fallbackAppendCompletionMarker,
+          progress: resolveFinalPushProgress(fallbackText, fallbackAppendCompletionMarker),
         });
         visibleReplyStarted = true;
       } catch (fallbackError) {
@@ -2484,6 +2501,7 @@ export function createBotWsReplyHandle(params: {
         const reasoningOnlyFinal = !finalText && !!accumulatedThinkingText;
         finalText = dedupeLongFinalText(finalText, { previewFrozen });
         finalAppendCompletionMarker =
+          payload.isError !== true &&
           !isEvent &&
           shouldAppendStreamCompletionMarker({
             finalText,
@@ -2547,7 +2565,7 @@ export function createBotWsReplyHandle(params: {
           );
         } else if (info.kind === "final" && supersededByNewInbound) {
           settleStream();
-          const fallbackText = resolveStreamFallbackText(finalText);
+          const fallbackText = resolveStreamFallbackText(finalText, payload.isError === true);
           const textToSend =
             mediaUrls.length > 0
               ? `${fallbackText}\n\n${B3_MEDIA_SUPERSEDED_NOTE}`
@@ -2593,6 +2611,7 @@ export function createBotWsReplyHandle(params: {
             appendCompletionMarker: finalAppendCompletionMarker,
             deliveryKey: currentFinalDeliveryKey,
             peerDedup: currentFinalUsesPeerDedup,
+            isError: payload.isError === true,
           });
           if (normalFinalResult === "retry-scheduled") {
             return;
@@ -2605,10 +2624,10 @@ export function createBotWsReplyHandle(params: {
             }
             if (!(supersededByNewInbound && suppressSupersededFinalPush)) {
               scheduleFinalPushRetry({
-                text: resolveStreamFallbackText(finalText),
+                text: resolveStreamFallbackText(finalText, payload.isError === true),
                 deliveryKey: currentFinalDeliveryKey,
                 peerDedup: currentFinalUsesPeerDedup,
-                appendCompletionMarker: true,
+                appendCompletionMarker: payload.isError !== true,
                 alreadyMarkedDelivered: finalMediaDelivered,
                 preserveDeliveryClaim: finalMediaDelivered,
               });
@@ -2652,6 +2671,7 @@ export function createBotWsReplyHandle(params: {
       const message = formatErrorMessage(error);
       const noVisibleOutput = isReplyNoVisibleOutputError(error, message);
       const modelTimeout = isOpenClawModelTimeoutError(error, message);
+      const prepareTimeout = isPrepareTimeoutError(error, message);
       const initConflict = isRetryableReplySessionAdmissionError(error);
       // Only append the notice to previews that carried visible body text,
       // and rebuild the progress from the body-only source: lastPreviewText
@@ -2659,12 +2679,14 @@ export function createBotWsReplyHandle(params: {
       // strips — promoting raw reasoning summaries to visible text.
       const failNoticeText = initConflict
         ? REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT
-        : modelTimeout
-          ? REPLY_MODEL_TIMEOUT_NOTICE_TEXT
-          : noVisibleOutput && lastPreviewText && accumulatedText
-            ? appendFailureNoticeToProgress(accumulatedText, REPLY_FAIL_NOTICE_TEXT)
-            : REPLY_FAIL_NOTICE_TEXT;
-      const text = initConflict || modelTimeout || noVisibleOutput
+        : prepareTimeout
+          ? REPLY_PREPARE_TIMEOUT_NOTICE_TEXT
+          : modelTimeout
+            ? REPLY_MODEL_TIMEOUT_NOTICE_TEXT
+            : noVisibleOutput && lastPreviewText && accumulatedText
+              ? appendFailureNoticeToProgress(accumulatedText, REPLY_FAIL_NOTICE_TEXT)
+              : REPLY_FAIL_NOTICE_TEXT;
+      const text = initConflict || prepareTimeout || modelTimeout || noVisibleOutput
         ? failNoticeText
         : `WeCom WS reply failed: ${message}`;
       const sendFailNoticeOnce = async (): Promise<void> => {

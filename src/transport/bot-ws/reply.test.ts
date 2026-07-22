@@ -1272,11 +1272,50 @@ describe("createBotWsReplyHandle", () => {
     });
 
     await handle.deliver({ text: "已完成前置工具调用", isReasoning: false }, { kind: "block" });
-    await handle.deliver({ text: "LLM request failed.", isReasoning: false }, { kind: "final" });
+    await handle.deliver(
+      { text: "LLM request failed.", isReasoning: false, isError: true },
+      { kind: "final" },
+    );
 
     const pushed = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
-    expect(pushed).toBe(`继续输出：\n\nLLM request failed.\n\n${FINAL_COMPLETION_MARKER}`);
+    expect(pushed).toBe("任务未完成：\n\nLLM request failed.");
+    expect(pushed).not.toContain(FINAL_COMPLETION_MARKER);
     expect(pushed).not.toContain("WeCom WS reply failed");
+  });
+
+  it.each([
+    [
+      "generic-run-failure",
+      "⚠️ Something went wrong while processing your request. Please try again, or use /new to start a fresh session.",
+    ],
+    ["llm-timeout-final", "LLM request timed out."],
+  ])("does not mark OpenClaw error final %s as completed", async (caseId, errorText) => {
+    const expiredError = {
+      headers: { req_id: `req-${caseId}` },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream
+      .mockResolvedValueOnce({} as any)
+      .mockRejectedValueOnce(expiredError);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: `req-${caseId}` },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "长任务已完成若干步骤", isReasoning: false }, { kind: "block" });
+    await handle.deliver({ text: errorText, isError: true }, { kind: "final" });
+
+    const pushed = String((mockClient.sendMessage.mock.calls.at(-1)?.[1] as any).markdown.content);
+    expect(pushed).toBe(`任务未完成：\n\n${errorText}`);
+    expect(pushed).not.toContain(FINAL_COMPLETION_MARKER);
   });
 
   it("keeps a model timeout distinct from a WeCom delivery interruption after the stream expires", async () => {
@@ -1355,6 +1394,27 @@ describe("createBotWsReplyHandle", () => {
       "⚠️ 模型响应超时，本次任务未完成，请稍后重试。",
       true,
     );
+  });
+
+  it("reports prepare timeout without leaking an internal WeCom WS error", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-prepare-timeout-friendly" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const error = new Error("WeCom inbound session prepare timed out after 60000ms");
+    error.name = "WeComPrepareTimeoutError";
+
+    await handle.fail?.(error);
+
+    const content = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(content).toBe("⚠️ 会话准备超时，本条消息尚未开始处理，请稍后重新发送。");
+    expect(content).not.toContain("WeCom WS reply failed");
   });
 
   it("closes the stream bubble with the first final chunk and actively sends long remainders", async () => {
@@ -3581,10 +3641,17 @@ describe("createBotWsReplyHandle", () => {
     });
 
     await handle.deliver({ text: "预览内容。".repeat(620), isReasoning: false }, { kind: "block" });
-    await vi.advanceTimersByTimeAsync(3_600_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await flushPromises();
+    const callsBeforeCap = mockClient.replyStream.mock.calls.length;
+    expect(callsBeforeCap).toBeGreaterThan(2);
+
+    // Jump wall time to the lifetime cap without executing every 15s refresh.
+    vi.setSystemTime(Date.now() + 3_600_000);
+    await vi.advanceTimersByTimeAsync(15_000);
     await flushPromises();
     const callsAtCap = mockClient.replyStream.mock.calls.length;
-    expect(callsAtCap).toBeGreaterThan(2);
+    expect(callsAtCap).toBe(callsBeforeCap);
 
     await vi.advanceTimersByTimeAsync(600_000);
     await flushPromises();

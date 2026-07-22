@@ -1,27 +1,26 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-07-19（v2.5.110-142 发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-07-22（v2.5.110-143 发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 维护版本：`2.5.110-142`，发布标签 `released/2.5.110-142`，包 `yanhaidao-wecom-2.5.110-142.tgz`（npm shasum `760c6b084fbfd1ae1373894de83586f1973e7bea`；SHA-256 `7156af89cef2dcb269aea0e688ec34713c40e7d0ae245be3c740ca196bbb6ce5`）。
+- 维护版本：`2.5.110-143`，发布标签 `released/2.5.110-143`，包 `yanhaidao-wecom-2.5.110-143.tgz`（204,467 bytes；npm shasum `ea5c1e5ffdc45a4e930caefd60e216b00eb631ce`；SHA-256 `63a4bdcb3a5db6f816c7a710a585a81e26b78fa0896a2e03afc3d70d6a1fbd2f`）。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 与 peer 基线仍为 **2026.6.11**（`node_modules/openclaw`），代码需双版本兼容。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；提交邮箱已固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
 - 发版纪律：打包、打 tag、推远端、更新发布文档均需用户明确批准。
-- 测试基线：42 文件 / 405 测试全绿；核心回复套件无缓存复跑 170 测试全绿；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、`node scripts/patch-wecom-b3-merge-thinking.mjs --check`（B1/B2/B3 链）、`git diff --check` 全部通过。
+- 测试基线：42 文件 / 413 测试全绿；核心四文件套件无缓存串行复跑 170 测试全绿；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、`node scripts/patch-wecom-b3-merge-thinking.mjs --check`（B1/B2/B3 链）、`git diff --check` 全部通过；生产依赖审计为 0 漏洞。
 - `reply.test.ts` 头部有 `vi.setConfig({ testTimeout: 30_000 })`：该套件 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s（历史上多次假超时、失败集合随机）。不要改回全局 timeout，也不要因单次全量超时怀疑回归——先单文件复跑。
 
-## 2. v142 事件档案（为什么改成现在这样）
+## 2. v143 事件档案（为什么改成现在这样）
 
-本版处理四类相互关联的问题：
+本版在 v142 进度投递修复上继续处理三类会话/错误收口问题：
 
-1. **企微进度 ACK 反向阻塞模型流**：OpenClaw 会等待 reasoning/Fast 回调；企微 SDK 又按同一 `req_id` 串行等待 ACK。插件此前直接等待进度网络请求，ACK 变慢时可能拖住模型事件消费并触发 OpenClaw idle timeout，表现为思考气泡或半截正文后中断。
-2. **解除阻塞后出现进度/final 竞争**：简单 fire-and-forget 会让多个进度并发写同一 reply stream，final 也可能越过仍在途的进度。
-3. **长任务耗时显示 `0s` 或重置**：旧时钟从首个正文预览开始，没有计入此前的工具调用和推理耗时。
-4. **Fast 延后回复与真实失败混淆**：OpenClaw 将活跃回合转后台时，Fast auto-off 可能被误判为无正文中断；被新消息接管的旧回合也可能产生迟到失败提示。
+1. **暖会话被 best-effort metadata 写队列阻塞**：插件此前等待 OpenClaw `recordInboundSession` 跟踪的所有 metadata task；该队列按 agent 串行，任一旧写入卡住都能让正常暖会话在模型派发前等待到 60 秒 prepare timeout。v118 不等待这类 task，因此没有该退化。
+2. **真实 OpenClaw 错误 final 被包装成成功续文**：流窗口过期后，`LLM request failed.`、`LLM request timed out.` 等 `isError` final 仍复用了成功 fallback，可能显示“继续输出”并追加“（回复完毕）”，让未完成任务看起来已经完成。
+3. **prepare timeout 泄露内部英文**：准备阶段失败会直接展示 `WeCom WS reply failed: ...`，既不友好，也无法告诉用户消息其实尚未进入模型处理。
 
-修复（详见 `changelog/v2.5.110-142.md`）：reasoning/Fast 回调改为非阻塞登记；插件内部用单一 Promise 尾队列串行投递，并只保留最新待发 reasoning 快照；所有 final 路径先停止新进度并执行最多 500ms 的有界封口，持续阻塞则取消待发进度并沿用主动推送兜底；接管 abort 后旧回合静默；任务时钟从 ReplyHandle 创建时开始且最低显示 1s，健康流每 15 秒推进状态；Fast deferred 与真实空回合分别处理。没有新增 OpenClaw 重试、轮询或强制中断。
+修复（详见 `changelog/v2.5.110-143.md`）：暖会话只登记 metadata 并立即派发，冷会话保留最多 1 秒初始化顺序窗口；所有后台 task 仍立即挂接 `allSettled`，避免未处理拒绝。错误 final 按失败语义生成 fallback，不再追加完成标记；prepare timeout 使用明确中文提示。没有新增模型/工具重试、轮询、强制清理或额外网络等待。生产依赖同步升级到 `fast-xml-parser 5.10.1` 与 SDK 允许范围内的 `axios 1.18.1`，审计清零。
 
 ## 3. OpenClaw 7.1 核心机制速查（源码级已验证）
 
@@ -37,7 +36,7 @@
 
 ## 4. 生产观察关键词
 
-`[wecom-b3] dispatch-absorbed-by-active-run`（消息被并入，用户收到提示）· `dispatch-deferred-no-visible-reply`（回合转后台）· `progress-delivery-failed`（单次进度投递失败，模型流不受阻）· `progress-drain-timeout`（500ms 封口超时，随后应走 final 兜底）· `pre-dispatch-run-drain(-result|-failed)` · `dispatch-init-conflict-handoff-retry` · `final-retry-failed ambiguous=true|false` · `final-retry-exhausted`（随后应有一次 fail-notice）· `final-retry-skip-superseded` · `[wecom-preview] expired-notice-deferred`（9 分钟挂起）· `expired-notice-failed`（任务未结算时下一分钟再试）。
+`[wecom-b3] inbound-session-metadata-deferred`（冷会话 metadata 超过 1 秒，已继续派发）· `dispatch-absorbed-by-active-run`（消息被并入，用户收到提示）· `dispatch-deferred-no-visible-reply`（回合转后台）· `progress-delivery-failed`（单次进度投递失败，模型流不受阻）· `progress-drain-timeout`（500ms 封口超时，随后应走 final 兜底）· `pre-dispatch-run-drain(-result|-failed)` · `dispatch-init-conflict-handoff-retry` · `final-retry-failed ambiguous=true|false` · `final-retry-exhausted`（随后应有一次 fail-notice）· `final-retry-skip-superseded` · `[wecom-preview] expired-notice-deferred`（9 分钟挂起）· `expired-notice-failed`（任务未结算时下一分钟再试）。
 若 `dispatch-absorbed-by-active-run` 后长期无答复：占用 run 是僵尸——等 7.1 诊断自愈或再发一条消息触发接管排空。
 
 ## 5. 禁改事项（每条都对应真实事故）
@@ -53,6 +52,8 @@
 ## 6. 已知边界与待办观察
 
 - Fast auto-off 后若 OpenClaw 明确 deferred/yield 且本回合已有活动，会正常收口等待后台结果；真正没有正文、没有外部投递且没有 deferred 证据的 auto-off 回合仍保留中断保护。Fast auto-on 继续允许合法无正文结束。
+- 暖会话不再等待 metadata；冷会话只等待 1 秒。看到 `inbound-session-metadata-deferred` 表示写入仍在后台结算且派发已继续，不应再把它当作消息失败。
+- OpenClaw 自身生成的错误 final 仍会保留原错误正文供诊断，但会明确标为“任务未完成”，且绝不追加“（回复完毕）”。
 - 500ms 是进度封口的有界等待，不会强杀已经进入 SDK 的 ACK；若 ACK 继续阻塞，final 仍需经过 ReplyHandle 既有 5.5s 等待后转主动推送。因此极慢网络下完整 final 可能稍迟，但不会再反向卡住 OpenClaw 模型事件流。
 - 6.11 上“真空回合 + 有思考活动”现以静默/“（回复完毕）”收口而非报错（生产为 7.1，核心有 #100456 可见兜底，无影响）。
 - ambiguous 补发存在有界重复风险（仅未确认分片、≤3 次）——刻意取舍，静默丢失代价更高。
@@ -63,4 +64,4 @@
 
 ## 7. 版本脉络备忘
 
-`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并、接管排空 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + 持续长任务状态 + SDK 1.0.7 → `v142` 进度/模型流解耦 + final 有界封口 + 长任务时钟修正（当前）。
+`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并、接管排空 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + 持续长任务状态 + SDK 1.0.7 → `v142` 进度/模型流解耦 + final 有界封口 + 长任务时钟修正 → `v143` 暖会话 metadata 解阻塞 + 错误 final 正确收口 + 依赖安全补丁（当前）。

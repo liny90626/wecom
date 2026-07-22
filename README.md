@@ -23,7 +23,7 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-`v2.5.110-142` 根治长任务 reasoning/Fast 进度投递对 OpenClaw 模型流的反向阻塞：企微 ACK 变慢时不再拖住模型事件消费，进度快照串行合并，final 前执行 500ms 有界封口，持续阻塞则沿用主动推送兜底。长任务耗时统一从任务创建时计数，首屏不再显示 `0s`，健康流每 15 秒推进状态。主线仍不恢复分钟级 handoff、重试阶梯、per-peer 熔断器或 synthetic thinking。当前发布标签为 `released/2.5.110-142`。
+`v2.5.110-143` 修复暖会话被 OpenClaw best-effort metadata 写队列反向阻塞的问题：暖会话登记 metadata 后立即派发，冷会话只保留最多 1 秒的初始化顺序窗口，后台 metadata 失败仍会被安全收口。OpenClaw 错误 final 在流窗口失效后不再被包装成“继续输出”或错误追加“（回复完毕）”，会话准备超时也改为不泄露内部实现的中文提示；同时升级生产依赖安全补丁。沿用 v142 的非阻塞 reasoning/Fast 进度、final 有界封口和从任务创建时计数的长任务状态。主线仍不恢复分钟级 handoff、重试阶梯、per-peer 熔断器或 synthetic thinking。当前发布标签为 `released/2.5.110-143`。
 
 - B1：修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
 - B2：优化 Bot WebSocket 长文本回复投递。正文过长时会按企业微信限制分段发送，并对流式预览与最终正文之间的重复片段做去重处理，降低长文本重复和截断风险。
@@ -201,6 +201,12 @@ npx vitest run
 
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 v2.5.110-143（2026-07-22，LinKy fork 维护版）
+- **[会话解阻塞] 暖会话不再等待 best-effort metadata**：OpenClaw metadata task 继续后台结算，但不再阻塞正常暖会话进入模型派发；冷会话只保留最多 `1s` 的初始化顺序窗口，超时后记录日志并继续。
+- **[失败语义] 错误 final 不再伪装成成功续文**：流窗口失效后，`LLM request failed.`、`LLM request timed out.` 等错误回复改为“任务未完成”，不再显示“继续输出”或追加“（回复完毕）”。
+- **[友好提示] prepare timeout 不泄露内部错误**：明确告知本条消息尚未开始处理并提示重新发送；不展示 `WeCom WS reply failed`、agent 或 session 标识。
+- **[依赖安全] 生产审计清零**：`fast-xml-parser` 升至 `5.10.1`，企微 SDK 保持 `1.0.7`，其间接 `axios` 升至 `1.18.1`。完整说明见 [`changelog/v2.5.110-143.md`](./changelog/v2.5.110-143.md)。
+
 #### 📌 v2.5.110-142（2026-07-19，LinKy fork 维护版）
 - **[根因修复] 企微进度 ACK 不再阻塞 OpenClaw 模型流**：reasoning 与 Fast 回调改为非阻塞接入，插件内部串行投递并合并连续 reasoning 快照，避免企微网络延迟触发 OpenClaw idle timeout。
 - **[有序收口] final 不越过在途进度**：普通 final、合成 final 和失败路径在进入 ReplyHandle 前执行最多 `500ms` 的有界封口；ACK 持续阻塞时停止旧进度并沿用主动推送兜底，完整正文不会被进度气泡截断。
@@ -223,11 +229,6 @@ npx vitest run
 - **[媒体入站完整性] 合并 Bot WS 媒体与后续文字**：文件/图片帧先到时短暂等待同一会话的文字帧，再以一次完整入站交给 OpenClaw；没有文字的媒体仍按窗口结束后独立投递，并按账号与会话隔离。
 - **[长任务接管] 排空旧 OpenClaw run**：新消息接管同一 Bot WS 会话前解析并中止旧 embedded run，等待有限时间完成排空，再进入新的 dispatch；连续接管会串联 barrier，避免旧清理操作与新 session 初始化竞争。
 - **[回归验证]**：覆盖文件+文字、单独媒体、跨会话隔离、第三条消息抢占、残留 run/barrier 与初始化冲突恢复。完整说明见 [`changelog/v2.5.110-138.md`](./changelog/v2.5.110-138.md)。
-
-#### 📌 v2.5.110-137（2026-07-13，LinKy fork 维护版）
-- **[长任务接管] 修复 OpenClaw session 初始化冲突**：新消息接管同一 Bot WS 会话的旧长任务后，仅在 OpenClaw 明确返回初始化冲突时等待 500ms 并重试一次；正常接管不再固定等待，第三条消息可取消尚未发生的重试。
-- **[错误脱敏] 冲突提示改为用户可理解的文案**：持续冲突不再显示 `WeCom WS reply failed`、agent 名称或 session key；原气泡和流窗口失效后的主动推送统一提示“之前任务还在处理中，新指令冲突啦，请等几分钟后再试试”。
-- **[范围控制] 不重复执行工具、不扩大重试面**：该冲突发生在 agent run 初始化之前；非 Bot WS、没有接管旧回复、非精确冲突均保持原行为。完整说明见 [`changelog/v2.5.110-137.md`](./changelog/v2.5.110-137.md)。
 
 > B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)，reasoning 思考块系列修复见 [`changelog/v2.5.110-113.md`](./changelog/v2.5.110-113.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
 

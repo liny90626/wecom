@@ -324,7 +324,7 @@ export async function dispatchRuntimeReply(params: {
       return;
     }
     if (observedReplyDelivery) {
-      await closeReply();
+      await closeReply(true);
       return;
     }
     return failAndThrow(error);
@@ -448,5 +448,5 @@ export async function dispatchRuntimeReply(params: {
     }
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
   }
-  await closeReply();
+  await closeReply(observedDelivery);
 }

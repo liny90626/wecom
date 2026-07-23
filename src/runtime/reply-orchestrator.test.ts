@@ -840,6 +840,113 @@ describe("dispatchRuntimeReply", () => {
     );
   });
 
+  it("does not retry two externally delivered replies after their source streams expire", async () => {
+    vi.useFakeTimers();
+    __resetBotWsReplyTestState();
+    const expiredError = {
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const pushed: string[] = [];
+    let expireFinalStream = true;
+    const client = {
+      replyStream: vi.fn(async (_frame, _streamId, _content, finish) => {
+        if (finish && expireFinalStream) {
+          throw expiredError;
+        }
+        return {};
+      }),
+      sendMessage: vi.fn(async (_peerId, message) => {
+        const content = String(message?.markdown?.content ?? "");
+        pushed.push(content);
+        if (content.includes("本次回复投递中断")) {
+          return {};
+        }
+        throw new Error("source stream fallback unavailable");
+      }),
+      replyWelcome: vi.fn().mockResolvedValue({}),
+    } as unknown as WSClient;
+
+    const runExternallyDeliveredTurn = async (turn: number) => {
+      const replyHandle = createBotWsReplyHandle({
+        client,
+        frame: {
+          headers: { req_id: `req-observed-expired-${turn}` },
+          body: { from: { userid: "alice" }, chattype: "single" },
+        } as any,
+        accountId: "default",
+        inboundKind: "text",
+        autoSendPlaceholder: false,
+      });
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+        await params.dispatcherOptions.deliver(
+          { text: `第${turn}轮已显示的进度` },
+          { kind: "block" },
+        );
+        replyHandle.markExternalActivity?.();
+        await params.replyOptions.onObservedReplyDelivery();
+        return {
+          queuedFinal: false,
+          counts: { block: 1, final: 0, tool: 0 },
+          sourceReplyDeliveryMode: "message_tool_only",
+          observedReplyDelivery: true,
+        };
+      });
+
+      await dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: `session-observed-expired-${turn}` } } as any,
+        replyHandle,
+      });
+
+      for (const delayMs of [20_000, 40_000, 80_000]) {
+        await vi.advanceTimersByTimeAsync(delayMs);
+        await Promise.resolve();
+      }
+    };
+
+    try {
+      await runExternallyDeliveredTurn(1);
+      await runExternallyDeliveredTurn(2);
+
+      expect(pushed.filter((text) => text.includes("本次回复投递中断"))).toHaveLength(0);
+
+      expireFinalStream = false;
+      const thirdReplyHandle = createBotWsReplyHandle({
+        client,
+        frame: {
+          headers: { req_id: "req-observed-expired-3" },
+          body: { from: { userid: "alice" }, chattype: "single" },
+        } as any,
+        accountId: "default",
+        inboundKind: "text",
+        autoSendPlaceholder: false,
+      });
+      const thirdDispatch = vi.fn().mockImplementation(async (params) => {
+        await params.dispatcherOptions.deliver({ text: "第三轮正常回复" }, { kind: "final" });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      });
+      await dispatchRuntimeReply({
+        core: {
+          channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: thirdDispatch } },
+        } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-observed-expired-3" } } as any,
+        replyHandle: thirdReplyHandle,
+      });
+
+      expect(
+        (client as any).replyStream.mock.calls.some(
+          (call: unknown[]) => call[2] === "第三轮正常回复" && call[3] === true,
+        ),
+      ).toBe(true);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("stays silent on the flag-empty result of a superseded dispatch", async () => {
     agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-of-successor");
     const abortController = new AbortController();
@@ -1276,7 +1383,8 @@ describe("dispatchRuntimeReply", () => {
           observedReplyDelivery: true,
         };
       });
-      return dispatchRuntimeReply({
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      await dispatchRuntimeReply({
         core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
         cfg: {} as any,
         session: { ctx: { SessionKey: sessionKey } } as any,
@@ -1286,13 +1394,51 @@ describe("dispatchRuntimeReply", () => {
             accountId: "default",
             raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
           },
-          deliver: vi.fn().mockResolvedValue(undefined),
+          deliver,
         } as any,
       });
+      return deliver;
     };
 
-    await expect(run(false)).resolves.toBeUndefined();
-    await expect(run(true)).resolves.toBeUndefined();
+    for (const observedAfterFast of [false, true]) {
+      const deliver = await run(observedAfterFast);
+      expect(deliver).toHaveBeenLastCalledWith(
+        { text: "", channelData: { wecomExternalFinalDelivered: true } },
+        { kind: "final" },
+      );
+    }
+  });
+
+  it("settles an observed external reply when OpenClaw rejects after delivery", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onObservedReplyDelivery();
+      throw new Error("model failed after committed message-tool delivery");
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-observed-then-rejected" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(deliver).toHaveBeenLastCalledWith(
+      { text: "", channelData: { wecomExternalFinalDelivered: true } },
+      { kind: "final" },
+    );
+    expect(fail).not.toHaveBeenCalled();
   });
 
   it("does not treat message-tool mode without current-run observed delivery as complete", async () => {

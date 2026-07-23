@@ -357,17 +357,20 @@ export async function dispatchRuntimeReply(params: {
     return;
   }
 
+  const observedDelivery = observedReplyDelivery || result.observedReplyDelivery === true;
+  const successfulFinal = result.queuedFinal === true || (result.counts?.final ?? 0) > 0;
+  if (observedDelivery) {
+    await closeReply(true);
+    return;
+  }
   const sourceDeliverySuppressed =
     result.sendPolicyDenied === true ||
     result.sourceReplyDeliveryMode === "message_tool_only";
-  const observedDelivery = observedReplyDelivery || result.observedReplyDelivery === true;
-  const successfulFinal = result.queuedFinal === true || (result.counts?.final ?? 0) > 0;
 
   // OpenClaw marks yielded/deferred turns as fallback-eligible; let the
   // activity/active-run triage below decide instead of failing on Fast off.
   if (
     fastOffPending &&
-    !observedDelivery &&
     (!successfulFinal || fastOffEmptyFinalSuppressed) &&
     result.noVisibleReplyFallbackEligible !== true
   ) {
@@ -405,8 +408,7 @@ export async function dispatchRuntimeReply(params: {
     result.noVisibleReplyFallbackEligible === true &&
     !visibleBodySeen &&
     !fastAutoOnText &&
-    !sourceDeliverySuppressed &&
-    !observedDelivery
+    !sourceDeliverySuppressed
   ) {
     if (abortSignal?.aborted) {
       // A superseded dispatch must not emit synthetic finals: a deferred
@@ -448,5 +450,5 @@ export async function dispatchRuntimeReply(params: {
     }
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
   }
-  await closeReply(observedDelivery);
+  await closeReply();
 }

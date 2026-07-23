@@ -1441,6 +1441,59 @@ describe("dispatchRuntimeReply", () => {
     expect(fail).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["final callback", { callbackKind: "final" }],
+    ["block callback", { callbackKind: "block" }],
+    ["tool callback", { callbackKind: "tool" }],
+    ["final count", { failedCounts: { final: 1 } }],
+    ["block count", { failedCounts: { block: 1 } }],
+    ["tool count", { failedCounts: { tool: 1 } }],
+  ] as const)(
+    "ignores an old-stream %s after observed external delivery",
+    async (_label, failure) => {
+      const oldStreamError = new Error("old source stream delivery failed");
+      const failedCounts = "failedCounts" in failure ? failure.failedCounts : undefined;
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+        if ("callbackKind" in failure) {
+          await params.dispatcherOptions.onError(oldStreamError, { kind: failure.callbackKind });
+        }
+        await params.replyOptions.onObservedReplyDelivery();
+        return {
+          queuedFinal: false,
+          counts: { block: 0, final: 0, tool: 0 },
+          ...(failedCounts ? { failedCounts } : {}),
+          sourceReplyDeliveryMode: "message_tool_only",
+          observedReplyDelivery: true,
+        };
+      });
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const fail = vi.fn().mockResolvedValue(undefined);
+
+      await expect(
+        dispatchRuntimeReply({
+          core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+          cfg: {} as any,
+          session: { ctx: { SessionKey: `session-observed-${_label.replace(" ", "-")}` } } as any,
+          replyHandle: {
+            context: {
+              transport: "bot-ws",
+              accountId: "default",
+              raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+            },
+            deliver,
+            fail,
+          } as any,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(deliver).toHaveBeenLastCalledWith(
+        { text: "", channelData: { wecomExternalFinalDelivered: true } },
+        { kind: "final" },
+      );
+      expect(fail).not.toHaveBeenCalled();
+    },
+  );
+
   it("does not treat message-tool mode without current-run observed delivery as complete", async () => {
     const sessionKey = "session-message-tool-unobserved";
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {

@@ -1,26 +1,26 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-07-22（v2.5.110-143 发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-07-23（v2.5.110-144 发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 维护版本：`2.5.110-143`，发布标签 `released/2.5.110-143`，包 `yanhaidao-wecom-2.5.110-143.tgz`（204,467 bytes；npm shasum `ea5c1e5ffdc45a4e930caefd60e216b00eb631ce`；SHA-256 `63a4bdcb3a5db6f816c7a710a585a81e26b78fa0896a2e03afc3d70d6a1fbd2f`）。
+- 维护版本：`2.5.110-144`，发布标签 `released/2.5.110-144`，包 `yanhaidao-wecom-2.5.110-144.tgz`（204,738 bytes；npm shasum `309a5464e782611eb6b287ae09fe768cd0ee51e1`；SHA-256 `e6b5f04fd6afd2369429b55822011aeef477765524068ba42d174013575df23a`）。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 与 peer 基线仍为 **2026.6.11**（`node_modules/openclaw`），代码需双版本兼容。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；提交邮箱已固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
 - 发版纪律：打包、打 tag、推远端、更新发布文档均需用户明确批准。
-- 测试基线：42 文件 / 413 测试全绿；核心四文件套件无缓存串行复跑 170 测试全绿；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、`node scripts/patch-wecom-b3-merge-thinking.mjs --check`（B1/B2/B3 链）、`git diff --check` 全部通过；生产依赖审计为 0 漏洞。
+- 测试基线：42 文件 / 421 测试全绿；核心回复两文件复跑 181 测试全绿；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 链与 `git diff --check` 全部通过。生产依赖未变；本次实时 `npm audit` 因 npm 官方端点 TLS 建连中断未取得结果，最近一次同锁文件审计（v143）为 0 漏洞。
 - `reply.test.ts` 头部有 `vi.setConfig({ testTimeout: 30_000 })`：该套件 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s（历史上多次假超时、失败集合随机）。不要改回全局 timeout，也不要因单次全量超时怀疑回归——先单文件复跑。
 
-## 2. v143 事件档案（为什么改成现在这样）
+## 2. v144 事件档案（为什么改成现在这样）
 
-本版在 v142 进度投递修复上继续处理三类会话/错误收口问题：
+本版处理 OpenClaw 已成功投递答案后，旧 Bot WS 流仍错误参与 final 收口的问题：
 
-1. **暖会话被 best-effort metadata 写队列阻塞**：插件此前等待 OpenClaw `recordInboundSession` 跟踪的所有 metadata task；该队列按 agent 串行，任一旧写入卡住都能让正常暖会话在模型派发前等待到 60 秒 prepare timeout。v118 不等待这类 task，因此没有该退化。
-2. **真实 OpenClaw 错误 final 被包装成成功续文**：流窗口过期后，`LLM request failed.`、`LLM request timed out.` 等 `isError` final 仍复用了成功 fallback，可能显示“继续输出”并追加“（回复完毕）”，让未完成任务看起来已经完成。
-3. **prepare timeout 泄露内部英文**：准备阶段失败会直接展示 `WeCom WS reply failed: ...`，既不友好，也无法告诉用户消息其实尚未进入模型处理。
+1. **外部答案成功、原流重复收口**：OpenClaw 6.11/7.1 的 `onObservedReplyDelivery` 只在 message-tool source reply 已有真实可见投递证据后触发；企微 SDK 1.0.7 的主动推送 Promise 也只在 `errcode=0` ACK 后 resolve。插件却仍对旧 ReplyHandle 执行普通空 final。
+2. **过期流误启动补发状态机**：普通空 final 会合并旧进度；原流返回 `846608` 后进入 `20/40/80s` final retry，耗尽时反向推送“本次回复投递中断”，即使答案早已由外部路径提交。
+3. **旧流错误覆盖成功结果**：block/tool/final 的旧投递错误和失败计数在 observed success 之前处理，也能把已成功的外部答案重新判为失败。
 
-修复（详见 `changelog/v2.5.110-143.md`）：暖会话只登记 metadata 并立即派发，冷会话保留最多 1 秒初始化顺序窗口；所有后台 task 仍立即挂接 `allSettled`，避免未处理拒绝。错误 final 按失败语义生成 fallback，不再追加完成标记；prepare timeout 使用明确中文提示。没有新增模型/工具重试、轮询、强制清理或额外网络等待。生产依赖同步升级到 `fast-xml-parser 5.10.1` 与 SDK 允许范围内的 `axios 1.18.1`，审计清零。
+修复（详见 `changelog/v2.5.110-144.md`）：observed external delivery 在正常返回和投递后异常两个出口都统一进入既有 `wecomExternalFinalDelivered` 静默结算，并在旧流 block/tool/final 错误之前早返回。删除后续两个冗余 observed 判断；不新增状态字段、timer、轮询、重试或网络等待。真实未投递 final 的原有补发和失败提示保持不变。
 
 ## 3. OpenClaw 7.1 核心机制速查（源码级已验证）
 
@@ -58,10 +58,11 @@
 - 6.11 上“真空回合 + 有思考活动”现以静默/“（回复完毕）”收口而非报错（生产为 7.1，核心有 #100456 可见兜底，无影响）。
 - ambiguous 补发存在有界重复风险（仅未确认分片、≤3 次）——刻意取舍，静默丢失代价更高。
 - 被接管且“已可见”的旧 final 仍按 B3 丢弃，且核心的 pendingFinalDelivery 恢复副本会因“投递成功”被清除——这是 B3 设计语义，不是 bug。
+- `observedReplyDelivery` 是 OpenClaw 对已提交 source reply 的证明，不是“开始尝试”；不要把 v144 早结算扩大到普通 outbound side effect 或未观察到投递的 message-tool 回合。
 - 观察 `final-retry-failed ambiguous=true` 频率：若高发，说明推送链路（WS 重连/ACK）不稳，优先查网络而非改重试参数。
 - `monitor.integration.test.ts`、`sandbox-media.test.ts` 历史上环境耦合敏感（当前全绿）；全量失败先怀疑负载/环境，再怀疑回归。
 - 发布 tarball 不入 git（*.tgz 未跟踪），以 changelog 打包记录的 shasum 为准。
 
 ## 7. 版本脉络备忘
 
-`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并、接管排空 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + 持续长任务状态 + SDK 1.0.7 → `v142` 进度/模型流解耦 + final 有界封口 + 长任务时钟修正 → `v143` 暖会话 metadata 解阻塞 + 错误 final 正确收口 + 依赖安全补丁（当前）。
+`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并、接管排空 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + 持续长任务状态 + SDK 1.0.7 → `v142` 进度/模型流解耦 + final 有界封口 + 长任务时钟修正 → `v143` 暖会话 metadata 解阻塞 + 错误 final 正确收口 + 依赖安全补丁 → `v144` 外部答案成功后的旧流静默结算（当前）。

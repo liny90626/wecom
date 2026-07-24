@@ -788,17 +788,17 @@ function composeProgressStreamTextWithThinking(params: {
   return thinkingBlock ? `${thinkingBlock}\n${safeBodyText}` : safeBodyText;
 }
 
-// Global registry to track active keepalives by peerId
+// Global registry to track active keepalives by account/conversation scope.
 interface ActiveKeepalive {
   reqId: string;
   stop: () => void;
 }
-const activeKeepalivesByPeer = new Map<string, Set<ActiveKeepalive>>();
+const activeKeepalivesByScope = new Map<string, Set<ActiveKeepalive>>();
 
 export function __resetBotWsReplyTestState(): void {
   recentFinalDeliveriesByPeer.clear();
   pendingFinalRetryByPeer.clear();
-  activeKeepalivesByPeer.clear();
+  activeKeepalivesByScope.clear();
 }
 
 export function createBotWsReplyHandle(params: {
@@ -877,7 +877,7 @@ export function createBotWsReplyHandle(params: {
     }
 
     // Remove from registry
-    const keepalives = activeKeepalivesByPeer.get(peerKeyId);
+    const keepalives = activeKeepalivesByScope.get(replyPeerKey);
     if (keepalives) {
       for (const ka of keepalives) {
         if (ka.reqId === reqId) {
@@ -885,7 +885,7 @@ export function createBotWsReplyHandle(params: {
         }
       }
       if (keepalives.size === 0) {
-        activeKeepalivesByPeer.delete(peerKeyId);
+        activeKeepalivesByScope.delete(replyPeerKey);
       }
     }
   };
@@ -960,8 +960,8 @@ export function createBotWsReplyHandle(params: {
     }
     // A genuine reply or reasoning is happening on THIS handle.
     // It means the core SDK has chosen this handle to deliver the response.
-    // We can safely terminate all other orphaned keepalives for this peer to prevent infinite loops.
-    const keepalives = activeKeepalivesByPeer.get(peerKeyId);
+    // We can safely terminate other orphaned keepalives in this conversation scope.
+    const keepalives = activeKeepalivesByScope.get(replyPeerKey);
     if (keepalives) {
       for (const ka of keepalives) {
         if (ka.reqId !== reqId) {
@@ -2296,10 +2296,10 @@ export function createBotWsReplyHandle(params: {
     }, MAX_KEEPALIVE_MS);
 
     // Register keepalive
-    let keepalives = activeKeepalivesByPeer.get(peerKeyId);
+    let keepalives = activeKeepalivesByScope.get(replyPeerKey);
     if (!keepalives) {
       keepalives = new Set();
-      activeKeepalivesByPeer.set(peerKeyId, keepalives);
+      activeKeepalivesByScope.set(replyPeerKey, keepalives);
     }
     keepalives.add({ reqId, stop: stopPlaceholderKeepalive });
   };

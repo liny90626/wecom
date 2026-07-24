@@ -1,10 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ReplyHandle } from "../types/index.js";
+import type { WecomAccountRuntime } from "./account-runtime.js";
 import {
+  getAccountRuntime,
   getActiveBotWsReplyHandle,
+  getBotWsPushHandle,
+  registerAccountRuntime,
   registerActiveBotWsReplyHandle,
+  registerBotWsPushHandle,
+  unregisterAccountRuntime,
   unregisterActiveBotWsReplyHandle,
+  unregisterBotWsPushHandle,
+  type BotWsPushHandle,
 } from "./index.js";
 
 function makeReplyHandle(overrides: Partial<ReplyHandle> = {}): ReplyHandle {
@@ -16,6 +24,15 @@ function makeReplyHandle(overrides: Partial<ReplyHandle> = {}): ReplyHandle {
     },
     deliver: vi.fn(),
     ...overrides,
+  };
+}
+
+function makePushHandle(): BotWsPushHandle {
+  return {
+    isConnected: () => true,
+    sendMarkdown: vi.fn(),
+    replyCommand: vi.fn().mockResolvedValue({}),
+    sendMedia: vi.fn().mockResolvedValue({ ok: true }),
   };
 }
 
@@ -118,5 +135,36 @@ describe("active Bot WS reply handle registry", () => {
         peerId: "alice",
       }),
     ).toBe(newHandle);
+  });
+});
+
+describe("account-scoped runtime ownership", () => {
+  const accountId = "reload-account";
+
+  afterEach(() => {
+    (unregisterBotWsPushHandle as any)(accountId);
+    (unregisterAccountRuntime as any)(accountId);
+  });
+
+  it("does not let a stale adapter unregister the replacement push handle", () => {
+    const staleHandle = makePushHandle();
+    const replacementHandle = makePushHandle();
+    registerBotWsPushHandle(accountId, staleHandle);
+    registerBotWsPushHandle(accountId, replacementHandle);
+
+    (unregisterBotWsPushHandle as any)(accountId, staleHandle);
+
+    expect(getBotWsPushHandle(accountId)).toBe(replacementHandle);
+  });
+
+  it("does not let a stale monitor unregister the replacement account runtime", () => {
+    const staleRuntime = { account: { accountId } } as WecomAccountRuntime;
+    const replacementRuntime = { account: { accountId } } as WecomAccountRuntime;
+    registerAccountRuntime(staleRuntime);
+    registerAccountRuntime(replacementRuntime);
+
+    (unregisterAccountRuntime as any)(accountId, staleRuntime);
+
+    expect(getAccountRuntime(accountId)).toBe(replacementRuntime);
   });
 });

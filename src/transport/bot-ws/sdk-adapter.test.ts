@@ -6,6 +6,7 @@ const sdkMockState = vi.hoisted(() => {
     readonly isConnected = true;
     readonly replyStream = vi.fn().mockResolvedValue(undefined);
     readonly replyWelcome = vi.fn().mockResolvedValue(undefined);
+    readonly sendMessage = vi.fn().mockResolvedValue(undefined);
 
     constructor(_options: unknown) {
       sdkMockState.client = this;
@@ -468,6 +469,152 @@ describe("BotWsSdkAdapter", () => {
       adapter.stop();
       vi.useRealTimers();
     }
+  });
+
+  it("keeps the second media mergeable with following text while the first dispatch is running", async () => {
+    vi.useFakeTimers();
+    let releaseFirst!: () => void;
+    const firstDispatch = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi
+        .fn()
+        .mockImplementationOnce(() => firstDispatch)
+        .mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+
+    try {
+      adapter.start();
+      for (const [suffix, url] of [
+        ["first", "https://example.com/first.pdf"],
+        ["second", "https://example.com/second.pdf"],
+      ]) {
+        sdkMockState.client?.emit("message", {
+          cmd: "aibot_msg_callback",
+          headers: { req_id: `req-${suffix}-with-text` },
+          body: {
+            msgid: `msg-${suffix}-with-text`,
+            msgtype: "file",
+            chattype: "single",
+            from: { userid: "user-1" },
+            file: { url, aeskey: `${suffix}-key` },
+          },
+        });
+      }
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-second-text" },
+        body: {
+          msgid: "msg-second-text",
+          msgtype: "text",
+          chattype: "single",
+          from: { userid: "user-1" },
+          text: { content: "请分析第二个文件" },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(runtime.handleEvent).toHaveBeenCalledOnce();
+
+      releaseFirst();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(runtime.handleEvent).toHaveBeenCalledTimes(2);
+      expect(runtime.handleEvent.mock.calls[1]?.[0]).toMatchObject({
+        messageId: "msg-second-text",
+        text: "请分析第二个文件",
+        attachments: [
+          {
+            remoteUrl: "https://example.com/second.pdf",
+            aesKey: "second-key",
+          },
+        ],
+      });
+    } finally {
+      releaseFirst();
+      adapter.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let a stopped adapter retry an old final through its replacement connection", async () => {
+    vi.useFakeTimers();
+    const expiredError = {
+      errcode: 846608,
+      errmsg: "stream message update expired",
+    };
+    const pushError = Object.assign(new Error("push rejected"), { errcode: 95001 });
+    const oldRuntime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (_event, replyHandle) => {
+        replyHandle.activate?.();
+        await replyHandle.deliver({ text: "旧连接的最终答案" }, { kind: "final" });
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const oldAdapter = new BotWsSdkAdapter(oldRuntime as any, {} as any);
+    oldAdapter.start();
+    const oldClient = sdkMockState.client!;
+    oldClient.replyStream
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(expiredError);
+    oldClient.sendMessage.mockRejectedValue(pushError);
+
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-old-retry" },
+      body: {
+        msgid: "msg-old-retry",
+        msgtype: "text",
+        chattype: "single",
+        from: { userid: "user-1" },
+        text: { content: "执行旧任务" },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(100);
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(oldClient.sendMessage).toHaveBeenCalled();
+
+    oldAdapter.stop();
+    const replacementRuntime = {
+      ...oldRuntime,
+      handleEvent: vi.fn(),
+    };
+    const replacementAdapter = new BotWsSdkAdapter(replacementRuntime as any, {} as any);
+    replacementAdapter.start();
+    const replacementClient = sdkMockState.client!;
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await Promise.resolve();
+
+    expect(replacementClient.sendMessage).not.toHaveBeenCalled();
+    replacementAdapter.stop();
+    vi.useRealTimers();
   });
 
   it("short-circuits enter_chat welcome events to a static ws welcome reply", async () => {

@@ -4675,6 +4675,44 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.sendMessage).not.toHaveBeenCalled();
   });
 
+  it("closes a superseded placeholder after its in-flight ack settles", async () => {
+    let resolvePlaceholder!: (value: unknown) => void;
+    mockClient.replyStream
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePlaceholder = resolve;
+          }),
+      )
+      .mockResolvedValue({} as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-supersede-placeholder-in-flight" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+    });
+    await flushPromises();
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+
+    resolvePlaceholder({});
+    await flushPromises();
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.replyStream.mock.calls[1]?.[2]).toBe("已收到新消息，合并思考。✅");
+    expect(mockClient.replyStream.mock.calls[1]?.[3]).toBe(true);
+  });
+
   it("does not reuse the callback req_id for a supersede notice after an ack timeout", async () => {
     const ackTimeout = new Error(
       "Reply ack timeout (5000ms) for reqId: req-supersede-after-ack-timeout",

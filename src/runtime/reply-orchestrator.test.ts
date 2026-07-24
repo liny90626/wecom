@@ -50,6 +50,9 @@ describe("dispatchRuntimeReply", () => {
         replyOptions: expect.objectContaining({
           disableBlockStreaming: false,
           allowProgressCallbacksWhenSourceDeliverySuppressed: true,
+          queuedFollowupLifecycle: expect.objectContaining({
+            onEnqueued: expect.any(Function),
+          }),
           onReasoningStream: expect.any(Function),
           onReasoningEnd: expect.any(Function),
           onToolResult: expect.any(Function),
@@ -1075,12 +1078,13 @@ describe("dispatchRuntimeReply", () => {
     expect(fail).not.toHaveBeenCalled();
   });
 
-  it("falls back to the fail path when the absorbed notice cannot be delivered", async () => {
-    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
-    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
-      queuedFinal: false,
-      counts: { block: 0, final: 0, tool: 0 },
-      noVisibleReplyFallbackEligible: true,
+  it("falls back to the fail path when the queued-followup notice cannot be delivered", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      params.replyOptions.queuedFollowupLifecycle.onEnqueued();
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+      };
     });
     const deliverError = new Error("notice delivery failed");
     const deliver = vi.fn().mockRejectedValue(deliverError);
@@ -1106,15 +1110,14 @@ describe("dispatchRuntimeReply", () => {
     expect(fail).toHaveBeenCalledWith(deliverError);
   });
 
-  it("notifies that the inbound was absorbed when an active run holds the session", async () => {
-    // A busy session steers/queues the new message into the active run and the
-    // dispatch resolves with nothing delivered — indistinguishable from an
-    // empty turn except that the absorbing run is still registered.
+  it("notifies that the inbound was accepted only after OpenClaw enqueues the followup", async () => {
     agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
-    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
-      queuedFinal: false,
-      counts: { block: 0, final: 0, tool: 0 },
-      noVisibleReplyFallbackEligible: true,
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      params.replyOptions.queuedFollowupLifecycle.onEnqueued();
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+      };
     });
     const deliver = vi.fn().mockResolvedValue(undefined);
     const fail = vi.fn().mockResolvedValue(undefined);
@@ -1141,9 +1144,34 @@ describe("dispatchRuntimeReply", () => {
     const [payload, info] = deliver.mock.calls[0] ?? [];
     expect(info).toEqual({ kind: "final" });
     expect(String(payload?.text)).toContain("并入");
-    expect(agentHarnessState.resolveActiveEmbeddedRunSessionId).toHaveBeenCalledWith(
-      "session-absorbed",
-    );
+  });
+
+  it("reports an unaccepted busy inbound instead of silently closing or claiming it was merged", async () => {
+    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
+      queuedFinal: false,
+      counts: { block: 0, final: 0, tool: 0 },
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-busy-not-accepted" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    expect(deliver).toHaveBeenCalledOnce();
+    const text = String(deliver.mock.calls[0]?.[0]?.text ?? "");
+    expect(text).toContain("未能处理");
+    expect(text).not.toContain("并入");
   });
 
   it("keeps Fast progress but rejects auto-off without a later body", async () => {

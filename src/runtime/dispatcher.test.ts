@@ -1073,7 +1073,7 @@ describe("dispatchInboundEvent", () => {
 
   it("does not remain blocked behind a stale handoff barrier", async () => {
     vi.useFakeTimers();
-    const staleHandle = makeReplyHandle({
+    const staleHandle = makeReplyHandle(vi.fn(), {
       waitForSupersede: () => new Promise<void>(() => undefined),
     });
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
@@ -1110,6 +1110,80 @@ describe("dispatchInboundEvent", () => {
       expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
     } finally {
       unregisterActiveBotWsReplyHandle(registration);
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not propagate a timed-out handoff barrier into every later generation", async () => {
+    vi.useFakeTimers();
+    const staleRegistration = {
+      accountId: "acct",
+      peerKind: "direct" as const,
+      peerId: "alice",
+      sessionKey: "stale-session",
+      handle: makeReplyHandle(vi.fn(), {
+        waitForSupersede: () => new Promise<void>(() => undefined),
+      }),
+    };
+    registerActiveBotWsReplyHandle(staleRegistration);
+    let dispatchCount = 0;
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation((params) => {
+      dispatchCount += 1;
+      if (dispatchCount < 3) {
+        return new Promise((_resolve, reject) => {
+          params.replyOptions.abortSignal.addEventListener(
+            "abort",
+            () => reject(params.replyOptions.abortSignal.reason),
+            { once: true },
+          );
+        });
+      }
+      return params.dispatcherOptions
+        .deliver({ text: "latest" }, { kind: "final" })
+        .then(() => ({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } }));
+    });
+    const common = {
+      core: makeCore(dispatchReplyWithBufferedBlockDispatcher) as any,
+      cfg: {} as any,
+      store: makeStore() as any,
+      auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+    };
+
+    try {
+      const second = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-generation-b", "B"),
+        replyHandle: makeReplyHandle(),
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+
+      const third = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-generation-c", "C"),
+        replyHandle: makeReplyHandle(),
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+
+      const latestDeliver = vi.fn().mockResolvedValue(undefined);
+      const latest = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-generation-d", "D"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver: latestDeliver }),
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(3);
+      await Promise.allSettled([second, third, latest]);
+      expect(latestDeliver).toHaveBeenCalledWith({ text: "latest" }, { kind: "final" });
+    } finally {
+      unregisterActiveBotWsReplyHandle(staleRegistration);
       vi.useRealTimers();
     }
   });

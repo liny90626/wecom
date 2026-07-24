@@ -1241,11 +1241,12 @@ export function createBotWsReplyHandle(params: {
         obsoleteFinalRetry = true;
         finishPendingFinalRetry(true);
       },
-      // Only a final the user has actually seen part of may be dropped for a
-      // new activation; an entirely undelivered final keeps its retry, else
-      // the next message would destroy the answer instead of releasing it.
+      // A newer activation owns this peer once an already-finished request
+      // leaves a retry behind. Preserve only an explicitly superseded,
+      // entirely invisible final: that result still belongs to the handoff.
       shouldCancelForNewActivation: () =>
-        visibleReplyStarted && (finalPushProgress?.delivered ?? 0) > 0,
+        !supersededByNewInbound ||
+        (visibleReplyStarted && (finalPushProgress?.delivered ?? 0) > 0),
     });
     return true;
   };

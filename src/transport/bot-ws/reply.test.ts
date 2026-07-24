@@ -4400,7 +4400,7 @@ describe("createBotWsReplyHandle", () => {
     expect(noticeAttempts).toHaveLength(1);
   });
 
-  it("keeps an undelivered final retry alive across a new activation on the same peer", async () => {
+  it("cancels an orphaned final retry after a new activation owns the same peer", async () => {
     const pushError = Object.assign(new Error("push rejected"), { errcode: 95001 });
     const expiredError = {
       headers: { req_id: "req-survive-activation" },
@@ -4421,9 +4421,8 @@ describe("createBotWsReplyHandle", () => {
       autoSendPlaceholder: false,
     });
 
-    // Preview delivered and VISIBLE, but no final chunk ever reached the user:
-    // the visible-preview flag alone must no longer let a new activation
-    // destroy the pending final retry.
+    // The old dispatch has already returned and is no longer registered for
+    // supersede, but its detached retry remains pending after a visible preview.
     await handle.deliver({ text: "预览片段", isReasoning: false }, { kind: "block" });
     await flushPromises();
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
@@ -4446,12 +4445,12 @@ describe("createBotWsReplyHandle", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     await drainChunkTimers();
 
-    // First attempt failed (still recorded on the mock); the surviving retry
-    // must produce a SECOND, successful push of the same final.
+    // The successor owns this peer, so the detached old retry must not inject a
+    // late final (or an eventual failure notice) into the new conversation.
     const attempts = mockClient.sendMessage.mock.calls.filter((call) =>
       String((call[1] as any).markdown.content).includes("迟到的完整答案"),
     );
-    expect(attempts.length).toBeGreaterThanOrEqual(2);
+    expect(attempts).toHaveLength(1);
   });
 
   it("stays silent when a superseded reasoning-only handle receives an empty final", async () => {

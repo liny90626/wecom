@@ -57,6 +57,7 @@ describe("BotWsSdkAdapter", () => {
   };
 
   afterEach(() => {
+    vi.useRealTimers();
     const pushHandle = getBotWsPushHandle("acc-1");
     if (pushHandle) unregisterBotWsPushHandle("acc-1", pushHandle);
     process.off("unhandledRejection", onUnhandledRejection);
@@ -65,6 +66,7 @@ describe("BotWsSdkAdapter", () => {
   });
 
   it("contains frame handler rejections instead of leaking unhandled rejections", async () => {
+    vi.useFakeTimers();
     process.on("unhandledRejection", onUnhandledRejection);
 
     const runtime = {
@@ -90,7 +92,8 @@ describe("BotWsSdkAdapter", () => {
       error: vi.fn(),
     };
 
-    new BotWsSdkAdapter(runtime as any, log as any).start();
+    const adapter = new BotWsSdkAdapter(runtime as any, log as any);
+    adapter.start();
 
     sdkMockState.client?.emit("message", {
       cmd: "aibot_msg_callback",
@@ -103,7 +106,7 @@ describe("BotWsSdkAdapter", () => {
       },
     });
 
-    await waitForAsyncCallbacks();
+    await vi.advanceTimersByTimeAsync(500);
 
     expect(runtime.handleEvent).toHaveBeenCalledTimes(1);
     expect(runtime.recordOperationalIssue).toHaveBeenCalledWith(
@@ -126,9 +129,12 @@ describe("BotWsSdkAdapter", () => {
       ),
     );
     expect(unhandledRejections).toHaveLength(0);
+    adapter.stop();
+    vi.useRealTimers();
   });
 
   it("does not send a placeholder until the runtime activates the reply handle", async () => {
+    vi.useFakeTimers();
     const runtime = {
       account: {
         accountId: "acc-1",
@@ -147,7 +153,8 @@ describe("BotWsSdkAdapter", () => {
       recordOperationalIssue: vi.fn(),
     };
 
-    new BotWsSdkAdapter(runtime as any, {} as any).start();
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+    adapter.start();
     sdkMockState.client?.emit("message", {
       cmd: "aibot_msg_callback",
       headers: { req_id: "req-deferred" },
@@ -158,10 +165,14 @@ describe("BotWsSdkAdapter", () => {
         text: { content: "hello" },
       },
     });
-    await waitForAsyncCallbacks();
+    await vi.advanceTimersByTimeAsync(499);
+    expect(runtime.handleEvent).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
 
     expect(runtime.handleEvent).toHaveBeenCalledOnce();
     expect(sdkMockState.client?.replyStream).toHaveBeenCalledOnce();
+    adapter.stop();
+    vi.useRealTimers();
   });
 
   it("merges a media frame followed by a text frame before dispatching", async () => {
@@ -348,6 +359,7 @@ describe("BotWsSdkAdapter", () => {
   });
 
   it("flushes standalone media and keeps merge windows isolated per peer", async () => {
+    vi.useFakeTimers();
     const runtime = {
       account: {
         accountId: "acc-1",
@@ -388,13 +400,14 @@ describe("BotWsSdkAdapter", () => {
       },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 550));
+    await vi.advanceTimersByTimeAsync(1_000);
 
     expect(runtime.handleEvent).toHaveBeenCalledTimes(2);
     expect(runtime.handleEvent.mock.calls.map(([event]) => event.text)).toEqual(
       expect.arrayContaining(["[file] https://example.com/only.pdf", "另一位用户的消息"]),
     );
     adapter.stop();
+    vi.useRealTimers();
   });
 
   it("short-circuits enter_chat welcome events to a static ws welcome reply", async () => {

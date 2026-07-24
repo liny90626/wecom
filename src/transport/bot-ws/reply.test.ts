@@ -139,6 +139,55 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(3);
   });
 
+  it.each([
+    [
+      "another account",
+      "acct-b",
+      { from: { userid: "shared-peer" }, chattype: "single" },
+    ],
+    [
+      "another peer kind",
+      "acct-a",
+      { from: { userid: "bob" }, chatid: "shared-peer", chattype: "group" },
+    ],
+  ])("keeps placeholder activity isolated from %s with the same peer id", async (
+    _label,
+    otherAccountId,
+    otherBody,
+  ) => {
+    const otherClient = {
+      replyStream: vi.fn().mockResolvedValue({}),
+      sendMessage: vi.fn().mockResolvedValue({}),
+      replyWelcome: vi.fn().mockResolvedValue({}),
+    } as unknown as import("vitest").Mocked<WSClient>;
+    const activeHandle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-keepalive-scope-active" },
+        body: { from: { userid: "shared-peer" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "acct-a",
+      inboundKind: "text",
+    });
+    createBotWsReplyHandle({
+      client: otherClient,
+      frame: {
+        headers: { req_id: "req-keepalive-scope-other" },
+        body: otherBody,
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: otherAccountId,
+      inboundKind: "text",
+    });
+    await flushPromises();
+    expect(otherClient.replyStream).toHaveBeenCalledTimes(1);
+
+    activeHandle.markExternalActivity?.();
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flushPromises();
+
+    expect(otherClient.replyStream).toHaveBeenCalledTimes(2);
+  });
+
   it("finishes an opened placeholder stream when the final reply is intentionally empty", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

@@ -141,6 +141,40 @@ describe("dispatchInboundEvent", () => {
     );
   });
 
+  it("supersedes the previous handle before activating its successor", async () => {
+    const lifecycle: string[] = [];
+    registerActiveBotWsReplyHandle({
+      accountId: "acct",
+      peerKind: "direct",
+      peerId: "alice",
+      handle: makeReplyHandle(() => {
+        lifecycle.push("supersede");
+      }),
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+
+    await dispatchInboundEvent({
+      core: makeCore(dispatchReplyWithBufferedBlockDispatcher) as any,
+      cfg: {} as any,
+      store: makeStore() as any,
+      auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+      event: makeEvent("msg-ordered-activation", "接管旧任务"),
+      replyHandle: makeReplyHandle(vi.fn(), {
+        activate: () => {
+          lifecycle.push("activate");
+        },
+      }),
+    });
+
+    expect(lifecycle.slice(0, 2)).toEqual(["supersede", "activate"]);
+  });
+
   it("aborts the superseded same-peer dispatch and still dispatches the newer message to OpenClaw", async () => {
     let firstAbortSignal: AbortSignal | undefined;
     const dispatchReplyWithBufferedBlockDispatcher = vi

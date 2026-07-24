@@ -268,7 +268,6 @@ export async function dispatchInboundEvent(params: {
     });
     return;
   }
-  replyHandle.activate?.();
   auditLog.appendInbound({
     accountId: event.accountId,
     transport: event.transport,
@@ -376,6 +375,7 @@ export async function dispatchInboundEvent(params: {
       }
     }
   }
+  replyHandle.activate?.();
 
   try {
     const session = await prepareInboundSessionWithTimeout({

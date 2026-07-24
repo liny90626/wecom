@@ -142,8 +142,10 @@ describe("account-scoped runtime ownership", () => {
   const accountId = "reload-account";
 
   afterEach(() => {
-    (unregisterBotWsPushHandle as any)(accountId);
-    (unregisterAccountRuntime as any)(accountId);
+    const pushHandle = getBotWsPushHandle(accountId);
+    if (pushHandle) unregisterBotWsPushHandle(accountId, pushHandle);
+    const accountRuntime = getAccountRuntime(accountId);
+    if (accountRuntime) unregisterAccountRuntime(accountId, accountRuntime);
   });
 
   it("does not let a stale adapter unregister the replacement push handle", () => {
@@ -152,7 +154,7 @@ describe("account-scoped runtime ownership", () => {
     registerBotWsPushHandle(accountId, staleHandle);
     registerBotWsPushHandle(accountId, replacementHandle);
 
-    (unregisterBotWsPushHandle as any)(accountId, staleHandle);
+    unregisterBotWsPushHandle(accountId, staleHandle);
 
     expect(getBotWsPushHandle(accountId)).toBe(replacementHandle);
   });
@@ -163,7 +165,7 @@ describe("account-scoped runtime ownership", () => {
     registerAccountRuntime(staleRuntime);
     registerAccountRuntime(replacementRuntime);
 
-    (unregisterAccountRuntime as any)(accountId, staleRuntime);
+    unregisterAccountRuntime(accountId, staleRuntime);
 
     expect(getAccountRuntime(accountId)).toBe(replacementRuntime);
   });

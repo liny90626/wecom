@@ -170,7 +170,7 @@ export async function monitorWecomProvider(
     botService.stop();
     agentIngress.stop();
     accountRouteRegistry.delete(account.accountId);
-    unregisterAccountRuntime(account.accountId);
+    unregisterAccountRuntime(account.accountId, accountRuntime);
     ctx.setStatus({
       running: false,
       lastStopAt: Date.now(),

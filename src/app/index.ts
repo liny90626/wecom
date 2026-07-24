@@ -186,11 +186,24 @@ export function unregisterActiveBotWsReplyHandle(params: {
   }
 }
 
-export function unregisterBotWsPushHandle(accountId: string): void {
+export function unregisterBotWsPushHandle(
+  accountId: string,
+  handle: BotWsPushHandle,
+): boolean {
+  if (botWsPushHandles.get(accountId) !== handle) {
+    return false;
+  }
   botWsPushHandles.delete(accountId);
+  return true;
 }
 
-export function unregisterAccountRuntime(accountId: string): void {
+export function unregisterAccountRuntime(
+  accountId: string,
+  accountRuntime: WecomAccountRuntime,
+): boolean {
+  if (runtimes.get(accountId) !== accountRuntime) {
+    return false;
+  }
   runtimes.delete(accountId);
   botWsPushHandles.delete(accountId);
   for (const key of activeBotWsReplyHandlesBySession.keys()) {
@@ -205,4 +218,5 @@ export function unregisterAccountRuntime(accountId: string): void {
   }
   clearWecomSourceAccount(accountId);
   console.log(`[wecom-runtime] unregister account=${accountId}`);
+  return true;
 }

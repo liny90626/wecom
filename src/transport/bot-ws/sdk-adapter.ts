@@ -6,7 +6,11 @@ import AiBot, {
   type WsFrame,
 } from "@wecom/aibot-node-sdk";
 import type { WecomAccountRuntime } from "../../app/account-runtime.js";
-import { registerBotWsPushHandle, unregisterBotWsPushHandle } from "../../app/index.js";
+import {
+  registerBotWsPushHandle,
+  unregisterBotWsPushHandle,
+  type BotWsPushHandle,
+} from "../../app/index.js";
 import { clearWecomMcpAccountCache } from "../../capability/mcp/index.js";
 import type { ReplyHandle, RuntimeLogSink, UnifiedInboundEvent } from "../../types/index.js";
 import { mapBotWsFrameToInboundEvent } from "./inbound.js";
@@ -63,6 +67,7 @@ function mergeMediaFollowedByText(
 
 export class BotWsSdkAdapter {
   private client?: AiBot.WSClient;
+  private pushHandle?: BotWsPushHandle;
   private readonly ownerId: string;
   private readonly pendingMediaFrames = new Map<string, PendingMediaFrame>();
 
@@ -96,7 +101,7 @@ export class BotWsSdkAdapter {
       },
     });
     this.client = client;
-    registerBotWsPushHandle(this.runtime.account.accountId, {
+    const pushHandle: BotWsPushHandle = {
       isConnected: () => client.isConnected,
       replyCommand: async ({ cmd, body, headers }) => {
         const replyHeaders = {
@@ -152,7 +157,9 @@ export class BotWsSdkAdapter {
         });
         return result;
       },
-    });
+    };
+    this.pushHandle = pushHandle;
+    registerBotWsPushHandle(this.runtime.account.accountId, pushHandle);
 
     client.on("connected", () => {
       this.log.info?.(`[wecom-ws] connected account=${this.runtime.account.accountId}`);
@@ -405,7 +412,10 @@ export class BotWsSdkAdapter {
     }
     this.pendingMediaFrames.clear();
     clearWecomMcpAccountCache(this.runtime.account.accountId);
-    unregisterBotWsPushHandle(this.runtime.account.accountId);
+    if (this.pushHandle) {
+      unregisterBotWsPushHandle(this.runtime.account.accountId, this.pushHandle);
+      this.pushHandle = undefined;
+    }
     this.runtime.updateTransportSession(
       createBotWsSessionSnapshot({
         accountId: this.runtime.account.accountId,

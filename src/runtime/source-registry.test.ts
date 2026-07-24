@@ -49,4 +49,42 @@ describe("WeCom source registry account isolation", () => {
       })?.source,
     ).toBe("agent-callback");
   });
+
+  it("keeps a refreshed conversation when the bounded registry evicts its oldest entry", () => {
+    registerWecomSourceSnapshot({
+      accountId: "account-a",
+      source: "bot-ws",
+      peerKind: "direct",
+      peerId: "active-peer",
+    });
+    for (let index = 0; index < 1_023; index += 1) {
+      registerWecomSourceSnapshot({
+        accountId: "account-a",
+        source: "bot-ws",
+        peerKind: "direct",
+        peerId: `peer-${index}`,
+      });
+    }
+
+    registerWecomSourceSnapshot({
+      accountId: "account-a",
+      source: "bot-ws",
+      peerKind: "direct",
+      peerId: "active-peer",
+    });
+    registerWecomSourceSnapshot({
+      accountId: "account-a",
+      source: "bot-ws",
+      peerKind: "direct",
+      peerId: "overflow-peer",
+    });
+
+    expect(
+      resolveWecomSourceSnapshot({
+        accountId: "account-a",
+        peerKind: "direct",
+        peerId: "active-peer",
+      })?.source,
+    ).toBe("bot-ws");
+  });
 });

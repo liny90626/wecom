@@ -176,6 +176,15 @@ export function resolveWecomSourceSnapshot(params: {
     );
     if (scoped) return scoped;
   }
+  if (accountId && peerKind && peerId) {
+    const scoped = conversationSnapshotsByAccountKey.get(
+      accountScopedConversationKey(accountId, peerKind, peerId),
+    );
+    if (scoped) return scoped;
+  }
+  if (accountId) {
+    return undefined;
+  }
   if (sessionKey) {
     const loose = sessionSnapshotsByLooseKey.get(`sessionKey::${sessionKey}`);
     if (loose) return loose;
@@ -183,12 +192,6 @@ export function resolveWecomSourceSnapshot(params: {
   if (sessionId) {
     const loose = sessionSnapshotsByLooseKey.get(`sessionId::${sessionId}`);
     if (loose) return loose;
-  }
-  if (accountId && peerKind && peerId) {
-    const scoped = conversationSnapshotsByAccountKey.get(
-      accountScopedConversationKey(accountId, peerKind, peerId),
-    );
-    if (scoped) return scoped;
   }
   if (peerKind && peerId) {
     const loose = conversationSnapshotsByLooseKey.get(`peer::${peerKind}::${peerId}`);

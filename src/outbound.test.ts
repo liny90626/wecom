@@ -73,8 +73,10 @@ describe("wecomOutbound", () => {
   afterEach(async () => {
     const runtime = await import("./runtime.js");
     const sourceRegistry = await import("./runtime/source-registry.js");
-    runtime.unregisterBotWsPushHandle("default");
-    runtime.unregisterBotWsPushHandle("acct-ws");
+    for (const accountId of ["default", "acct-ws"]) {
+      const handle = runtime.getBotWsPushHandle(accountId);
+      if (handle) runtime.unregisterBotWsPushHandle(accountId, handle);
+    }
     runtime.unregisterActiveBotWsReplyHandle({
       accountId: "default",
       sessionKey: "agent:ops_bot:wecom:default:dm:zhangsan",

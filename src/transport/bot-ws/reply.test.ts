@@ -3,7 +3,11 @@ import path from "node:path";
 import type { WSClient } from "@wecom/aibot-node-sdk";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
-import { registerBotWsPushHandle, unregisterBotWsPushHandle } from "../../runtime.js";
+import {
+  getBotWsPushHandle,
+  registerBotWsPushHandle,
+  unregisterBotWsPushHandle,
+} from "../../runtime.js";
 import { uploadAndSendBotWsMedia } from "./media.js";
 import { __resetBotWsReplyTestState, createBotWsReplyHandle } from "./reply.js";
 
@@ -38,10 +42,15 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
   };
 
+  const clearDefaultPushHandle = () => {
+    const handle = getBotWsPushHandle("default");
+    if (handle) unregisterBotWsPushHandle("default", handle);
+  };
+
   beforeEach(async () => {
     vi.useFakeTimers();
     __resetBotWsReplyTestState();
-    unregisterBotWsPushHandle("default");
+    clearDefaultPushHandle();
     vi.stubEnv("OPENCLAW_STATE_DIR", "/tmp/wecom-reply-state");
     mockClient = {
       replyStream: vi.fn(),
@@ -66,7 +75,7 @@ describe("createBotWsReplyHandle", () => {
   });
 
   afterEach(() => {
-    unregisterBotWsPushHandle("default");
+    clearDefaultPushHandle();
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();

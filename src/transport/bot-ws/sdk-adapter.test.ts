@@ -410,6 +410,66 @@ describe("BotWsSdkAdapter", () => {
     vi.useRealTimers();
   });
 
+  it("preserves same-peer media ordering while the first dispatch is still running", async () => {
+    vi.useFakeTimers();
+    let releaseFirst!: () => void;
+    const firstDispatch = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi
+        .fn()
+        .mockImplementationOnce(() => firstDispatch)
+        .mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+
+    try {
+      adapter.start();
+      for (const [suffix, url] of [
+        ["first", "https://example.com/first.pdf"],
+        ["second", "https://example.com/second.pdf"],
+      ]) {
+        sdkMockState.client?.emit("message", {
+          cmd: "aibot_msg_callback",
+          headers: { req_id: `req-${suffix}` },
+          body: {
+            msgid: `msg-${suffix}`,
+            msgtype: "file",
+            chattype: "single",
+            from: { userid: "user-1" },
+            file: { url, aeskey: `${suffix}-key` },
+          },
+        });
+      }
+      await Promise.resolve();
+
+      expect(runtime.handleEvent).toHaveBeenCalledOnce();
+      expect(runtime.handleEvent.mock.calls[0]?.[0].messageId).toBe("msg-first");
+
+      releaseFirst();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(runtime.handleEvent).toHaveBeenCalledTimes(2);
+      expect(runtime.handleEvent.mock.calls[1]?.[0].messageId).toBe("msg-second");
+    } finally {
+      adapter.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("short-circuits enter_chat welcome events to a static ws welcome reply", async () => {
     process.on("unhandledRejection", onUnhandledRejection);
 

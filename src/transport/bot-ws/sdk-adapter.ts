@@ -392,7 +392,11 @@ export class BotWsSdkAdapter {
 
       if (pending) {
         clearTimeout(pending.timer);
-        void flushPendingMergeFrame(peerKey, pending);
+        if (pending.kind === "media") {
+          await flushPendingMergeFrame(peerKey, pending);
+        } else {
+          void flushPendingMergeFrame(peerKey, pending);
+        }
       }
 
       if (mergeKind) {

@@ -102,4 +102,32 @@ describe("WecomAccountRuntime", () => {
     trackedReplyHandle?.activate?.();
     expect(activate).toHaveBeenCalledOnce();
   });
+
+  it("forwards transport lifecycle hooks through the runtime wrapper", async () => {
+    let trackedReplyHandle: ReplyHandle | undefined;
+    dispatchInboundEventMock.mockImplementation(async (params: { replyHandle: ReplyHandle }) => {
+      trackedReplyHandle = params.replyHandle;
+    });
+    const unregister = vi.fn();
+    const onTransportRetired = vi.fn(() => unregister);
+    const markDispatchSettled = vi.fn();
+
+    await makeRuntime().handleEvent(makeEvent(), {
+      context: {
+        transport: "bot-ws",
+        accountId: "acct",
+        raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+      },
+      deliver: vi.fn(),
+      onTransportRetired,
+      markDispatchSettled,
+    });
+
+    const listener = vi.fn();
+    expect(trackedReplyHandle?.onTransportRetired?.(listener)).toBe(unregister);
+    trackedReplyHandle?.markDispatchSettled?.();
+
+    expect(onTransportRetired).toHaveBeenCalledWith(listener);
+    expect(markDispatchSettled).toHaveBeenCalledOnce();
+  });
 });

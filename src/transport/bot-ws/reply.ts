@@ -145,7 +145,46 @@ const pendingFinalRetryByPeer = new Map<
     }
   >
 >();
+const replyOwnerCleanups = new Map<string, Set<() => void>>();
 const OBSOLETE_FINAL_RETRY = Symbol("obsolete-final-retry");
+
+export function registerBotWsReplyOwner(ownerId: string): void {
+  const key = ownerId.trim();
+  if (key && !replyOwnerCleanups.has(key)) {
+    replyOwnerCleanups.set(key, new Set());
+  }
+}
+
+export function retireBotWsReplyOwner(ownerId: string): void {
+  const key = ownerId.trim();
+  const cleanups = replyOwnerCleanups.get(key);
+  replyOwnerCleanups.delete(key);
+  for (const cleanup of cleanups ?? []) {
+    try {
+      cleanup();
+    } catch (error) {
+      console.warn(
+        `[wecom-reply] owner-retire-failed ownerId=${key} error=${formatFallbackError(error)}`,
+      );
+    }
+  }
+}
+
+function trackBotWsReplyOwner(ownerId: string | undefined, cleanup: () => void): () => void {
+  const key = ownerId?.trim();
+  if (!key) {
+    return () => {};
+  }
+  const cleanups = replyOwnerCleanups.get(key);
+  if (!cleanups) {
+    cleanup();
+    return () => {};
+  }
+  cleanups.add(cleanup);
+  return () => {
+    cleanups.delete(cleanup);
+  };
+}
 
 function cancelPendingFinalRetryForNewActivation(
   peerKey: string,
@@ -799,6 +838,7 @@ export function __resetBotWsReplyTestState(): void {
   recentFinalDeliveriesByPeer.clear();
   pendingFinalRetryByPeer.clear();
   activeKeepalivesByScope.clear();
+  replyOwnerCleanups.clear();
 }
 
 export function createBotWsReplyHandle(params: {
@@ -809,6 +849,7 @@ export function createBotWsReplyHandle(params: {
   placeholderContent?: string;
   autoSendPlaceholder?: boolean;
   deferActivation?: boolean;
+  runtimeOwnerId?: string;
   onDeliver?: () => void;
   onFail?: (error: unknown) => void;
 }): ReplyHandle {
@@ -840,6 +881,15 @@ export function createBotWsReplyHandle(params: {
   let pendingPreview: PendingPreview | undefined;
   let pendingPreviewPollTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingPreviewFlushInFlight = false;
+  let runtimeRetired = false;
+  let dispatchSettled = false;
+  let unregisterRuntimeCleanup: (() => void) | undefined;
+  const transportRetireListeners = new Set<() => void>();
+
+  function releaseRuntimeCleanup(): void {
+    unregisterRuntimeCleanup?.();
+    unregisterRuntimeCleanup = undefined;
+  }
 
   // Extract peerId for clustering handles
   const body = params.frame.body as any;
@@ -923,7 +973,7 @@ export function createBotWsReplyHandle(params: {
   };
 
   const sendPlaceholder = () => {
-    if (!activated || streamSettled || placeholderInFlight || isEvent) return;
+    if (runtimeRetired || !activated || streamSettled || placeholderInFlight || isEvent) return;
     placeholderInFlight = true;
     withHandleSendTimeout(
       params.client.replyStream(params.frame, resolveStreamId(), placeholderText, false),
@@ -951,6 +1001,9 @@ export function createBotWsReplyHandle(params: {
       })
       .finally(() => {
         placeholderInFlight = false;
+        if (supersededByNewInbound && !streamUpdateUnreliable) {
+          closeSupersededPlaceholder();
+        }
       });
   };
 
@@ -1058,6 +1111,11 @@ export function createBotWsReplyHandle(params: {
     | { deliveryKey: string; peerDedup: boolean; preserve: boolean }
     | undefined;
   let obsoleteFinalRetry = false;
+  const maybeReleaseRuntimeCleanup = (): void => {
+    if (dispatchSettled && !finalPushRetryTimer && !pendingFinalRetryClaim) {
+      releaseRuntimeCleanup();
+    }
+  };
   const isCurrentReplyActivation = (): boolean => !obsoleteFinalRetry;
   const finishPendingFinalRetry = (rollbackClaim: boolean): void => {
     const pendingRetries = pendingFinalRetryByPeer.get(replyPeerKey);
@@ -1075,6 +1133,40 @@ export function createBotWsReplyHandle(params: {
       });
     }
     pendingFinalRetryClaim = undefined;
+    maybeReleaseRuntimeCleanup();
+  };
+
+  const retireRuntimeWork = (): void => {
+    if (runtimeRetired) {
+      return;
+    }
+    runtimeRetired = true;
+    obsoleteFinalRetry = true;
+    finishPendingFinalRetry(true);
+    settleStream();
+    for (const listener of transportRetireListeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.warn(
+          `[wecom-reply] transport-retire-listener-failed ownerId=${params.runtimeOwnerId ?? "n/a"} error=${formatFallbackError(error)}`,
+        );
+      }
+    }
+    transportRetireListeners.clear();
+  };
+
+  const ensureRuntimeCleanup = (): boolean => {
+    if (runtimeRetired) {
+      return false;
+    }
+    if (!unregisterRuntimeCleanup && params.runtimeOwnerId?.trim()) {
+      unregisterRuntimeCleanup = trackBotWsReplyOwner(
+        params.runtimeOwnerId,
+        retireRuntimeWork,
+      );
+    }
+    return !runtimeRetired;
   };
 
   // Chunk-delivery progress for the final's fallback/retry pushes. Chunking
@@ -1118,7 +1210,7 @@ export function createBotWsReplyHandle(params: {
     },
   ): Promise<void> => {
     const throwIfObsolete = (): void => {
-      if (options.isObsolete?.()) {
+      if (runtimeRetired || options.isObsolete?.()) {
         throw OBSOLETE_FINAL_RETRY;
       }
     };
@@ -1172,7 +1264,9 @@ export function createBotWsReplyHandle(params: {
     };
 
     const pushHandle = getBotWsPushHandle(params.accountId);
-    if (!pushHandle?.isConnected?.()) {
+    const pushHandleOwnedByRuntime =
+      !params.runtimeOwnerId || pushHandle?.ownerId === params.runtimeOwnerId;
+    if (!pushHandleOwnedByRuntime || !pushHandle?.isConnected?.()) {
       await sendViaClient();
       return;
     }
@@ -1257,7 +1351,7 @@ export function createBotWsReplyHandle(params: {
   // req_id/session retries independently; run-time guards keep B3 supersede
   // semantics (a suppressed superseded final is never re-pushed).
   const runFinalPushRetry = async (retry: FinalPushRetryRequest): Promise<void> => {
-    if (!isCurrentReplyActivation()) {
+    if (!ensureRuntimeCleanup() || !isCurrentReplyActivation()) {
       finishPendingFinalRetry(true);
       console.info(
         `[wecom-b3] final-retry-skip-obsolete account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
@@ -1368,6 +1462,10 @@ export function createBotWsReplyHandle(params: {
   };
 
   const scheduleFinalPushRetry = (retry: FinalPushRetryRequest): void => {
+    if (!ensureRuntimeCleanup()) {
+      finishPendingFinalRetry(true);
+      return;
+    }
     if (supersededByNewInbound && suppressSupersededFinalPush) {
       finishPendingFinalRetry(true);
       return;
@@ -1392,6 +1490,7 @@ export function createBotWsReplyHandle(params: {
       finalPushRetryTimer = undefined;
       void runFinalPushRetry(retry);
     }, delayMs);
+    finalPushRetryTimer.unref?.();
   };
 
   const resolveStreamFallbackText = (finalText: string, isError = false): string => {
@@ -1435,6 +1534,9 @@ export function createBotWsReplyHandle(params: {
       frame: params.frame,
       hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
     });
+    if (runtimeRetired) {
+      return false;
+    }
     const fallbackText = resolveStreamFallbackText(finalText, options.isError);
     const fallbackAppendCompletionMarker = !options.isError;
     // The fallback retry must reuse the EXACT identity of the failed push
@@ -1750,6 +1852,7 @@ export function createBotWsReplyHandle(params: {
   // sends when a push itself is slow.
   const schedulePreviewExpiredNotice = (delayMs: number, allowUnfrozen: boolean): void => {
     if (
+      !ensureRuntimeCleanup() ||
       previewExpiredNoticeTimer ||
       previewExpiredNoticeInFlight ||
       previewExpiredNoticeCancelled ||
@@ -1769,6 +1872,7 @@ export function createBotWsReplyHandle(params: {
 
   const maybeSendPreviewExpiredNotice = (allowUnfrozen = false): void => {
     if (
+      !ensureRuntimeCleanup() ||
       previewExpiredNoticeInFlight ||
       previewExpiredNoticeCancelled ||
       (!previewFrozen && !allowUnfrozen) ||
@@ -1951,6 +2055,9 @@ export function createBotWsReplyHandle(params: {
       return false;
     } finally {
       previewInFlightCount = Math.max(0, previewInFlightCount - 1);
+      if (supersededByNewInbound && !streamUpdateUnreliable) {
+        closeSupersededPlaceholder();
+      }
     }
 
     if (supersededByNewInbound) {
@@ -2094,7 +2201,7 @@ export function createBotWsReplyHandle(params: {
   };
 
   const sendFrozenPreviewStatus = async (): Promise<void> => {
-    if (checkPreviewWatchdogExpired(Date.now())) {
+    if (!ensureRuntimeCleanup() || checkPreviewWatchdogExpired(Date.now())) {
       return;
     }
     if (
@@ -2281,6 +2388,9 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     activated = true;
+    if (!ensureRuntimeCleanup()) {
+      return;
+    }
     cancelPendingFinalRetryForNewActivation(replyPeerKey, activationId);
     if (params.autoSendPlaceholder === false || isEvent) {
       return;
@@ -2323,7 +2433,24 @@ export function createBotWsReplyHandle(params: {
       },
     },
     activate,
+    onTransportRetired: (listener) => {
+      if (!ensureRuntimeCleanup() || runtimeRetired) {
+        listener();
+        return () => {};
+      }
+      transportRetireListeners.add(listener);
+      return () => {
+        transportRetireListeners.delete(listener);
+      };
+    },
+    markDispatchSettled: () => {
+      dispatchSettled = true;
+      maybeReleaseRuntimeCleanup();
+    },
     deliver: async (payload: ReplyPayload, info) => {
+      if (runtimeRetired || (!streamSettled && !ensureRuntimeCleanup())) {
+        return;
+      }
       // Mark this chat as active on this handle
       notifyPeerActive();
       if (info.kind === "final") {
@@ -2452,6 +2579,9 @@ export function createBotWsReplyHandle(params: {
         const mediaNotes: string[] = [];
         let mediaSent = 0;
         for (const mediaUrl of mediaUrls) {
+          if (runtimeRetired) {
+            return;
+          }
           const result = await uploadAndSendBotWsMedia({
             wsClient: params.client,
             chatId: peerId,
@@ -2661,6 +2791,9 @@ export function createBotWsReplyHandle(params: {
       params.onDeliver?.();
     },
     fail: async (error: unknown) => {
+      if (runtimeRetired || (!streamSettled && !ensureRuntimeCleanup())) {
+        return;
+      }
       notifyPeerActive();
       settleStream();
       if (supersededByNewInbound) {
@@ -2734,6 +2867,9 @@ export function createBotWsReplyHandle(params: {
           frame: params.frame,
           hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
         });
+        if (runtimeRetired) {
+          return;
+        }
         if (supersededByNewInbound) {
           params.onFail?.(error);
           return;

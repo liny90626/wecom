@@ -60,6 +60,8 @@ export type UnifiedInboundEvent = {
   transport: WecomTransportKind;
   inboundKind: WecomInboundKind;
   messageId: string;
+  /** Additional transport message ids consumed by this merged inbound. */
+  dedupeAliases?: string[];
   conversation: ConversationRef;
   text: string;
   senderName?: string;
@@ -97,6 +99,10 @@ export type ReplyHandle = {
   deliver: (payload: ReplyPayload, info: ReplyDeliveryInfo) => Promise<void>;
   fail?: (error: unknown) => Promise<void>;
   markExternalActivity?: () => void;
+  /** Registers cleanup for the Bot WS runtime instance that owns this reply. */
+  onTransportRetired?: (listener: () => void) => () => void;
+  /** Releases transport-owner tracking after the OpenClaw dispatch has ended. */
+  markDispatchSettled?: () => void;
   /** Resolves after a superseded Bot WS run has released its OpenClaw session. */
   waitForSupersede?: () => Promise<void>;
   supersedeByNewInbound?: (meta: {

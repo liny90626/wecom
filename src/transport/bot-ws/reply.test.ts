@@ -9,7 +9,12 @@ import {
   unregisterBotWsPushHandle,
 } from "../../runtime.js";
 import { uploadAndSendBotWsMedia } from "./media.js";
-import { __resetBotWsReplyTestState, createBotWsReplyHandle } from "./reply.js";
+import {
+  __resetBotWsReplyTestState,
+  createBotWsReplyHandle,
+  registerBotWsReplyOwner,
+  retireBotWsReplyOwner,
+} from "./reply.js";
 
 vi.mock("./media.js", () => ({
   uploadAndSendBotWsMedia: vi.fn(),
@@ -3446,6 +3451,225 @@ describe("createBotWsReplyHandle", () => {
     ).toBe(false);
   });
 
+  it("retires a deferred reply before it is activated", () => {
+    const ownerId = "owner-retired-before-activation";
+    registerBotWsReplyOwner(ownerId);
+    const transportRetired = vi.fn();
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-owner-retired-before-activation" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      deferActivation: true,
+      runtimeOwnerId: ownerId,
+    });
+    handle.onTransportRetired?.(transportRetired);
+
+    retireBotWsReplyOwner(ownerId);
+
+    expect(transportRetired).toHaveBeenCalledOnce();
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+  });
+
+  it("releases owner tracking after a superseded dispatch settles without background work", async () => {
+    const ownerId = "owner-settled-supersede";
+    registerBotWsReplyOwner(ownerId);
+    const transportRetired = vi.fn();
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-owner-settled-supersede" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      runtimeOwnerId: ownerId,
+    });
+    handle.onTransportRetired?.(transportRetired);
+    handle.activate?.();
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+
+    handle.markDispatchSettled?.();
+    retireBotWsReplyOwner(ownerId);
+    await flushPromises();
+
+    expect(transportRetired).not.toHaveBeenCalled();
+  });
+
+  it("keeps owner tracking until dispatch settlement after a final retry completes", async () => {
+    const ownerId = "owner-retry-before-dispatch-settlement";
+    registerBotWsReplyOwner(ownerId);
+    const transportRetired = vi.fn();
+    mockClient.replyStream.mockRejectedValueOnce({
+      errcode: 846608,
+      errmsg: "stream message update expired",
+    });
+    mockClient.sendMessage
+      .mockRejectedValueOnce(new Error("initial push failed"))
+      .mockResolvedValueOnce({} as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-owner-retry-before-dispatch-settlement" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      runtimeOwnerId: ownerId,
+    });
+    handle.onTransportRetired?.(transportRetired);
+    handle.activate?.();
+
+    await handle.deliver({ text: "最终答案" }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+
+    retireBotWsReplyOwner(ownerId);
+    expect(transportRetired).toHaveBeenCalledOnce();
+  });
+
+  it("does not send an old final through a replacement owner's push handle", async () => {
+    const ownerId = "owner-overlapped-by-replacement";
+    registerBotWsReplyOwner(ownerId);
+    const expiredError = {
+      errcode: 846608,
+      errmsg: "stream message update expired",
+    };
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    const replacementSend = vi.fn().mockResolvedValue(undefined);
+    registerBotWsPushHandle("default", {
+      ownerId: "replacement-owner",
+      isConnected: () => true,
+      sendMarkdown: replacementSend,
+      replyCommand: vi.fn(),
+      sendMedia: vi.fn(),
+    } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-owner-overlapped-by-replacement" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      runtimeOwnerId: ownerId,
+    });
+    handle.activate?.();
+
+    await handle.deliver({ text: "旧连接的最终答案" }, { kind: "final" });
+
+    expect(replacementSend).not.toHaveBeenCalled();
+    expect(mockClient.sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it("does not fall back through a replacement connection after its owner retires during ack wait", async () => {
+    const ownerId = "owner-retired-during-ack-wait";
+    registerBotWsReplyOwner(ownerId);
+    const pendingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+    };
+    pendingClient.hasPendingReplyAck = vi.fn(() => true);
+    const replacementSend = vi.fn().mockResolvedValue(undefined);
+    const handle = createBotWsReplyHandle({
+      client: pendingClient,
+      frame: {
+        headers: { req_id: "req-owner-retired-during-ack-wait" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      runtimeOwnerId: ownerId,
+    });
+    handle.activate?.();
+
+    const delivery = handle.deliver({ text: "旧连接的最终答案" }, { kind: "final" });
+    await flushPromises();
+    expect(pendingClient.hasPendingReplyAck).toHaveBeenCalled();
+
+    retireBotWsReplyOwner(ownerId);
+    registerBotWsPushHandle("default", {
+      isConnected: () => true,
+      sendMarkdown: replacementSend,
+      replyCommand: vi.fn(),
+      sendMedia: vi.fn(),
+    });
+    await vi.advanceTimersByTimeAsync(5_500);
+    await delivery;
+
+    expect(replacementSend).not.toHaveBeenCalled();
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+  });
+
+  it("does not run an old final retry through a replacement connection before owner retirement", async () => {
+    const ownerId = "owner-retry-before-retirement";
+    const expiredError = {
+      headers: { req_id: "req-owner-retry-before-retirement" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const oldSend = vi.fn().mockRejectedValueOnce(new Error("old push failed"));
+    const replacementSend = vi.fn().mockResolvedValue(undefined);
+    registerBotWsReplyOwner(ownerId);
+    registerBotWsPushHandle(
+      "default",
+      {
+        ownerId,
+        isConnected: () => true,
+        sendMarkdown: oldSend,
+        replyCommand: vi.fn(),
+        sendMedia: vi.fn(),
+      } as any,
+    );
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    const onDeliver = vi.fn();
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-owner-retry-before-retirement" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      runtimeOwnerId: ownerId,
+      onDeliver,
+    });
+
+    await handle.deliver({ text: "旧连接最终结果" }, { kind: "final" });
+    expect(oldSend).toHaveBeenCalledOnce();
+
+    registerBotWsPushHandle(
+      "default",
+      {
+        ownerId: "replacement-owner",
+        isConnected: () => true,
+        sendMarkdown: replacementSend,
+        replyCommand: vi.fn(),
+        sendMedia: vi.fn(),
+      } as any,
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromises();
+
+    expect(replacementSend).not.toHaveBeenCalled();
+    expect(mockClient.sendMessage).toHaveBeenCalledOnce();
+    expect(onDeliver).toHaveBeenCalledOnce();
+  });
+
   it("suppresses the failure notice while a final push retry is pending", async () => {
     const expiredError = {
       headers: { req_id: "req-fail-notice-retry-pending" },
@@ -4706,6 +4930,46 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
 
     resolvePlaceholder({});
+    await flushPromises();
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    expect(mockClient.replyStream.mock.calls[1]?.[2]).toBe("已收到新消息，合并思考。✅");
+    expect(mockClient.replyStream.mock.calls[1]?.[3]).toBe(true);
+  });
+
+  it("closes a superseded block preview after its in-flight ack settles", async () => {
+    let resolvePreview!: (value: unknown) => void;
+    mockClient.replyStream
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePreview = resolve;
+          }),
+      )
+      .mockResolvedValue({} as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-supersede-preview-in-flight" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const previewDelivery = handle.deliver({ text: "已完成一半" }, { kind: "block" });
+    await flushPromises();
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+
+    resolvePreview({});
+    await previewDelivery;
     await flushPromises();
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);

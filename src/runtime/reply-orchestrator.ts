@@ -12,8 +12,8 @@ type ReplyOptions = NonNullable<Parameters<DispatchReply>[0]["replyOptions"]>;
 // short so a broken ACK cannot hold the actual reply indefinitely.
 const DETACHED_PROGRESS_DRAIN_GRACE_MS = 500;
 
-const BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT =
-  "⏳ 上一轮任务仍在进行，本条消息已并入当前任务，完成后一并回复；若长时间未收到回复，请重新发送。";
+export const BOT_WS_BUSY_INBOUND_NOTICE_TEXT =
+  "之前任务还在处理中，新指令冲突啦，请先等待当前任务结束；确认新指令未执行后再重试。";
 
 export class WeComReplyNoVisibleOutputError extends Error {
   constructor(sessionKey?: string) {
@@ -22,7 +22,14 @@ export class WeComReplyNoVisibleOutputError extends Error {
   }
 }
 
-function resolveAbsorbingRunSessionId(sessionKey: string): string | undefined {
+export class WeComReplyBusyNotAcceptedError extends Error {
+  constructor(sessionKey?: string) {
+    super(`OpenClaw did not accept the WeCom inbound while the session was busy${sessionKey ? ` for ${sessionKey}` : ""}.`);
+    this.name = "WeComReplyBusyNotAcceptedError";
+  }
+}
+
+function resolveActiveRunSessionId(sessionKey: string): string | undefined {
   if (!sessionKey) {
     return undefined;
   }
@@ -51,8 +58,9 @@ export async function dispatchRuntimeReply(params: {
   session: PreparedSession;
   replyHandle: ReplyHandle;
   abortSignal?: AbortSignal;
+  retryFlaglessBusy?: boolean;
 }): Promise<void> {
-  const { core, cfg, session, replyHandle, abortSignal } = params;
+  const { core, cfg, session, replyHandle, abortSignal, retryFlaglessBusy } = params;
   const isBotWsReply = replyHandle.context.transport === "bot-ws";
   const sessionKey = String(session.ctx.SessionKey ?? session.route?.sessionKey ?? "");
   let visibleBodySeen = false;
@@ -218,6 +226,24 @@ export async function dispatchRuntimeReply(params: {
     await sealProgress();
     await replyHandle.fail?.(error);
     throw error;
+  };
+
+  const deliverBusyNotice = async (
+    busyRunSessionId?: string,
+    throwForRetry = false,
+  ): Promise<void> => {
+    console.info(
+      `[wecom-b3] dispatch-busy-not-accepted sessionKey=${sessionKey} sessionId=${busyRunSessionId ?? "n/a"}`,
+    );
+    if (throwForRetry) {
+      throw new WeComReplyBusyNotAcceptedError(sessionKey || undefined);
+    }
+    try {
+      await replyHandle.deliver({ text: BOT_WS_BUSY_INBOUND_NOTICE_TEXT }, { kind: "final" });
+    } catch (noticeError) {
+      await failAndThrow(noticeError);
+    }
+    finalDelivered = true;
   };
 
   const botWsReplyOptions: ReplyOptions | undefined = isBotWsReply
@@ -425,27 +451,28 @@ export async function dispatchRuntimeReply(params: {
       await closeReply();
       return;
     }
-    const absorbingRunSessionId = resolveAbsorbingRunSessionId(sessionKey);
-    if (absorbingRunSessionId) {
-      // Nothing reached this dispatch and the session still has an active
-      // run: OpenClaw steered/queued the inbound into that run. Tell the
-      // user instead of reporting a delivery failure for a message that is
-      // actually being processed.
-      console.info(
-        `[wecom-b3] dispatch-absorbed-by-active-run sessionKey=${sessionKey} sessionId=${absorbingRunSessionId}`,
-      );
-      try {
-        await replyHandle.deliver(
-          { text: BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT },
-          { kind: "final" },
-        );
-      } catch (noticeError) {
-        // The notice is the only feedback for an absorbed message; fall back
-        // to the fail path so its own delivery fallbacks can still reach the
-        // user rather than leaving the placeholder hanging.
-        return failAndThrow(noticeError);
-      }
-      finalDelivered = true;
+    const busyRunSessionId = resolveActiveRunSessionId(sessionKey);
+    if (busyRunSessionId) {
+      await deliverBusyNotice(busyRunSessionId);
+      return;
+    }
+    return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
+  }
+
+  const queuedOutputCount =
+    (result.counts?.block ?? 0) +
+    (result.counts?.final ?? 0) +
+    (result.counts?.tool ?? 0);
+  if (
+    queuedOutputCount === 0 &&
+    !runActivityObserved &&
+    !visibleBodySeen &&
+    !fastAutoOnText &&
+    !sourceDeliverySuppressed
+  ) {
+    const busyRunSessionId = resolveActiveRunSessionId(sessionKey);
+    if (busyRunSessionId) {
+      await deliverBusyNotice(busyRunSessionId, retryFlaglessBusy);
       return;
     }
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));

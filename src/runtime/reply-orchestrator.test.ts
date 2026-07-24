@@ -20,9 +20,10 @@ describe("dispatchRuntimeReply", () => {
   });
 
   it("enables block streaming for bot-ws replies", async () => {
-    const dispatchReplyWithBufferedBlockDispatcher = vi
-      .fn()
-      .mockResolvedValue({ queuedFinal: false, counts: { block: 0, final: 0, tool: 0 } });
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.dispatcherOptions.deliver({ text: "ok" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
     const core = {
       channel: {
         reply: {
@@ -50,9 +51,6 @@ describe("dispatchRuntimeReply", () => {
         replyOptions: expect.objectContaining({
           disableBlockStreaming: false,
           allowProgressCallbacksWhenSourceDeliverySuppressed: true,
-          queuedFollowupLifecycle: expect.objectContaining({
-            onEnqueued: expect.any(Function),
-          }),
           onReasoningStream: expect.any(Function),
           onReasoningEnd: expect.any(Function),
           onToolResult: expect.any(Function),
@@ -743,6 +741,40 @@ describe("dispatchRuntimeReply", () => {
     }
   });
 
+  it("does not retry a fallback-eligible busy result after OpenClaw may have run", async () => {
+    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-deferred");
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
+      queuedFinal: false,
+      counts: { block: 0, final: 0, tool: 0 },
+      noVisibleReplyFallbackEligible: true,
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-deferred-busy" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+        } as any,
+        retryFlaglessBusy: true,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(deliver).toHaveBeenCalledWith(
+      { text: expect.stringContaining("确认新指令未执行后再重试") },
+      { kind: "final" },
+    );
+  });
+
   it("closes a reasoning-only bot-ws run without failing when the visible reply is deferred", async () => {
     // OpenClaw resolves {noVisibleReplyFallbackEligible} for turns that ran but
     // deferred their visible reply (e.g. yielded to a pending continuation).
@@ -1078,13 +1110,11 @@ describe("dispatchRuntimeReply", () => {
     expect(fail).not.toHaveBeenCalled();
   });
 
-  it("falls back to the fail path when the queued-followup notice cannot be delivered", async () => {
-    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
-      params.replyOptions.queuedFollowupLifecycle.onEnqueued();
-      return {
-        queuedFinal: false,
-        counts: { block: 0, final: 0, tool: 0 },
-      };
+  it("falls back to the fail path when the busy notice cannot be delivered", async () => {
+    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
+      queuedFinal: false,
+      counts: { block: 0, final: 0, tool: 0 },
     });
     const deliverError = new Error("notice delivery failed");
     const deliver = vi.fn().mockRejectedValue(deliverError);
@@ -1110,14 +1140,12 @@ describe("dispatchRuntimeReply", () => {
     expect(fail).toHaveBeenCalledWith(deliverError);
   });
 
-  it("notifies that the inbound was accepted only after OpenClaw enqueues the followup", async () => {
+  it("does not opt into OpenClaw steering after the previous handle was superseded", async () => {
     agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
+    let replyOptions: any;
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
-      params.replyOptions.queuedFollowupLifecycle.onEnqueued();
-      return {
-        queuedFinal: false,
-        counts: { block: 0, final: 0, tool: 0 },
-      };
+      replyOptions = params.replyOptions;
+      return { queuedFinal: false, counts: { block: 0, final: 0, tool: 0 } };
     });
     const deliver = vi.fn().mockResolvedValue(undefined);
     const fail = vi.fn().mockResolvedValue(undefined);
@@ -1143,35 +1171,37 @@ describe("dispatchRuntimeReply", () => {
     expect(deliver).toHaveBeenCalledTimes(1);
     const [payload, info] = deliver.mock.calls[0] ?? [];
     expect(info).toEqual({ kind: "final" });
-    expect(String(payload?.text)).toContain("并入");
+    expect(replyOptions.queuedFollowupLifecycle).toBeUndefined();
+    expect(String(payload?.text)).toContain("确认新指令未执行后再重试");
   });
 
-  it("reports an unaccepted busy inbound instead of silently closing or claiming it was merged", async () => {
-    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
+  it("fails a flagless empty result when no active run proves the session is busy", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
       queuedFinal: false,
       counts: { block: 0, final: 0, tool: 0 },
     });
     const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
 
-    await dispatchRuntimeReply({
-      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
-      cfg: {} as any,
-      session: { ctx: { SessionKey: "session-busy-not-accepted" } } as any,
-      replyHandle: {
-        context: {
-          transport: "bot-ws",
-          accountId: "default",
-          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
-        },
-        deliver,
-      } as any,
-    });
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-empty-without-active-run" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).rejects.toThrow("no visible output");
 
-    expect(deliver).toHaveBeenCalledOnce();
-    const text = String(deliver.mock.calls[0]?.[0]?.text ?? "");
-    expect(text).toContain("未能处理");
-    expect(text).not.toContain("并入");
+    expect(deliver).not.toHaveBeenCalled();
+    expect(fail).toHaveBeenCalledOnce();
   });
 
   it("keeps Fast progress but rejects auto-off without a later body", async () => {

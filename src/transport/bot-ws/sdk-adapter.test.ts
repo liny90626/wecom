@@ -166,12 +166,50 @@ describe("BotWsSdkAdapter", () => {
         text: { content: "hello" },
       },
     });
-    await vi.advanceTimersByTimeAsync(499);
-    expect(runtime.handleEvent).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(runtime.handleEvent).toHaveBeenCalledOnce();
     expect(sdkMockState.client?.replyStream).toHaveBeenCalledOnce();
+    adapter.stop();
+    vi.useRealTimers();
+  });
+
+  it("leaves normal dispatch settlement to the runtime dispatcher", async () => {
+    vi.useFakeTimers();
+    const markDispatchSettled = vi.fn();
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (_event, replyHandle) => {
+        replyHandle.markDispatchSettled = markDispatchSettled;
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+
+    adapter.start();
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-runtime-settlement" },
+      body: {
+        msgid: "msg-runtime-settlement",
+        msgtype: "text",
+        from: { userid: "user-1" },
+        text: { content: "hello" },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(runtime.handleEvent).toHaveBeenCalledOnce();
+    expect(markDispatchSettled).not.toHaveBeenCalled();
     adapter.stop();
     vi.useRealTimers();
   });
@@ -223,6 +261,7 @@ describe("BotWsSdkAdapter", () => {
     expect(event).toMatchObject({
       messageId: "msg-text",
       text: "请分析这个文件",
+      dedupeAliases: ["msg-file"],
       attachments: [
         {
           name: "file",
@@ -233,7 +272,65 @@ describe("BotWsSdkAdapter", () => {
     });
   });
 
-  it("merges a text frame followed by a media frame before dispatching", async () => {
+  it("does not dispatch a repeated media frame before merging its text", async () => {
+    vi.useFakeTimers();
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+    const mediaFrame = {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-file-redelivered" },
+      body: {
+        msgid: "msg-file-redelivered",
+        msgtype: "file",
+        chattype: "single",
+        from: { userid: "user-1" },
+        file: { url: "https://example.com/repeated.pdf", aeskey: "repeat-key" },
+      },
+    };
+
+    try {
+      adapter.start();
+      sdkMockState.client?.emit("message", mediaFrame);
+      sdkMockState.client?.emit("message", mediaFrame);
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-file-redelivered-text" },
+        body: {
+          msgid: "msg-file-redelivered-text",
+          msgtype: "text",
+          chattype: "single",
+          from: { userid: "user-1" },
+          text: { content: "分析重复投递的文件" },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(runtime.handleEvent).toHaveBeenCalledOnce();
+      expect(runtime.handleEvent.mock.calls[0]?.[0]).toMatchObject({
+        messageId: "msg-file-redelivered-text",
+        dedupeAliases: ["msg-file-redelivered"],
+        attachments: [{ remoteUrl: "https://example.com/repeated.pdf" }],
+      });
+    } finally {
+      adapter.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("dispatches text immediately instead of waiting for a later media frame", async () => {
     vi.useFakeTimers();
     const runtime = {
       account: {
@@ -264,6 +361,15 @@ describe("BotWsSdkAdapter", () => {
           text: { content: "请按附件里的数据生成汇总" },
         },
       });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(runtime.handleEvent).toHaveBeenCalledOnce();
+      expect(runtime.handleEvent.mock.calls[0]?.[0]).toMatchObject({
+        messageId: "msg-text-first",
+        text: "请按附件里的数据生成汇总",
+      });
+      expect(runtime.handleEvent.mock.calls[0]?.[0].attachments).toBeUndefined();
+
       await vi.advanceTimersByTimeAsync(250);
       sdkMockState.client?.emit("message", {
         cmd: "aibot_msg_callback",
@@ -276,12 +382,13 @@ describe("BotWsSdkAdapter", () => {
           file: { url: "https://example.com/data.xlsx", aeskey: "data-key" },
         },
       });
-      await vi.advanceTimersByTimeAsync(2_000);
-
+      await vi.advanceTimersByTimeAsync(999);
       expect(runtime.handleEvent).toHaveBeenCalledOnce();
-      const [event] = runtime.handleEvent.mock.calls[0] ?? [];
-      expect(event).toMatchObject({
-        text: "请按附件里的数据生成汇总",
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(runtime.handleEvent).toHaveBeenCalledTimes(2);
+      expect(runtime.handleEvent.mock.calls[1]?.[0]).toMatchObject({
+        messageId: "msg-file-second",
         attachments: [
           {
             name: "file",
@@ -359,6 +466,65 @@ describe("BotWsSdkAdapter", () => {
     }
   });
 
+  it("dispatches later text separately after the media merge window expires", async () => {
+    vi.useFakeTimers();
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+
+    try {
+      adapter.start();
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-expired-window-file" },
+        body: {
+          msgid: "msg-expired-window-file",
+          msgtype: "file",
+          chattype: "single",
+          from: { userid: "user-1" },
+          file: { url: "https://example.com/expired.pdf", aeskey: "expired-key" },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(runtime.handleEvent).toHaveBeenCalledOnce();
+
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-expired-window-text" },
+        body: {
+          msgid: "msg-expired-window-text",
+          msgtype: "text",
+          chattype: "single",
+          from: { userid: "user-1" },
+          text: { content: "这是后续独立指令" },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(runtime.handleEvent).toHaveBeenCalledTimes(2);
+      expect(runtime.handleEvent.mock.calls[1]?.[0]).toMatchObject({
+        messageId: "msg-expired-window-text",
+        text: "这是后续独立指令",
+      });
+      expect(runtime.handleEvent.mock.calls[1]?.[0].attachments).toBeUndefined();
+    } finally {
+      adapter.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("flushes standalone media and keeps merge windows isolated per peer", async () => {
     vi.useFakeTimers();
     const runtime = {
@@ -411,7 +577,63 @@ describe("BotWsSdkAdapter", () => {
     vi.useRealTimers();
   });
 
-  it("preserves same-peer media ordering while the first dispatch is still running", async () => {
+  it("does not merge media and text from different senders in the same group", async () => {
+    vi.useFakeTimers();
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+
+    try {
+      adapter.start();
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-group-file" },
+        body: {
+          msgid: "msg-group-file",
+          msgtype: "file",
+          chattype: "group",
+          chatid: "group-1",
+          from: { userid: "user-1" },
+          file: { url: "https://example.com/group.pdf", aeskey: "group-key" },
+        },
+      });
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-group-text" },
+        body: {
+          msgid: "msg-group-text",
+          msgtype: "text",
+          chattype: "group",
+          chatid: "group-1",
+          from: { userid: "user-2" },
+          text: { content: "分析这份文件" },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(runtime.handleEvent).toHaveBeenCalledTimes(2);
+      expect(runtime.handleEvent.mock.calls.map(([event]) => event.conversation.senderId)).toEqual(
+        expect.arrayContaining(["user-1", "user-2"]),
+      );
+    } finally {
+      adapter.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts same-peer media dispatches in arrival order without waiting for completion", async () => {
     vi.useFakeTimers();
     let releaseFirst!: () => void;
     const firstDispatch = new Promise<void>((resolve) => {
@@ -455,16 +677,14 @@ describe("BotWsSdkAdapter", () => {
         });
       }
       await Promise.resolve();
-
-      expect(runtime.handleEvent).toHaveBeenCalledOnce();
-      expect(runtime.handleEvent.mock.calls[0]?.[0].messageId).toBe("msg-first");
-
-      releaseFirst();
-      await Promise.resolve();
       await vi.advanceTimersByTimeAsync(1_000);
 
       expect(runtime.handleEvent).toHaveBeenCalledTimes(2);
+      expect(runtime.handleEvent.mock.calls[0]?.[0].messageId).toBe("msg-first");
       expect(runtime.handleEvent.mock.calls[1]?.[0].messageId).toBe("msg-second");
+
+      releaseFirst();
+      await Promise.resolve();
     } finally {
       adapter.stop();
       vi.useRealTimers();
@@ -527,12 +747,6 @@ describe("BotWsSdkAdapter", () => {
       });
       await vi.advanceTimersByTimeAsync(500);
 
-      expect(runtime.handleEvent).toHaveBeenCalledOnce();
-
-      releaseFirst();
-      await Promise.resolve();
-      await vi.advanceTimersByTimeAsync(1_000);
-
       expect(runtime.handleEvent).toHaveBeenCalledTimes(2);
       expect(runtime.handleEvent.mock.calls[1]?.[0]).toMatchObject({
         messageId: "msg-second-text",
@@ -544,6 +758,8 @@ describe("BotWsSdkAdapter", () => {
           },
         ],
       });
+      releaseFirst();
+      await Promise.resolve();
     } finally {
       releaseFirst();
       adapter.stop();
@@ -570,6 +786,7 @@ describe("BotWsSdkAdapter", () => {
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandle.activate?.();
         await replyHandle.deliver({ text: "旧连接的最终答案" }, { kind: "final" });
+        replyHandle.markDispatchSettled?.();
       }),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -614,6 +831,56 @@ describe("BotWsSdkAdapter", () => {
 
     expect(replacementClient.sendMessage).not.toHaveBeenCalled();
     replacementAdapter.stop();
+    vi.useRealTimers();
+  });
+
+  it("notifies the active reply when its adapter stops", async () => {
+    vi.useFakeTimers();
+    const transportRetired = vi.fn();
+    let releaseDispatch!: () => void;
+    const dispatchGate = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (_event, replyHandle) => {
+        replyHandle.onTransportRetired?.(transportRetired);
+        replyHandle.activate?.();
+        await dispatchGate;
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+
+    adapter.start();
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-stop-active" },
+      body: {
+        msgid: "msg-stop-active",
+        msgtype: "text",
+        chattype: "single",
+        from: { userid: "user-1" },
+        text: { content: "long task" },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runtime.handleEvent).toHaveBeenCalledOnce();
+
+    adapter.stop();
+
+    expect(transportRetired).toHaveBeenCalledOnce();
+    releaseDispatch();
+    await Promise.resolve();
     vi.useRealTimers();
   });
 
@@ -701,6 +968,9 @@ describe("BotWsSdkAdapter", () => {
 
     expect(replacementHandle).toBeDefined();
     expect(replacementHandle).not.toBe(staleHandle);
+    expect(staleHandle?.ownerId).toBeDefined();
+    expect(replacementHandle?.ownerId).toBeDefined();
+    expect(replacementHandle?.ownerId).not.toBe(staleHandle?.ownerId);
     staleAdapter.stop();
     expect(getBotWsPushHandle("acc-1")).toBe(replacementHandle);
 

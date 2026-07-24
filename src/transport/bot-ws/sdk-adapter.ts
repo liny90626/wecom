@@ -15,16 +15,18 @@ import { clearWecomMcpAccountCache } from "../../capability/mcp/index.js";
 import type { ReplyHandle, RuntimeLogSink, UnifiedInboundEvent } from "../../types/index.js";
 import { mapBotWsFrameToInboundEvent } from "./inbound.js";
 import { uploadAndSendBotWsMedia } from "./media.js";
-import { createBotWsReplyHandle } from "./reply.js";
+import {
+  createBotWsReplyHandle,
+  registerBotWsReplyOwner,
+  retireBotWsReplyOwner,
+} from "./reply.js";
 import { createBotWsSessionSnapshot } from "./session.js";
 
 const MEDIA_FIRST_TEXT_MERGE_WINDOW_MS = 1_000;
-const TEXT_FIRST_MEDIA_MERGE_WINDOW_MS = 500;
 
 type MergeCandidateKind = "media" | "text";
 
 type PendingMergeFrame = {
-  kind: MergeCandidateKind;
   event: UnifiedInboundEvent;
   frame: WsFrame<BaseMessage | EventMessage>;
   replyHandle: ReplyHandle;
@@ -32,7 +34,12 @@ type PendingMergeFrame = {
 };
 
 function buildInboundPeerKey(event: UnifiedInboundEvent): string {
-  return `${event.accountId}:${event.conversation.peerKind}:${event.conversation.peerId.trim().toLowerCase()}`;
+  return [
+    event.accountId,
+    event.conversation.peerKind,
+    event.conversation.peerId.trim().toLowerCase(),
+    event.conversation.senderId.trim().toLowerCase(),
+  ].join(":");
 }
 
 function isStandaloneMediaEvent(event: UnifiedInboundEvent): boolean {
@@ -77,6 +84,7 @@ function mergeMediaAndText(
   return {
     ...textEvent,
     text: textEvent.text.trim() || mediaEvent.text,
+    dedupeAliases: [mediaEvent.messageId],
     ...(attachments.length > 0 ? { attachments } : {}),
   };
 }
@@ -117,7 +125,9 @@ export class BotWsSdkAdapter {
       },
     });
     this.client = client;
+    registerBotWsReplyOwner(this.ownerId);
     const pushHandle: BotWsPushHandle = {
+      ownerId: this.ownerId,
       isConnected: () => client.isConnected,
       replyCommand: async ({ cmd, body, headers }) => {
         const replyHeaders = {
@@ -295,13 +305,19 @@ export class BotWsSdkAdapter {
       const staticWelcomeText =
         event.inboundKind === "welcome" ? botAccount.config.welcomeText?.trim() : undefined;
       if (staticWelcomeText) {
-        this.log.info?.(
-          `[wecom-ws] static welcome reply account=${this.runtime.account.accountId} messageId=${event.messageId} peer=${event.conversation.peerKind}:${event.conversation.peerId} len=${staticWelcomeText.length}`,
-        );
-        await replyHandle.deliver({ text: staticWelcomeText }, { kind: "final" });
-        this.log.info?.(
-          `[wecom-ws] static welcome delivered account=${this.runtime.account.accountId} messageId=${event.messageId}`,
-        );
+        try {
+          this.log.info?.(
+            `[wecom-ws] static welcome reply account=${this.runtime.account.accountId} messageId=${event.messageId} peer=${event.conversation.peerKind}:${event.conversation.peerId} len=${staticWelcomeText.length}`,
+          );
+          await replyHandle.deliver({ text: staticWelcomeText }, { kind: "final" });
+          this.log.info?.(
+            `[wecom-ws] static welcome delivered account=${this.runtime.account.accountId} messageId=${event.messageId}`,
+          );
+        } finally {
+          // Static welcomes bypass dispatchInboundEvent, so this is the only
+          // path whose owner lifecycle is settled by the adapter itself.
+          replyHandle.markDispatchSettled?.();
+        }
         return;
       }
 
@@ -353,6 +369,7 @@ export class BotWsSdkAdapter {
           event.inboundKind === "voice" ||
           event.inboundKind === "mixed",
         deferActivation: true,
+        runtimeOwnerId: this.ownerId,
         onDeliver: () => {
           this.runtime.touchTransportSession("bot-ws", {
             ownerId: this.ownerId,
@@ -376,38 +393,37 @@ export class BotWsSdkAdapter {
       const peerKey = buildInboundPeerKey(event);
       const pending = this.pendingMergeFrames.get(peerKey);
       const mergeKind = resolveMergeCandidateKind(event);
-      if (pending && mergeKind && pending.kind !== mergeKind) {
+      if (pending?.event.messageId === event.messageId) {
+        this.log.info?.(
+          `[wecom-ws] duplicate pending media ignored account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} messageId=${event.messageId}`,
+        );
+        return;
+      }
+      if (pending && mergeKind === "text") {
         clearTimeout(pending.timer);
         this.pendingMergeFrames.delete(peerKey);
-        const mediaEvent = pending.kind === "media" ? pending.event : event;
-        const textEvent = pending.kind === "text" ? pending.event : event;
-        const textReplyHandle = pending.kind === "text" ? pending.replyHandle : replyHandle;
-        const mergedEvent = mergeMediaAndText(mediaEvent, textEvent);
+        const mergedEvent = mergeMediaAndText(pending.event, event);
         this.log.info?.(
-          `[wecom-ws] merged media+text account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} mediaMessageId=${mediaEvent.messageId} textMessageId=${textEvent.messageId}`,
+          `[wecom-ws] merged media+text account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} mediaMessageId=${pending.event.messageId} textMessageId=${event.messageId}`,
         );
-        await dispatchEvent(mergedEvent, textReplyHandle);
+        await dispatchEvent(mergedEvent, replyHandle);
         return;
       }
 
       if (pending) {
         clearTimeout(pending.timer);
-        if (pending.kind === "media") {
-          await flushPendingMergeFrame(peerKey, pending);
-        } else {
-          void flushPendingMergeFrame(peerKey, pending);
-        }
+        // Starting the previous dispatch synchronously preserves arrival order,
+        // while leaving its full OpenClaw run to the dispatcher's handoff logic.
+        void flushPendingMergeFrame(peerKey, pending);
       }
 
-      if (mergeKind) {
+      if (mergeKind === "media") {
         let nextPending: PendingMergeFrame;
         const timer = setTimeout(() => {
           void flushPendingMergeFrame(peerKey, nextPending);
-        }, mergeKind === "media"
-          ? MEDIA_FIRST_TEXT_MERGE_WINDOW_MS
-          : TEXT_FIRST_MEDIA_MERGE_WINDOW_MS);
+        }, MEDIA_FIRST_TEXT_MERGE_WINDOW_MS);
         timer.unref?.();
-        nextPending = { kind: mergeKind, event, frame, replyHandle, timer };
+        nextPending = { event, frame, replyHandle, timer };
         this.pendingMergeFrames.set(peerKey, nextPending);
         return;
       }
@@ -433,6 +449,7 @@ export class BotWsSdkAdapter {
 
   stop(): void {
     this.log.info?.(`[wecom-ws] stop account=${this.runtime.account.accountId}`);
+    retireBotWsReplyOwner(this.ownerId);
     for (const pending of this.pendingMergeFrames.values()) {
       clearTimeout(pending.timer);
     }

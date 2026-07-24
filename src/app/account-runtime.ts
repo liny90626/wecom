@@ -114,6 +114,11 @@ export class WecomAccountRuntime {
       markExternalActivity: () => {
         replyHandle.markExternalActivity?.();
       },
+      onTransportRetired: (listener) =>
+        replyHandle.onTransportRetired?.(listener) ?? (() => {}),
+      markDispatchSettled: () => {
+        replyHandle.markDispatchSettled?.();
+      },
       supersedeByNewInbound: (meta) => {
         replyHandle.supersedeByNewInbound?.(meta);
       },

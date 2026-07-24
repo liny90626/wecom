@@ -5,6 +5,7 @@
 ## 1. 当前状态
 
 - 维护版本：`2.5.110-145`，发布标签 `released/2.5.110-145`，包 `yanhaidao-wecom-2.5.110-145.tgz`（204,358 bytes；npm shasum `b7bdbd5ed7a4d1143989c794f4be8ca980343afe`；SHA-256 `524c968990200084b7ff6ca7234e914ebcc4364dcf36f33323ffecd472f53cf2`）。
+- 标签状态：`released/2.5.110-144` 已于 2026-07-24 从本地与 `fork` 删除；v144 变更记录仅作历史归档，其修复已由 v145 继承，不要重新发布 v144。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 与 peer 基线仍为 **2026.6.11**（`node_modules/openclaw`），代码需双版本兼容。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；提交邮箱已固化为 `liny90626@users.noreply.github.com`（GH007 教训）。

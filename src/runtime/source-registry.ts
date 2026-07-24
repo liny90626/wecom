@@ -65,22 +65,29 @@ function pruneOldest<T>(map: Map<string, T>, maxSize: number): void {
   }
 }
 
+function setMostRecent<T>(map: Map<string, T>, key: string, value: T): void {
+  map.delete(key);
+  map.set(key, value);
+}
+
 function writeSessionSnapshot(snapshot: WecomSourceSnapshot): void {
   const sessionKey = normalizeOptional(snapshot.sessionKey);
   const sessionId = normalizeOptional(snapshot.sessionId);
   if (sessionKey) {
-    sessionSnapshotsByAccountKey.set(
+    setMostRecent(
+      sessionSnapshotsByAccountKey,
       accountScopedSessionKey(snapshot.accountId, "sessionKey", sessionKey),
       snapshot,
     );
-    sessionSnapshotsByLooseKey.set(`sessionKey::${sessionKey}`, snapshot);
+    setMostRecent(sessionSnapshotsByLooseKey, `sessionKey::${sessionKey}`, snapshot);
   }
   if (sessionId) {
-    sessionSnapshotsByAccountKey.set(
+    setMostRecent(
+      sessionSnapshotsByAccountKey,
       accountScopedSessionKey(snapshot.accountId, "sessionId", sessionId),
       snapshot,
     );
-    sessionSnapshotsByLooseKey.set(`sessionId::${sessionId}`, snapshot);
+    setMostRecent(sessionSnapshotsByLooseKey, `sessionId::${sessionId}`, snapshot);
   }
   pruneOldest(sessionSnapshotsByAccountKey, MAX_SESSION_SNAPSHOTS * 2);
   pruneOldest(sessionSnapshotsByLooseKey, MAX_SESSION_SNAPSHOTS * 2);
@@ -92,7 +99,8 @@ function writeConversationSnapshot(snapshot: WecomSourceSnapshot): void {
   if (!peerKind || !peerId) {
     return;
   }
-  conversationSnapshotsByAccountKey.set(
+  setMostRecent(
+    conversationSnapshotsByAccountKey,
     accountScopedConversationKey(snapshot.accountId, peerKind, peerId),
     {
       ...snapshot,
@@ -100,7 +108,7 @@ function writeConversationSnapshot(snapshot: WecomSourceSnapshot): void {
       peerId,
     },
   );
-  conversationSnapshotsByLooseKey.set(`peer::${peerKind}::${peerId}`, {
+  setMostRecent(conversationSnapshotsByLooseKey, `peer::${peerKind}::${peerId}`, {
     ...snapshot,
     peerKind,
     peerId,
@@ -143,7 +151,7 @@ export function registerWecomSourceSnapshot(params: {
   };
 
   if (snapshot.messageId) {
-    messageFacts.set(messageFactKey(accountId, snapshot.messageId), snapshot);
+    setMostRecent(messageFacts, messageFactKey(accountId, snapshot.messageId), snapshot);
     pruneOldest(messageFacts, MAX_MESSAGE_FACTS);
   }
 

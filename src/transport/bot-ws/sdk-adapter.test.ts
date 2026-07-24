@@ -221,6 +221,132 @@ describe("BotWsSdkAdapter", () => {
     });
   });
 
+  it("merges a text frame followed by a media frame before dispatching", async () => {
+    vi.useFakeTimers();
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+
+    try {
+      adapter.start();
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-text-first" },
+        body: {
+          msgid: "msg-text-first",
+          msgtype: "text",
+          chattype: "single",
+          from: { userid: "user-1" },
+          text: { content: "请按附件里的数据生成汇总" },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(250);
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-file-second" },
+        body: {
+          msgid: "msg-file-second",
+          msgtype: "file",
+          chattype: "single",
+          from: { userid: "user-1" },
+          file: { url: "https://example.com/data.xlsx", aeskey: "data-key" },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(runtime.handleEvent).toHaveBeenCalledOnce();
+      const [event] = runtime.handleEvent.mock.calls[0] ?? [];
+      expect(event).toMatchObject({
+        text: "请按附件里的数据生成汇总",
+        attachments: [
+          {
+            name: "file",
+            remoteUrl: "https://example.com/data.xlsx",
+            aesKey: "data-key",
+          },
+        ],
+      });
+    } finally {
+      adapter.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a media frame mergeable when its text arrives after the old 500ms window", async () => {
+    vi.useFakeTimers();
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+
+    try {
+      adapter.start();
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-file-delayed" },
+        body: {
+          msgid: "msg-file-delayed",
+          msgtype: "file",
+          chattype: "single",
+          from: { userid: "user-1" },
+          file: { url: "https://example.com/delayed.pdf", aeskey: "delayed-key" },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(750);
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-text-delayed" },
+        body: {
+          msgid: "msg-text-delayed",
+          msgtype: "text",
+          chattype: "single",
+          from: { userid: "user-1" },
+          text: { content: "提取附件中的结论" },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(runtime.handleEvent).toHaveBeenCalledOnce();
+      const [event] = runtime.handleEvent.mock.calls[0] ?? [];
+      expect(event).toMatchObject({
+        text: "提取附件中的结论",
+        attachments: [
+          {
+            name: "file",
+            remoteUrl: "https://example.com/delayed.pdf",
+            aesKey: "delayed-key",
+          },
+        ],
+      });
+    } finally {
+      adapter.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("flushes standalone media and keeps merge windows isolated per peer", async () => {
     const runtime = {
       account: {

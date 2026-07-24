@@ -3395,6 +3395,57 @@ describe("createBotWsReplyHandle", () => {
     expect(onDeliver).toHaveBeenCalledTimes(1);
   });
 
+  it("does not let an undelivered old retry outlive a newer same-peer activation", async () => {
+    const expiredError = {
+      headers: { req_id: "req-old-undelivered-retry" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const pushError = Object.assign(new Error("active push rejected"), { errcode: 95001 });
+    mockClient.replyStream.mockRejectedValueOnce(expiredError).mockResolvedValue({} as any);
+    mockClient.sendMessage
+      .mockRejectedValueOnce(pushError)
+      .mockRejectedValueOnce(pushError)
+      .mockRejectedValueOnce(pushError)
+      .mockRejectedValueOnce(pushError)
+      .mockResolvedValue({} as any);
+
+    const oldHandle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-old-undelivered-retry" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    await oldHandle.deliver({ text: "旧任务最终结果" }, { kind: "final" });
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    const successor = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-successor-after-retry" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    await successor.deliver({ text: "新任务正常完成" }, { kind: "final" });
+
+    await vi.advanceTimersByTimeAsync(200_000);
+    await flushPromises();
+
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+    expect(
+      mockClient.sendMessage.mock.calls.some((call) =>
+        String((call[1] as any).markdown.content).includes("本次回复投递中断"),
+      ),
+    ).toBe(false);
+  });
+
   it("suppresses the failure notice while a final push retry is pending", async () => {
     const expiredError = {
       headers: { req_id: "req-fail-notice-retry-pending" },

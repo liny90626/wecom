@@ -2334,7 +2334,10 @@ export function createBotWsReplyHandle(params: {
         payload.channelData?.wecomExternalFinalDelivered === true
       ) {
         // The answer is already visible in an active-push message. Finish only
-        // the source stream and never fall back by re-pushing its partial text.
+        // the source stream and invalidate any older retry before it can
+        // re-push partial text or rearm after an in-flight failure.
+        obsoleteFinalRetry = true;
+        finishPendingFinalRetry(false);
         finalDelivered = true;
         await closeOpenedStreamSilently(lastPreviewText);
         return;

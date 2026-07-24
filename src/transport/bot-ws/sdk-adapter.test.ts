@@ -43,6 +43,7 @@ vi.mock("@wecom/aibot-node-sdk", () => ({
 }));
 
 import { BotWsSdkAdapter } from "./sdk-adapter.js";
+import { getBotWsPushHandle, unregisterBotWsPushHandle } from "../../app/index.js";
 
 const waitForAsyncCallbacks = async () => {
   await Promise.resolve();
@@ -56,6 +57,8 @@ describe("BotWsSdkAdapter", () => {
   };
 
   afterEach(() => {
+    const pushHandle = getBotWsPushHandle("acc-1");
+    if (pushHandle) unregisterBotWsPushHandle("acc-1", pushHandle);
     process.off("unhandledRejection", onUnhandledRejection);
     unhandledRejections.length = 0;
     sdkMockState.client = null;
@@ -326,5 +329,36 @@ describe("BotWsSdkAdapter", () => {
       expect.stringContaining("static welcome delivered account=acc-1 messageId=msg-welcome"),
     );
     expect(unhandledRejections).toHaveLength(0);
+  });
+
+  it("keeps a replacement push handle when the stale adapter stops", () => {
+    const createRuntime = () => ({
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    });
+    const staleAdapter = new BotWsSdkAdapter(createRuntime() as any, {} as any);
+    const replacementAdapter = new BotWsSdkAdapter(createRuntime() as any, {} as any);
+    staleAdapter.start();
+    const staleHandle = getBotWsPushHandle("acc-1");
+    replacementAdapter.start();
+    const replacementHandle = getBotWsPushHandle("acc-1");
+
+    expect(replacementHandle).toBeDefined();
+    expect(replacementHandle).not.toBe(staleHandle);
+    staleAdapter.stop();
+    expect(getBotWsPushHandle("acc-1")).toBe(replacementHandle);
+
+    replacementAdapter.stop();
+    expect(getBotWsPushHandle("acc-1")).toBeUndefined();
   });
 });

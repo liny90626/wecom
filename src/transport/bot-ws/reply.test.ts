@@ -560,6 +560,108 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.sendMessage).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      "ambiguous",
+      new Error("Reply ack timeout (5000ms) for reqId: aibot_send_msg_external-final"),
+    ],
+    ["definitive", Object.assign(new Error("active push rejected"), { errcode: 95001 })],
+  ])("cancels a pending %s final retry after external delivery", async (_label, pushError) => {
+    const expiredError = {
+      headers: { req_id: "req-external-final-cancel-retry" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const sendMarkdown = vi.fn().mockRejectedValueOnce(pushError).mockResolvedValue(undefined);
+    registerBotWsPushHandle("default", {
+      isConnected: () => true,
+      sendMarkdown,
+      replyCommand: vi.fn(),
+      sendMedia: vi.fn(),
+    });
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-external-final-cancel-retry" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "不应再次发送的旧 final" }, { kind: "final" });
+    expect(sendMarkdown).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await handle.deliver(
+      { text: "", channelData: { wecomExternalFinalDelivered: true } },
+      { kind: "final" },
+    );
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(200_000);
+    await flushPromises();
+    expect(sendMarkdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not rearm a retry that fails after external delivery settles it", async () => {
+    const expiredError = {
+      headers: { req_id: "req-external-final-inflight-retry" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const firstPushError = new Error(
+      "Reply ack timeout (5000ms) for reqId: aibot_send_msg_external-inflight",
+    );
+    let rejectInflightRetry: ((error: Error) => void) | undefined;
+    const sendMarkdown = vi
+      .fn()
+      .mockRejectedValueOnce(firstPushError)
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectInflightRetry = reject;
+          }),
+      )
+      .mockResolvedValue(undefined);
+    registerBotWsPushHandle("default", {
+      isConnected: () => true,
+      sendMarkdown,
+      replyCommand: vi.fn(),
+      sendMedia: vi.fn(),
+    });
+    mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-external-final-inflight-retry" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "不应继续补发的旧 final" }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromises();
+    expect(sendMarkdown).toHaveBeenCalledTimes(2);
+
+    await handle.deliver(
+      { text: "", channelData: { wecomExternalFinalDelivered: true } },
+      { kind: "final" },
+    );
+    rejectInflightRetry?.(new Error("socket closed after external delivery"));
+    await flushPromises();
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(200_000);
+    await flushPromises();
+    expect(sendMarkdown).toHaveBeenCalledTimes(2);
+  });
+
   it("does not duplicate cumulative block text when final repeats the full answer", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

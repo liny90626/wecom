@@ -27,6 +27,8 @@ const SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS = 500;
 const SUPERSEDED_RUN_DRAIN_TIMEOUT_MS = 5_000;
 const SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS = 5_000;
 const PRE_DISPATCH_RUN_DRAIN_SETTLE_MS = 1_000;
+const PRE_DISPATCH_RUN_RELEASE_WAIT_MS = 3_000;
+const PRE_DISPATCH_RUN_RELEASE_POLL_MS = 150;
 type PendingBotWsInbound = { handle: ReplyHandle; event: UnifiedInboundEvent };
 const pendingBotWsInboundsByPeer = new Map<string, PendingBotWsInbound>();
 
@@ -191,6 +193,31 @@ async function drainSupersededOpenClawRun(params: {
   }
 }
 
+// 2026.7.1 refuses abort (`isEmbeddedRunHandleAbortable` -> false) while a run
+// commits its terminal outcome, which is exactly the short window in which a
+// healthy long task is delivering its answer. Waiting for that window to close
+// keeps the next message from being refused after every long task.
+async function waitForActiveRunToRelease(
+  sessionKey: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const deadline = Date.now() + PRE_DISPATCH_RUN_RELEASE_WAIT_MS;
+  while (!signal.aborted && Date.now() < deadline) {
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(resolve, PRE_DISPATCH_RUN_RELEASE_POLL_MS);
+      timeout.unref?.();
+    });
+    try {
+      if (!resolveActiveEmbeddedRunSessionId(sessionKey)) {
+        return true;
+      }
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
 // OpenClaw ≥2026.7.1 steers a new dispatch into any still-active run for the
 // same session and resolves it with nothing delivered. This guard runs right
 // before our own core dispatch: it gracefully aborts a lingering run and
@@ -204,6 +231,7 @@ async function drainSupersededOpenClawRun(params: {
 // old run without an independently attributable reply.
 async function drainLingeringOpenClawRunBeforeDispatch(params: {
   sessionKey?: string;
+  abortSignal: AbortSignal;
 }): Promise<boolean> {
   const sessionKey = params.sessionKey?.trim();
   if (!sessionKey) {
@@ -237,7 +265,14 @@ async function drainLingeringOpenClawRunBeforeDispatch(params: {
     // Once OpenClaw accepted the abort, this inbound owns the handoff even if
     // the old run needs longer than the short settle window to disappear. The
     // existing admission-conflict retry covers that bounded drain tail.
-    return graceful.aborted || graceful.drained;
+    if (graceful.aborted || graceful.drained) {
+      return true;
+    }
+    const released = await waitForActiveRunToRelease(sessionKey, params.abortSignal);
+    console.info(
+      `[wecom-b3] pre-dispatch-run-release-wait sessionKey=${sessionKey} sessionId=${activeSessionId} released=${String(released)}`,
+    );
+    return released;
   } catch (error) {
     console.warn(
       `[wecom-b3] pre-dispatch-run-drain-failed sessionKey=${sessionKey} sessionId=${activeSessionId} error=${String(error)}`,
@@ -500,7 +535,7 @@ export async function dispatchInboundEvent(params: {
           accountId: event.accountId,
           peerKind: event.conversation.peerKind,
           peerId: event.conversation.peerId,
-          reason: "new-inbound",
+          reason: adopted ? "new-inbound" : "new-inbound-unmerged",
         });
         previousSupersedeDrain = previousPending.handle.waitForSupersede?.();
       } catch (error) {
@@ -550,7 +585,10 @@ export async function dispatchInboundEvent(params: {
     if (isBotWsReplySession) {
       let sessionReady = false;
       preDispatchDrain = boundDrainWait(
-        drainLingeringOpenClawRunBeforeDispatch({ sessionKey }).then((ready) => {
+        drainLingeringOpenClawRunBeforeDispatch({
+          sessionKey,
+          abortSignal: abortController.signal,
+        }).then((ready) => {
           sessionReady = ready;
         }),
         "pre-dispatch-run-drain",

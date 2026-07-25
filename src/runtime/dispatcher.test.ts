@@ -287,7 +287,55 @@ describe("dispatchInboundEvent", () => {
     );
   });
 
+  it("waits for a non-abortable run to release instead of rejecting the inbound", async () => {
+    // OpenClaw 2026.7.1 freezes abort once a turn commits its terminal outcome
+    // (runAgentTurnWithFallback -> replyOperation.freezeAbort), so a healthy run
+    // finishing its delivery reports aborted=false. Refusing the message there
+    // makes the user resend after every long task.
+    vi.useFakeTimers();
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId
+      .mockReturnValueOnce("run-delivering")
+      .mockReturnValueOnce("run-delivering")
+      .mockReturnValue(undefined);
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
+      aborted: false,
+      drained: false,
+      forceCleared: false,
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+
+    try {
+      const operation = dispatchInboundEvent({
+        core: makeCore(dispatchReplyWithBufferedBlockDispatcher) as any,
+        cfg: {} as any,
+        store: makeStore() as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-run-releasing", "旧任务正在收尾"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver }),
+      });
+      await vi.advanceTimersByTimeAsync(3_000);
+      await operation;
+
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+      expect(
+        deliver.mock.calls.some((call) => String(call[0]?.text ?? "").includes("新指令冲突啦")),
+      ).toBe(false);
+    } finally {
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not fold a busy-rejected message into the next inbound", async () => {
+    vi.useFakeTimers();
     openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-finishing");
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
       aborted: false,
@@ -321,10 +369,9 @@ describe("dispatchInboundEvent", () => {
           deliver: vi.fn(() => noticeDelivered),
         }),
       });
-      await vi.waitFor(() =>
-        expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalled(),
-      );
-      await Promise.resolve();
+      // Let the abort settle and the bounded release wait expire so the busy
+      // notice is in flight when the next message arrives.
+      await vi.advanceTimersByTimeAsync(4_000);
 
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue(undefined);
       await dispatchInboundEvent({
@@ -346,6 +393,7 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      vi.useRealTimers();
     }
   });
 
@@ -360,6 +408,7 @@ describe("dispatchInboundEvent", () => {
     const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
     const store = makeStore();
     const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const bobSupersede = vi.fn();
     const groupEvent = (messageId: string, senderId: string, text: string) => ({
       ...makeEvent(messageId, text),
       conversation: {
@@ -380,7 +429,7 @@ describe("dispatchInboundEvent", () => {
         saveInboundAttachment: vi.fn(),
       } as any,
       event: groupEvent("msg-group-bob", "bob", "bob 的私事"),
-      replyHandle: makeReplyHandle(),
+      replyHandle: makeReplyHandle(bobSupersede),
     });
     await Promise.resolve();
 
@@ -406,6 +455,11 @@ describe("dispatchInboundEvent", () => {
       dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0]?.ctx?.Body ?? "",
     );
     expect(body).toBe("carol 的问题");
+    // Bob's message never reached OpenClaw, so his bubble must say so instead
+    // of claiming the two messages were merged.
+    expect(bobSupersede).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "new-inbound-unmerged" }),
+    );
   });
 
   it("supersedes the previous handle before activating its successor", async () => {
@@ -1328,6 +1382,7 @@ describe("dispatchInboundEvent", () => {
     // refused graceful abort usually means a HEALTHY dispatch is finishing.
     // Force-clearing it would stamp the run "run_failed" and surface the
     // generic core failure text in the chat.
+    vi.useFakeTimers();
     openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-finishing");
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
       aborted: false,
@@ -1339,7 +1394,7 @@ describe("dispatchInboundEvent", () => {
     const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
 
     try {
-      await dispatchInboundEvent({
+      const operation = dispatchInboundEvent({
         core: core as any,
         cfg: {} as any,
         store: makeStore() as any,
@@ -1351,6 +1406,8 @@ describe("dispatchInboundEvent", () => {
         event: makeEvent("msg-no-force-clear", "新消息"),
         replyHandle: makeReplyHandle(vi.fn(), { deliver }),
       });
+      await vi.advanceTimersByTimeAsync(4_000);
+      await operation;
 
       expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalledTimes(1);
       const drainParams = openClawHandoffState.abortAndDrainAgentHarnessRun.mock.calls[0]?.[0];
@@ -1363,6 +1420,7 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      vi.useRealTimers();
     }
   });
 
@@ -1508,6 +1566,7 @@ describe("dispatchInboundEvent", () => {
   });
 
   it("preserves the old final when a busy run cannot accept the new inbound", async () => {
+    vi.useFakeTimers();
     let releaseOldRun!: () => void;
     const oldRunGate = new Promise<void>((resolve) => {
       releaseOldRun = resolve;
@@ -1547,15 +1606,16 @@ describe("dispatchInboundEvent", () => {
         event: makeEvent("msg-preserve-old-a", "long task"),
         replyHandle: makeReplyHandle(oldSupersede, { deliver: oldDeliver }),
       });
-      await vi.waitFor(() =>
-        expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce(),
-      );
+      await vi.advanceTimersByTimeAsync(10);
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
 
-      await dispatchInboundEvent({
+      const second = dispatchInboundEvent({
         ...common,
         event: makeEvent("msg-preserve-old-b", "new instruction"),
         replyHandle: makeReplyHandle(vi.fn(), { deliver: busyDeliver }),
       });
+      await vi.advanceTimersByTimeAsync(4_000);
+      await second;
 
       expect(oldSupersede).not.toHaveBeenCalled();
       expect(oldAbortSignal?.aborted).toBe(false);
@@ -1572,10 +1632,12 @@ describe("dispatchInboundEvent", () => {
       releaseOldRun();
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      vi.useRealTimers();
     }
   });
 
   it("reports that a busy inbound was not accepted after the lingering run refuses abort", async () => {
+    vi.useFakeTimers();
     openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
       aborted: false,
@@ -1591,7 +1653,7 @@ describe("dispatchInboundEvent", () => {
     const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
 
     try {
-      await dispatchInboundEvent({
+      const operation = dispatchInboundEvent({
         core: core as any,
         cfg: {} as any,
         store: makeStore() as any,
@@ -1603,6 +1665,8 @@ describe("dispatchInboundEvent", () => {
         event: makeEvent("msg-absorbed", "目前徕事找晓艳了吗？"),
         replyHandle: makeReplyHandle(vi.fn(), { deliver, fail }),
       });
+      await vi.advanceTimersByTimeAsync(4_000);
+      await operation;
 
       expect(fail).not.toHaveBeenCalled();
       expect(deliver).toHaveBeenCalledTimes(1);
@@ -1612,6 +1676,7 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      vi.useRealTimers();
     }
   });
 

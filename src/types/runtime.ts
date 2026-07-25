@@ -116,7 +116,12 @@ export type ReplyHandle = {
     accountId: string;
     peerKind: "direct" | "group";
     peerId: string;
-    reason: "new-inbound";
+    /**
+     * `new-inbound-unmerged` marks a handoff whose message could not be folded
+     * into its successor (another sender, an event turn), so it never reached
+     * OpenClaw and the user has to resend it.
+     */
+    reason: "new-inbound" | "new-inbound-unmerged";
   }) => void;
 };
 

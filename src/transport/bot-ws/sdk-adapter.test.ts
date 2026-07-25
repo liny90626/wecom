@@ -272,6 +272,65 @@ describe("BotWsSdkAdapter", () => {
     });
   });
 
+  it("acknowledges a media frame while its merge window is still open", async () => {
+    // The 1s merge window must not hold back the first bubble: a file upload
+    // otherwise sits with no feedback until the window (and its download) end.
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+
+    new BotWsSdkAdapter(runtime as any, {} as any).start();
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-file-ack" },
+      body: {
+        msgid: "msg-file-ack",
+        msgtype: "file",
+        chattype: "single",
+        from: { userid: "user-1" },
+        file: { url: "https://example.com/ack.pdf", aeskey: "ack-key" },
+      },
+    });
+    await waitForAsyncCallbacks();
+
+    expect(runtime.handleEvent).not.toHaveBeenCalled();
+    const placeholderCall = sdkMockState.client?.replyStream.mock.calls.at(0);
+    expect(placeholderCall?.[0]?.headers?.req_id).toBe("req-file-ack");
+    expect(String(placeholderCall?.[2] ?? "")).toContain("正在思考");
+    expect(placeholderCall?.[3]).toBe(false);
+
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-text-ack" },
+      body: {
+        msgid: "msg-text-ack",
+        msgtype: "text",
+        chattype: "single",
+        from: { userid: "user-1" },
+        text: { content: "这个文件讲了什么？" },
+      },
+    });
+    await waitForAsyncCallbacks();
+
+    expect(runtime.handleEvent).toHaveBeenCalledOnce();
+    const [mergedEvent, replyHandle] = runtime.handleEvent.mock.calls[0] ?? [];
+    expect(mergedEvent).toMatchObject({ messageId: "msg-text-ack" });
+    // The merged turn answers on the bubble that is already open, so the file
+    // frame never leaves an orphaned "thinking" placeholder behind.
+    expect(replyHandle.context.reqId).toBe("req-file-ack");
+  });
+
   it("does not dispatch a repeated media frame before merging its text", async () => {
     vi.useFakeTimers();
     const runtime = {

@@ -406,7 +406,9 @@ export class BotWsSdkAdapter {
         this.log.info?.(
           `[wecom-ws] merged media+text account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} mediaMessageId=${pending.event.messageId} textMessageId=${event.messageId}`,
         );
-        await dispatchEvent(mergedEvent, replyHandle);
+        // Answer on the media frame's already-acknowledged bubble; the text
+        // frame's handle never opened one, so nothing is left dangling.
+        await dispatchEvent(mergedEvent, pending.replyHandle);
         return;
       }
 
@@ -418,6 +420,10 @@ export class BotWsSdkAdapter {
       }
 
       if (mergeKind === "media") {
+        // Acknowledge before parking: the merge window is pure waiting, and a
+        // silent bubble for its whole duration is the slowest thing the user
+        // can see after uploading a file.
+        replyHandle.startPlaceholder?.();
         let nextPending: PendingMergeFrame;
         const timer = setTimeout(() => {
           void flushPendingMergeFrame(peerKey, nextPending);

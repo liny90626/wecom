@@ -4963,6 +4963,35 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream.mock.calls[1]?.[3]).toBe(true);
   });
 
+  it("tells an unmergeable superseded inbound that it was not processed", async () => {
+    // A pending inbound that could not be folded into its successor (another
+    // group member, an event turn) never reaches OpenClaw, so promising the
+    // user it was merged hides the loss.
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-supersede-unmerged" },
+        body: { from: { userid: "alice" }, chattype: "group", chatid: "room-1" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      placeholderContent: "正在思考...",
+    });
+    await flushPromises();
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "group",
+      peerId: "room-1",
+      reason: "new-inbound-unmerged",
+    });
+    await flushPromises();
+
+    const noticeCall = mockClient.replyStream.mock.calls.at(-1);
+    expect(String(noticeCall?.[2] ?? "")).toContain("尚未开始处理");
+    expect(noticeCall?.[3]).toBe(true);
+  });
+
   it("closes a superseded block preview after its in-flight ack settles", async () => {
     let resolvePreview!: (value: unknown) => void;
     mockClient.replyStream

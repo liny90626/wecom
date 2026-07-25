@@ -935,6 +935,32 @@ describe("createBotWsReplyHandle", () => {
     expect(Buffer.byteLength(fastPreview, "utf8")).toBeLessThanOrEqual(12_000);
   });
 
+  it("keeps the last visible progress when a turn closes without a body", async () => {
+    // WeCom stream frames carry the FULL bubble content, so finishing the
+    // stream with "" blanks whatever the user was already reading.
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-empty-final-close" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const fastText = "💨Fast: auto-off(62s>=60s)";
+
+    await handle.deliver(
+      { text: fastText, channelData: { openclawProgressKind: "fast-mode-auto" } },
+      { kind: "block" },
+    );
+    await handle.deliver({ text: "" }, { kind: "final" });
+
+    const lastCall = mockClient.replyStream.mock.calls.at(-1);
+    expect(lastCall?.[3]).toBe(true);
+    expect(String(lastCall?.[2] ?? "")).toContain(fastText);
+  });
+
   it("does not pass literal think tags through normal final body text", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

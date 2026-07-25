@@ -181,6 +181,233 @@ describe("dispatchInboundEvent", () => {
     );
   });
 
+  it("acknowledges a Bot WS inbound before its session prepare finishes", async () => {
+    // v118 opened the placeholder the moment the frame arrived. Waiting for the
+    // prepare (media download, cold-session metadata) leaves a file upload with
+    // no visible feedback for as long as the download takes.
+    let releaseAttachment!: () => void;
+    const attachment = new Promise<undefined>((resolve) => {
+      releaseAttachment = () => resolve(undefined);
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const startPlaceholder = vi.fn();
+    const activate = vi.fn();
+
+    const dispatch = dispatchInboundEvent({
+      core: makeCore(dispatchReplyWithBufferedBlockDispatcher) as any,
+      cfg: {} as any,
+      store: makeStore() as any,
+      auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn(() => attachment),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+      event: makeEvent("msg-slow-prepare-ack", "分析这个文件"),
+      replyHandle: makeReplyHandle(vi.fn(), { startPlaceholder, activate }),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(startPlaceholder).toHaveBeenCalledTimes(1);
+    expect(activate).not.toHaveBeenCalled();
+    expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+
+    releaseAttachment();
+    await dispatch;
+
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+  });
+
+  it("carries a pending message superseded during prepare into the successor", async () => {
+    // The pending layer aborts a message that has not reached OpenClaw yet. Its
+    // text and attachments must move to the newer inbound, otherwise a file
+    // whose download outlives the next message is silently lost while the user
+    // is told the messages were merged.
+    let releaseAttachment!: () => void;
+    const attachment = new Promise<undefined>((resolve) => {
+      releaseAttachment = () => resolve(undefined);
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const store = makeStore();
+    const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const successorMedia = {
+      normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+      saveInboundAttachment: vi.fn(),
+    };
+    const fileEvent = {
+      ...makeEvent("msg-pending-file", "[file] report.pdf"),
+      inboundKind: "file" as const,
+      attachments: [{ name: "report.pdf", remoteUrl: "https://wecom/report.pdf" }],
+    };
+
+    const first = dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn(() => attachment),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+      event: fileEvent,
+      replyHandle: makeReplyHandle(),
+    });
+    await Promise.resolve();
+
+    const second = dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: successorMedia as any,
+      event: makeEvent("msg-pending-question", "这个文件讲了什么？"),
+      replyHandle: makeReplyHandle(),
+    });
+
+    await first;
+    releaseAttachment();
+    await second;
+
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+    const body = String(
+      dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0]?.ctx?.Body ?? "",
+    );
+    expect(body).toContain("[file] report.pdf");
+    expect(body).toContain("这个文件讲了什么？");
+    expect(successorMedia.normalizeFirstAttachment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [expect.objectContaining({ remoteUrl: "https://wecom/report.pdf" })],
+      }),
+    );
+  });
+
+  it("does not fold a busy-rejected message into the next inbound", async () => {
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-finishing");
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
+      aborted: false,
+      drained: false,
+      forceCleared: false,
+    });
+    let releaseNotice!: () => void;
+    const noticeDelivered = new Promise<void>((resolve) => {
+      releaseNotice = resolve;
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const store = makeStore();
+    const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const mediaService = {
+      normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+      saveInboundAttachment: vi.fn(),
+    };
+
+    try {
+      const rejected = dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: mediaService as any,
+        event: makeEvent("msg-busy-rejected", "被拒绝的指令"),
+        replyHandle: makeReplyHandle(vi.fn(), {
+          deliver: vi.fn(() => noticeDelivered),
+        }),
+      });
+      await vi.waitFor(() =>
+        expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalled(),
+      );
+      await Promise.resolve();
+
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue(undefined);
+      await dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: mediaService as any,
+        event: makeEvent("msg-after-busy", "新的指令"),
+        replyHandle: makeReplyHandle(),
+      });
+      releaseNotice();
+      await rejected;
+
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+      expect(
+        String(dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0]?.ctx?.Body ?? ""),
+      ).toBe("新的指令");
+    } finally {
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+    }
+  });
+
+  it("never merges a superseded pending message from another group member", async () => {
+    let releaseAttachment!: () => void;
+    const attachment = new Promise<undefined>((resolve) => {
+      releaseAttachment = () => resolve(undefined);
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const store = makeStore();
+    const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const groupEvent = (messageId: string, senderId: string, text: string) => ({
+      ...makeEvent(messageId, text),
+      conversation: {
+        accountId: "acct",
+        peerKind: "group" as const,
+        peerId: "room-1",
+        senderId,
+      },
+    });
+
+    const first = dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn(() => attachment),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+      event: groupEvent("msg-group-bob", "bob", "bob 的私事"),
+      replyHandle: makeReplyHandle(),
+    });
+    await Promise.resolve();
+
+    const second = dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+      event: groupEvent("msg-group-carol", "carol", "carol 的问题"),
+      replyHandle: makeReplyHandle(),
+    });
+
+    await first;
+    releaseAttachment();
+    await second;
+
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+    const body = String(
+      dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0]?.ctx?.Body ?? "",
+    );
+    expect(body).toBe("carol 的问题");
+  });
+
   it("supersedes the previous handle before activating its successor", async () => {
     const lifecycle: string[] = [];
     registerActiveBotWsReplyHandle({

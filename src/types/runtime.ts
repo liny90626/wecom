@@ -95,6 +95,13 @@ export type ReplyPayload = {
 
 export type ReplyHandle = {
   context: ReplyContext;
+  /**
+   * Opens the "thinking" placeholder as soon as the inbound is accepted, before
+   * the session prepare/handoff work that `activate` waits for. Acknowledging
+   * early keeps the first visible feedback at v118 latency without claiming the
+   * peer's active reply slot.
+   */
+  startPlaceholder?: () => void;
   activate?: () => void;
   deliver: (payload: ReplyPayload, info: ReplyDeliveryInfo) => Promise<void>;
   fail?: (error: unknown) => Promise<void>;

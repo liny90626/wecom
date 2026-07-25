@@ -770,9 +770,44 @@ describe("dispatchRuntimeReply", () => {
     expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
     expect(deliver).toHaveBeenCalledOnce();
     expect(deliver).toHaveBeenCalledWith(
-      { text: expect.stringContaining("确认新指令未执行后再重试") },
+      { text: expect.stringContaining("已并入当前任务") },
       { kind: "final" },
     );
+  });
+
+  it("tells the user an absorbed inbound is being handled by the running task", async () => {
+    // OpenClaw steers/enqueues an inbound into the still-active run and resolves
+    // the dispatch with nothing delivered but the fallback flag set. The message
+    // was accepted, so asking the user to resend it duplicates model work.
+    agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-absorbing");
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
+      queuedFinal: false,
+      counts: { block: 0, final: 0, tool: 0 },
+      noVisibleReplyFallbackEligible: true,
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-absorbed-wording" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+      retryFlaglessBusy: true,
+    });
+
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+    expect(deliver).toHaveBeenCalledWith(
+      { text: expect.stringContaining("已并入当前任务") },
+      { kind: "final" },
+    );
+    expect(String(deliver.mock.calls[0]?.[0]?.text ?? "")).not.toContain("确认新指令未执行");
   });
 
   it("closes a reasoning-only bot-ws run without failing when the visible reply is deferred", async () => {

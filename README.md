@@ -23,7 +23,9 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-`v2.5.110-145` 对回复生命周期和多账号作用域做了一轮根因审计：外部 final 成功时会立即作废已经排队或正在执行的旧 final retry；占位保活按账号、direct/group 和 peer 完整隔离；旧 WS adapter/runtime 只能注销自己注册的句柄，不能误删热重载后的新实例；已知账号的 Bot WS/Agent 来源查询不再串读其他账号，活跃来源快照也不会因 `Map` 插入顺序被错误淘汰。修复复用既有终态和注册表，不增加 timer、轮询或重试阶梯。当前发布标签为 `released/2.5.110-145`。
+当前已发布版本为 `v2.5.110-145`，发布标签 `released/2.5.110-145`。它对回复生命周期和多账号作用域做了一轮根因审计：外部 final 成功时会立即作废已经排队或正在执行的旧 final retry；占位保活按账号、direct/group 和 peer 完整隔离；旧 WS adapter/runtime 只能注销自己注册的句柄，不能误删热重载后的新实例；已知账号的 Bot WS/Agent 来源查询不再串读其他账号，活跃来源快照也不会因 `Map` 插入顺序被错误淘汰。
+
+`fix/v146-inbound-delivery-stability` 是尚未发布的稳定性候选分支，`package.json` 暂时仍保持 `2.5.110-145`。候选修复取消普通文字固定等待，仅为“文件先、文字后”保留 1 秒合并窗口；补齐媒体原始 ID 去重和群聊发送者隔离；将 pending 准备与 active dispatch 分开，避免新消息尚未获准接管时提前终止旧任务；同时用 WS runtime owner 约束旧 preview/final retry，并把 busy 重试限制为一次、且仅限 OpenClaw 明确未接收的零输出回合。完整说明见 [`changelog/v2.5.110-146.md`](./changelog/v2.5.110-146.md)。
 
 - B1：修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
 - B2：优化 Bot WebSocket 长文本回复投递。正文过长时会按企业微信限制分段发送，并对流式预览与最终正文之间的重复片段做去重处理，降低长文本重复和截断风险。
@@ -201,6 +203,14 @@ npx vitest run
 
 > 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 v2.5.110-146（2026-07-25，未发布候选）
+
+- **[入站速度与完整性]**：普通文字立即派发；仅媒体在前时等待最多 1 秒合并后续文字。合并事件同时登记文字与媒体 ID，群聊按发送者隔离，企微重投不会重复执行。
+- **[接管顺序]**：pending 会话准备与 active OpenClaw dispatch 分层；新消息只有在旧 run 可释放时才接管，busy 拒绝不会先截断旧任务 final。
+- **[热重载属主]**：ReplyHandle 绑定创建它的 WS runtime；旧实例停止后会撤销本地 prepare/core 等待，停止 preview、placeholder 和 retry，且不能借用 replacement WS；真实 core Promise 仍跟踪到自然结算。
+- **[最小 busy 重试]**：只对零输出、无活动、无 fallback/deferred 标记且仍有 active run 的明确未接收结果做一次 500ms 重试；`fallbackEligible` 回合不再二次 dispatch。
+- **[验证]**：重点生命周期测试 249/249、全量测试 467/467，类型检查、构建、产物验证及 B1/B2/B3 全部通过。完整说明见 [`changelog/v2.5.110-146.md`](./changelog/v2.5.110-146.md)。
+
 #### 📌 v2.5.110-145（2026-07-24，LinKy fork 维护版）
 
 - **[终态闭环]**：外部 final 已可见时同步取消旧 ReplyHandle 中已排队或在途的 final retry，旧链不会再次补发半截正文或重新挂定时器。
@@ -226,12 +236,6 @@ npx vitest run
 - **[有序收口] final 不越过在途进度**：普通 final、合成 final 和失败路径在进入 ReplyHandle 前执行最多 `500ms` 的有界封口；ACK 持续阻塞时停止旧进度并沿用主动推送兜底，完整正文不会被进度气泡截断。
 - **[长任务计时] 修正 `0s` 和计时重置**：耗时统一从 ReplyHandle 创建时计算，首个可见值最低 `1s`；冻结预览在健康流内每 15 秒更新，已验证 `1m05s → 1m20s → 1m35s`。
 - **[异常分诊] 保留 Fast 与真实模型错误语义**：OpenClaw 延后回复时不再把 Fast auto-off 误判为无正文中断；真实模型超时与企微投递失败分别提示，被新消息接管的旧回合不再产生迟到失败气泡。完整说明见 [`changelog/v2.5.110-142.md`](./changelog/v2.5.110-142.md)。
-
-#### 📌 v2.5.110-141（2026-07-18，LinKy fork 维护版）
-- **[回复收口] routed final 不再留下“正在思考”或半截气泡**：OpenClaw 已通过主动路由成功发送 final 时，插件会显式结束原 Bot WS 流；健康流保留最后一次已确认预览，过期或不可靠流只本地结算，不重新主动推送半截正文。
-- **[长任务状态] 9 分钟后按分钟更新实际用时**：流窗口失效且任务仍在执行时，从 `9m00s` 开始每分钟推送一次当前用时；final、外部活动或新消息接管后立即停止，慢推送采用串行定时避免重叠。
-- **[正文完整性] 更紧凑的长文本分段与原始失败 final**：长 Markdown 优先选择填充率更高的语义边界，减少半空消息；OpenClaw 已生成的 `LLM request failed.` 等 final 作为真实正文继续交付，不改写成 WeCom 投递错误。
-- **[SDK] 升级 `@wecom/aibot-node-sdk` 1.0.7**：纳入官方入站控制字符清理，ACK 队列与 final 串行机制保持不变。完整说明见 [`changelog/v2.5.110-141.md`](./changelog/v2.5.110-141.md)。
 
 > B1/B2/B3 的完整维护归档见 [`changelog/v2.5.110-112.md`](./changelog/v2.5.110-112.md)，reasoning 思考块系列修复见 [`changelog/v2.5.110-113.md`](./changelog/v2.5.110-113.md)。查看原仓库历史版本更新日志，请移步 [changelog/ 目录](./changelog/)。
 

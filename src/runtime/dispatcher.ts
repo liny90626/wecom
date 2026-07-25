@@ -27,7 +27,8 @@ const SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS = 500;
 const SUPERSEDED_RUN_DRAIN_TIMEOUT_MS = 5_000;
 const SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS = 5_000;
 const PRE_DISPATCH_RUN_DRAIN_SETTLE_MS = 1_000;
-const pendingBotWsReplyHandlesByPeer = new Map<string, ReplyHandle>();
+type PendingBotWsInbound = { handle: ReplyHandle; event: UnifiedInboundEvent };
+const pendingBotWsInboundsByPeer = new Map<string, PendingBotWsInbound>();
 
 function buildPendingBotWsReplyKey(event: UnifiedInboundEvent): string {
   return JSON.stringify([
@@ -35,6 +36,48 @@ function buildPendingBotWsReplyKey(event: UnifiedInboundEvent): string {
     event.conversation.peerKind,
     event.conversation.peerId.trim().toLowerCase(),
   ]);
+}
+
+function normalizeSenderId(event: UnifiedInboundEvent): string {
+  return event.conversation.senderId.trim().toLowerCase();
+}
+
+// The reply bubble is peer-scoped, but message CONTENT must never cross senders
+// or fold a chat message into an event/welcome turn.
+function canAdoptSupersededPendingInbound(
+  previous: UnifiedInboundEvent,
+  next: UnifiedInboundEvent,
+): boolean {
+  const mergeableKind = (event: UnifiedInboundEvent): boolean =>
+    event.inboundKind !== "welcome" &&
+    event.inboundKind !== "event" &&
+    event.inboundKind !== "template-card-event";
+  return (
+    normalizeSenderId(previous) === normalizeSenderId(next) &&
+    mergeableKind(previous) &&
+    mergeableKind(next)
+  );
+}
+
+// A pending inbound is superseded before it ever reaches OpenClaw, so its text
+// and attachments would disappear with it — a file whose download outlives the
+// next message would be lost while the user is told the messages were merged.
+// Folding it into its successor keeps that promise true and matches v118, where
+// both messages still reached the agent.
+function adoptSupersededPendingInbound(
+  previous: UnifiedInboundEvent,
+  next: UnifiedInboundEvent,
+): UnifiedInboundEvent {
+  const previousText = previous.text.trim();
+  const nextText = next.text.trim();
+  // Newest attachment first: only the first one becomes MediaPath, and a
+  // replacement upload should win over the one it replaced.
+  const attachments = [...(next.attachments ?? []), ...(previous.attachments ?? [])];
+  return {
+    ...next,
+    text: previousText && nextText ? `${previousText}\n${nextText}` : previousText || nextText,
+    ...(attachments.length > 0 ? { attachments } : {}),
+  };
 }
 
 function createPrepareTimeoutError(timeoutMs: number): Error {
@@ -432,35 +475,50 @@ export async function dispatchInboundEvent(params: {
   const clearPendingReply = (): void => {
     if (
       pendingReplyKey &&
-      pendingBotWsReplyHandlesByPeer.get(pendingReplyKey) === activeReplyHandle
+      pendingBotWsInboundsByPeer.get(pendingReplyKey)?.handle === activeReplyHandle
     ) {
-      pendingBotWsReplyHandlesByPeer.delete(pendingReplyKey);
+      pendingBotWsInboundsByPeer.delete(pendingReplyKey);
     }
   };
 
+  let inboundEvent = event;
   if (pendingReplyKey) {
     console.info(
       `[wecom-b3] dispatch-pending-register account=${event.accountId} messageId=${event.messageId} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
     );
-    const previousPending = pendingBotWsReplyHandlesByPeer.get(pendingReplyKey);
-    pendingBotWsReplyHandlesByPeer.set(pendingReplyKey, activeReplyHandle);
-    if (previousPending && previousPending !== activeReplyHandle) {
+    const previousPending = pendingBotWsInboundsByPeer.get(pendingReplyKey);
+    if (previousPending && previousPending.handle !== activeReplyHandle) {
+      const adopted = canAdoptSupersededPendingInbound(previousPending.event, inboundEvent);
+      if (adopted) {
+        inboundEvent = adoptSupersededPendingInbound(previousPending.event, inboundEvent);
+      }
+      console.info(
+        `[wecom-b3] pending-inbound-${adopted ? "adopted" : "dropped"} account=${event.accountId} messageId=${event.messageId} previousMessageId=${previousPending.event.messageId} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
+      );
       try {
-        previousPending.supersedeByNewInbound?.({
+        previousPending.handle.supersedeByNewInbound?.({
           accountId: event.accountId,
           peerKind: event.conversation.peerKind,
           peerId: event.conversation.peerId,
           reason: "new-inbound",
         });
-        previousSupersedeDrain = previousPending.waitForSupersede?.();
+        previousSupersedeDrain = previousPending.handle.waitForSupersede?.();
       } catch (error) {
         console.warn(
           `[wecom-b3] superseded-pending-handoff-failed account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} error=${String(error)}`,
         );
       }
     }
+    pendingBotWsInboundsByPeer.set(pendingReplyKey, {
+      handle: activeReplyHandle,
+      event: inboundEvent,
+    });
   }
-  if (!isBotWsReplySession) {
+  if (isBotWsReplySession) {
+    // v118 opened the placeholder the moment the frame arrived. Keep that first
+    // feedback here; claiming the peer still waits for the OpenClaw handoff.
+    replyHandle.startPlaceholder?.();
+  } else {
     replyHandle.activate?.();
   }
 
@@ -468,7 +526,7 @@ export async function dispatchInboundEvent(params: {
     const session = await prepareInboundSessionWithTimeout({
       core,
       cfg,
-      event,
+      event: inboundEvent,
       mediaService,
       abortController,
     });
@@ -506,13 +564,15 @@ export async function dispatchInboundEvent(params: {
       }
       if (!sessionReady) {
         console.info(`[wecom-b3] pre-dispatch-run-busy sessionKey=${sessionKey}`);
+        // The notice states this message did not run, so it must not be folded
+        // into the next inbound either — that would execute it after all.
+        clearPendingReply();
         await activeReplyHandle.deliver(
           { text: BOT_WS_BUSY_INBOUND_NOTICE_TEXT },
           { kind: "final" },
         );
         return;
       }
-      clearPendingReply();
       const previousHandle = getActiveBotWsReplyHandle({
         accountId: event.accountId,
         peerKind: event.conversation.peerKind,
@@ -543,6 +603,9 @@ export async function dispatchInboundEvent(params: {
         );
         if (abortController.signal.aborted) return;
       }
+      // Stay adoptable until the core dispatch is about to start: a message
+      // superseded inside the handoff window has still not reached OpenClaw.
+      clearPendingReply();
       replyHandle.activate?.();
     }
     console.info(

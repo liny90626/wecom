@@ -73,6 +73,9 @@ export class WecomAccountRuntime {
 
     const trackedReplyHandle: ReplyHandle = {
       context: replyHandle.context,
+      startPlaceholder: () => {
+        replyHandle.startPlaceholder?.();
+      },
       activate: () => {
         replyHandle.activate?.();
       },

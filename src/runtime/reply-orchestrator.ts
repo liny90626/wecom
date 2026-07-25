@@ -12,8 +12,14 @@ type ReplyOptions = NonNullable<Parameters<DispatchReply>[0]["replyOptions"]>;
 // short so a broken ACK cannot hold the actual reply indefinitely.
 const DETACHED_PROGRESS_DRAIN_GRACE_MS = 500;
 
+// Two different outcomes, two different truths: the busy notice is only for an
+// inbound OpenClaw provably refused (dispatch admission released it), while an
+// inbound OpenClaw steered/queued into the running turn was accepted — telling
+// that user to resend duplicates model work and tool side effects.
 export const BOT_WS_BUSY_INBOUND_NOTICE_TEXT =
   "之前任务还在处理中，新指令冲突啦，请先等待当前任务结束；确认新指令未执行后再重试。";
+const BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT =
+  "⏳ 上一轮任务仍在进行，本条消息已并入当前任务，完成后一并回复；若长时间未收到回复，请重新发送。";
 
 export class WeComReplyNoVisibleOutputError extends Error {
   constructor(sessionKey?: string) {
@@ -228,18 +234,20 @@ export async function dispatchRuntimeReply(params: {
     throw error;
   };
 
-  const deliverBusyNotice = async (
-    busyRunSessionId?: string,
-    throwForRetry = false,
-  ): Promise<void> => {
+  const deliverHandoffNotice = async (notice: {
+    text: string;
+    logEvent: "dispatch-absorbed-by-active-run" | "dispatch-busy-not-accepted";
+    runSessionId?: string;
+    throwForRetry?: boolean;
+  }): Promise<void> => {
     console.info(
-      `[wecom-b3] dispatch-busy-not-accepted sessionKey=${sessionKey} sessionId=${busyRunSessionId ?? "n/a"}`,
+      `[wecom-b3] ${notice.logEvent} sessionKey=${sessionKey} sessionId=${notice.runSessionId ?? "n/a"}`,
     );
-    if (throwForRetry) {
+    if (notice.throwForRetry) {
       throw new WeComReplyBusyNotAcceptedError(sessionKey || undefined);
     }
     try {
-      await replyHandle.deliver({ text: BOT_WS_BUSY_INBOUND_NOTICE_TEXT }, { kind: "final" });
+      await replyHandle.deliver({ text: notice.text }, { kind: "final" });
     } catch (noticeError) {
       await failAndThrow(noticeError);
     }
@@ -451,9 +459,16 @@ export async function dispatchRuntimeReply(params: {
       await closeReply();
       return;
     }
-    const busyRunSessionId = resolveActiveRunSessionId(sessionKey);
-    if (busyRunSessionId) {
-      await deliverBusyNotice(busyRunSessionId);
+    const absorbingRunSessionId = resolveActiveRunSessionId(sessionKey);
+    if (absorbingRunSessionId) {
+      // OpenClaw ran the admission and still holds an active run for this
+      // session: the inbound was steered into that run (or queued behind it),
+      // not refused. Report it as absorbed and never re-dispatch it.
+      await deliverHandoffNotice({
+        text: BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT,
+        logEvent: "dispatch-absorbed-by-active-run",
+        runSessionId: absorbingRunSessionId,
+      });
       return;
     }
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
@@ -472,7 +487,15 @@ export async function dispatchRuntimeReply(params: {
   ) {
     const busyRunSessionId = resolveActiveRunSessionId(sessionKey);
     if (busyRunSessionId) {
-      await deliverBusyNotice(busyRunSessionId, retryFlaglessBusy);
+      // No fallback flag means the dispatch never reached the agent turn:
+      // OpenClaw released the inbound at reply-operation admission, so one
+      // bounded retry is safe and a "not executed" notice is accurate.
+      await deliverHandoffNotice({
+        text: BOT_WS_BUSY_INBOUND_NOTICE_TEXT,
+        logEvent: "dispatch-busy-not-accepted",
+        runSessionId: busyRunSessionId,
+        throwForRetry: retryFlaglessBusy,
+      });
       return;
     }
     return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));

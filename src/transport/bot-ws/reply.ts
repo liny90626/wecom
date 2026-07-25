@@ -903,6 +903,7 @@ export function createBotWsReplyHandle(params: {
   const replyPeerKey = JSON.stringify([params.accountId, peerKind, peerKeyId]);
   const activationId = crypto.randomUUID();
   let activated = false;
+  let placeholderStarted = false;
 
   const isEvent =
     params.inboundKind === "welcome" ||
@@ -973,7 +974,8 @@ export function createBotWsReplyHandle(params: {
   };
 
   const sendPlaceholder = () => {
-    if (runtimeRetired || !activated || streamSettled || placeholderInFlight || isEvent) return;
+    if (runtimeRetired || !placeholderStarted || streamSettled || placeholderInFlight || isEvent)
+      return;
     placeholderInFlight = true;
     withHandleSendTimeout(
       params.client.replyStream(params.frame, resolveStreamId(), placeholderText, false),
@@ -2383,15 +2385,19 @@ export function createBotWsReplyHandle(params: {
       });
   };
 
-  const activate = (): void => {
-    if (activated) {
+  // Opening the placeholder is pure acknowledgement: it must not wait for the
+  // session prepare or the OpenClaw handoff, or a file upload stays silent for
+  // the whole download. Claiming the peer (and retiring an older activation's
+  // pending retry) stays in activate, which only runs once this inbound owns
+  // the conversation.
+  const startPlaceholder = (): void => {
+    if (placeholderStarted) {
       return;
     }
-    activated = true;
+    placeholderStarted = true;
     if (!ensureRuntimeCleanup()) {
       return;
     }
-    cancelPendingFinalRetryForNewActivation(replyPeerKey, activationId);
     if (params.autoSendPlaceholder === false || isEvent) {
       return;
     }
@@ -2415,6 +2421,18 @@ export function createBotWsReplyHandle(params: {
     keepalives.add({ reqId, stop: stopPlaceholderKeepalive });
   };
 
+  const activate = (): void => {
+    if (activated) {
+      return;
+    }
+    activated = true;
+    if (!ensureRuntimeCleanup()) {
+      return;
+    }
+    cancelPendingFinalRetryForNewActivation(replyPeerKey, activationId);
+    startPlaceholder();
+  };
+
   if (!params.deferActivation) {
     activate();
   }
@@ -2432,6 +2450,7 @@ export function createBotWsReplyHandle(params: {
         envelopeType: "ws",
       },
     },
+    startPlaceholder,
     activate,
     onTransportRetired: (listener) => {
       if (!ensureRuntimeCleanup() || runtimeRetired) {
@@ -2653,7 +2672,9 @@ export function createBotWsReplyHandle(params: {
       }
       if (!finalText) {
         if (info.kind === "final") {
-          await closeOpenedStreamSilently();
+          // Close on the last text the user actually saw: a WeCom stream frame
+          // replaces the whole bubble, so finishing with "" blanks it.
+          await closeOpenedStreamSilently(lastPreviewText);
         }
         return;
       }

@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-- 当前正式版本：`2.5.110-147`，发布标签 `released/2.5.110-147`。开发分支 `fix/v147-progress-lane-and-handoff-order` 已合入 `main` 并推送 `fork`。
+- 当前正式版本：`2.5.110-147`，发布标签 `released/2.5.110-147`，包 `yanhaidao-wecom-2.5.110-147.tgz`（211,766 bytes；139 文件；npm shasum `355460a52da7b7e9bab6e7765a38fd1297a09bba`；SHA-256 `dc0a4edc864d2460a002162ffa71019b940518b0f1b80579061f38bf58a14361`）。开发分支 `fix/v147-progress-lane-and-handoff-order` 已合入 `main` 并推送 `fork`。
 - v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现），见第 2 节。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**，`peerDependencies` 仍为 `^2026.6.11`，**代码必须继续双版本兼容**（v147 用到的 `abortAgentHarnessRun` 已核实 6.11/7.1 均导出且同为同步 boolean 契约）。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。

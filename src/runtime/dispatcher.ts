@@ -1,5 +1,6 @@
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
 import {
+  abortAgentHarnessRun,
   abortAndDrainAgentHarnessRun,
   resolveActiveEmbeddedRunSessionId,
 } from "openclaw/plugin-sdk/agent-harness";
@@ -28,7 +29,9 @@ const SUPERSEDED_RUN_DRAIN_TIMEOUT_MS = 5_000;
 const SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS = 5_000;
 const PRE_DISPATCH_RUN_DRAIN_SETTLE_MS = 1_000;
 const PRE_DISPATCH_RUN_RELEASE_WAIT_MS = 3_000;
-const PRE_DISPATCH_RUN_RELEASE_POLL_MS = 150;
+// A released session is a Map lookup, so poll tightly: this interval is pure
+// handoff latency on every follow-up message that lands on a busy session.
+const PRE_DISPATCH_RUN_RELEASE_POLL_MS = 50;
 type PendingBotWsInbound = { handle: ReplyHandle; event: UnifiedInboundEvent };
 const pendingBotWsInboundsByPeer = new Map<string, PendingBotWsInbound>();
 
@@ -200,13 +203,10 @@ async function drainSupersededOpenClawRun(params: {
 async function waitForActiveRunToRelease(
   sessionKey: string,
   signal: AbortSignal,
+  timeoutMs: number,
 ): Promise<boolean> {
-  const deadline = Date.now() + PRE_DISPATCH_RUN_RELEASE_WAIT_MS;
-  while (!signal.aborted && Date.now() < deadline) {
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(resolve, PRE_DISPATCH_RUN_RELEASE_POLL_MS);
-      timeout.unref?.();
-    });
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
     try {
       if (!resolveActiveEmbeddedRunSessionId(sessionKey)) {
         return true;
@@ -214,8 +214,14 @@ async function waitForActiveRunToRelease(
     } catch {
       return true;
     }
+    if (signal.aborted || Date.now() >= deadline) {
+      return false;
+    }
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(resolve, PRE_DISPATCH_RUN_RELEASE_POLL_MS);
+      timeout.unref?.();
+    });
   }
-  return false;
 }
 
 // OpenClaw ≥2026.7.1 steers a new dispatch into any still-active run for the
@@ -232,6 +238,11 @@ async function waitForActiveRunToRelease(
 async function drainLingeringOpenClawRunBeforeDispatch(params: {
   sessionKey?: string;
   abortSignal: AbortSignal;
+  /**
+   * Publishes the handoff — runs synchronously in the same tick the abort is
+   * accepted, and only then. See the abort comment below.
+   */
+  onHandoffAccepted: () => void;
 }): Promise<boolean> {
   const sessionKey = params.sessionKey?.trim();
   if (!sessionKey) {
@@ -252,33 +263,44 @@ async function drainLingeringOpenClawRunBeforeDispatch(params: {
   console.info(
     `[wecom-b3] pre-dispatch-run-drain sessionKey=${sessionKey} sessionId=${activeSessionId}`,
   );
+  let aborted = false;
   try {
-    const graceful = await abortAndDrainAgentHarnessRun({
-      sessionId: activeSessionId,
-      sessionKey,
-      settleMs: PRE_DISPATCH_RUN_DRAIN_SETTLE_MS,
-      reason: "wecom-new-inbound",
-    });
-    console.info(
-      `[wecom-b3] pre-dispatch-run-drain-result sessionKey=${sessionKey} sessionId=${activeSessionId} aborted=${String(graceful.aborted)} drained=${String(graceful.drained)}`,
-    );
-    // Once OpenClaw accepted the abort, this inbound owns the handoff even if
-    // the old run needs longer than the short settle window to disappear. The
-    // existing admission-conflict retry covers that bounded drain tail.
-    if (graceful.aborted || graceful.drained) {
-      return true;
-    }
-    const released = await waitForActiveRunToRelease(sessionKey, params.abortSignal);
-    console.info(
-      `[wecom-b3] pre-dispatch-run-release-wait sessionKey=${sessionKey} sessionId=${activeSessionId} released=${String(released)}`,
-    );
-    return released;
+    // Abort synchronously and publish the handoff in the SAME tick. OpenClaw
+    // only treats a run abort as silent while the owning reply operation is
+    // already aborted, and that abort is what the previous dispatch performs
+    // when it learns it was superseded. Awaiting a combined abort+drain call
+    // first hid the accept/refuse answer behind a settle window in which the
+    // run we just killed still reported itself as failed — surfacing the core's
+    // generic "Something went wrong" copy in the chat.
+    aborted = abortAgentHarnessRun(activeSessionId);
   } catch (error) {
     console.warn(
       `[wecom-b3] pre-dispatch-run-drain-failed sessionKey=${sessionKey} sessionId=${activeSessionId} error=${String(error)}`,
     );
     return false;
   }
+  if (aborted) {
+    params.onHandoffAccepted();
+  }
+  const released = await waitForActiveRunToRelease(
+    sessionKey,
+    params.abortSignal,
+    aborted ? PRE_DISPATCH_RUN_DRAIN_SETTLE_MS : PRE_DISPATCH_RUN_RELEASE_WAIT_MS,
+  );
+  console.info(
+    `[wecom-b3] pre-dispatch-run-drain-result sessionKey=${sessionKey} sessionId=${activeSessionId} aborted=${String(aborted)} released=${String(released)}`,
+  );
+  if (!aborted) {
+    console.info(
+      `[wecom-b3] pre-dispatch-run-release-wait sessionKey=${sessionKey} sessionId=${activeSessionId} released=${String(released)}`,
+    );
+  }
+  // An accepted abort means this inbound owns the handoff even if the old run
+  // needs longer than the settle window to disappear; the existing
+  // admission-conflict retry covers that bounded drain tail. A refused abort is
+  // 2026.7.1 freezing a healthy run that is committing its answer, so the only
+  // safe signal is the run actually releasing the session.
+  return aborted || released;
 }
 
 function resolvePreparedSessionId(ctx: unknown): string | undefined {
@@ -584,10 +606,43 @@ export async function dispatchInboundEvent(params: {
 
     if (isBotWsReplySession) {
       let sessionReady = false;
+      // Claiming the peer is what tells the previous dispatch it was superseded,
+      // so it must happen the instant this inbound owns the session — either
+      // because OpenClaw accepted the abort of the lingering run, or because
+      // there was nothing to take over. It must never happen on the busy path,
+      // where the old run is still delivering an answer we must not discard.
+      const claimPeerHandoff = (): void => {
+        if (activeReplyRegistered) {
+          return;
+        }
+        activeReplyRegistered = true;
+        const previousHandle = getActiveBotWsReplyHandle({
+          accountId: event.accountId,
+          peerKind: event.conversation.peerKind,
+          peerId: event.conversation.peerId,
+        });
+        const supersededPrevious = registerActiveBotWsReplyHandle({
+          accountId: event.accountId,
+          sessionKey,
+          peerKind: event.conversation.peerKind,
+          peerId: event.conversation.peerId,
+          handle: activeReplyHandle,
+        });
+        if (supersededPrevious) {
+          try {
+            previousSupersedeDrain = previousHandle?.waitForSupersede?.();
+          } catch (error) {
+            console.warn(
+              `[wecom-b3] superseded-run-drain-handle-failed account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} error=${String(error)}`,
+            );
+          }
+        }
+      };
       preDispatchDrain = boundDrainWait(
         drainLingeringOpenClawRunBeforeDispatch({
           sessionKey,
           abortSignal: abortController.signal,
+          onHandoffAccepted: claimPeerHandoff,
         }).then((ready) => {
           sessionReady = ready;
         }),
@@ -600,7 +655,10 @@ export async function dispatchInboundEvent(params: {
         // alongside its successor.
         return;
       }
-      if (!sessionReady) {
+      // `activeReplyRegistered` means the abort was accepted and this inbound
+      // already owns the peer, so it can never fall back to the busy notice —
+      // that would refuse a message whose predecessor we already superseded.
+      if (!sessionReady && !activeReplyRegistered) {
         console.info(`[wecom-b3] pre-dispatch-run-busy sessionKey=${sessionKey}`);
         // The notice states this message did not run, so it must not be folded
         // into the next inbound either — that would execute it after all.
@@ -611,28 +669,7 @@ export async function dispatchInboundEvent(params: {
         );
         return;
       }
-      const previousHandle = getActiveBotWsReplyHandle({
-        accountId: event.accountId,
-        peerKind: event.conversation.peerKind,
-        peerId: event.conversation.peerId,
-      });
-      const supersededPrevious = registerActiveBotWsReplyHandle({
-        accountId: event.accountId,
-        sessionKey,
-        peerKind: event.conversation.peerKind,
-        peerId: event.conversation.peerId,
-        handle: activeReplyHandle,
-      });
-      activeReplyRegistered = true;
-      if (supersededPrevious) {
-        try {
-          previousSupersedeDrain = previousHandle?.waitForSupersede?.();
-        } catch (error) {
-          console.warn(
-            `[wecom-b3] superseded-run-drain-handle-failed account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} error=${String(error)}`,
-          );
-        }
-      }
+      claimPeerHandoff();
       if (previousSupersedeDrain) {
         await awaitDrainWithTimeout(
           previousSupersedeDrain,

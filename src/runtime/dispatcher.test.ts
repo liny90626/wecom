@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 const openClawHandoffState = vi.hoisted(() => ({
   resolveActiveEmbeddedRunSessionId: vi.fn(),
+  abortAgentHarnessRun: vi.fn(() => true),
   abortAndDrainAgentHarnessRun: vi.fn(),
 }));
 
@@ -297,6 +298,8 @@ describe("dispatchInboundEvent", () => {
       .mockReturnValueOnce("run-delivering")
       .mockReturnValueOnce("run-delivering")
       .mockReturnValue(undefined);
+    // 2026.7.1 refuses abort while a run commits its terminal outcome.
+    openClawHandoffState.abortAgentHarnessRun.mockReturnValue(false);
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
       aborted: false,
       drained: false,
@@ -330,6 +333,8 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
       vi.useRealTimers();
     }
   });
@@ -337,6 +342,8 @@ describe("dispatchInboundEvent", () => {
   it("does not fold a busy-rejected message into the next inbound", async () => {
     vi.useFakeTimers();
     openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-finishing");
+    // 2026.7.1 refuses abort while a run commits its terminal outcome.
+    openClawHandoffState.abortAgentHarnessRun.mockReturnValue(false);
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
       aborted: false,
       drained: false,
@@ -393,6 +400,8 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
       vi.useRealTimers();
     }
   });
@@ -927,10 +936,14 @@ describe("dispatchInboundEvent", () => {
       "reply session initialization conflicted for agent:ops_bot:wecom:acct:dm:alice",
     );
 
-    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-a");
-    openClawHandoffState.abortAndDrainAgentHarnessRun.mockImplementation(async () => {
+    // "run-a" is only resolvable while the first core dispatch is running, and
+    // aborting it is what releases that run.
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockImplementation(() =>
+      firstRunBusy ? "run-a" : undefined,
+    );
+    openClawHandoffState.abortAgentHarnessRun.mockImplementation(() => {
       releaseFirstRun?.();
-      return { aborted: true, drained: true, forceCleared: false };
+      return true;
     });
 
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation((params) => {
@@ -991,9 +1004,7 @@ describe("dispatchInboundEvent", () => {
 
       await first;
       await expect(secondOutcome).resolves.toEqual({ ok: true });
-      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalledWith(
-        expect.objectContaining({ sessionId: "run-a", sessionKey: expect.any(String) }),
-      );
+      expect(openClawHandoffState.abortAgentHarnessRun).toHaveBeenCalledWith("run-a");
       expect(deliver).toHaveBeenCalledWith({ text: "follow-up" }, { kind: "final" });
       expect(fail).not.toHaveBeenCalled();
     } finally {
@@ -1001,6 +1012,8 @@ describe("dispatchInboundEvent", () => {
       releaseFirstRun?.();
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
     }
   });
 
@@ -1022,7 +1035,7 @@ describe("dispatchInboundEvent", () => {
     // No lingering run exists before the first dispatch; "run-a" only becomes
     // resolvable once the first core dispatch is running.
     openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockImplementation(() =>
-      dispatchCount >= 1 ? "run-a" : undefined,
+      dispatchCount >= 1 && !drainReleased ? "run-a" : undefined,
     );
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockImplementation(async () => {
       await drain;
@@ -1074,7 +1087,7 @@ describe("dispatchInboundEvent", () => {
         replyHandle: makeReplyHandle(),
       });
       await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalledTimes(1);
+      expect(openClawHandoffState.abortAgentHarnessRun).toHaveBeenCalledTimes(1);
 
       const latestDeliver = vi.fn().mockResolvedValue(undefined);
       const latest = dispatchInboundEvent({
@@ -1095,6 +1108,8 @@ describe("dispatchInboundEvent", () => {
       releaseDrain();
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
     }
   });
 
@@ -1243,18 +1258,19 @@ describe("dispatchInboundEvent", () => {
   });
 
   it("keeps the successor behind the barrier while a superseded pre-dispatch drain is in flight", async () => {
-    let releaseDrain!: () => void;
-    const drainGate = new Promise<void>((resolve) => {
-      releaseDrain = resolve;
-    });
+    let runReleased = false;
+    const releaseDrain = () => {
+      runReleased = true;
+    };
     let drainCalls = 0;
-    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-lingering");
-    openClawHandoffState.abortAndDrainAgentHarnessRun.mockImplementation(async () => {
+    // The lingering run only disappears once the test releases it, so both
+    // dispatches park in the bounded post-abort release wait.
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockImplementation(() =>
+      runReleased ? undefined : "run-lingering",
+    );
+    openClawHandoffState.abortAgentHarnessRun.mockImplementation(() => {
       drainCalls += 1;
-      if (drainCalls === 1) {
-        await drainGate;
-      }
-      return { aborted: true, drained: true, forceCleared: false };
+      return true;
     });
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
       await params.dispatcherOptions.deliver({ text: "后继消息完成" }, { kind: "final" });
@@ -1301,6 +1317,8 @@ describe("dispatchInboundEvent", () => {
       releaseDrain();
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
     }
   });
 
@@ -1309,6 +1327,7 @@ describe("dispatchInboundEvent", () => {
     // dispatch must not abort the session again — by then the sessionKey can
     // already belong to the successor's freshly started run.
     let rejectFirst!: (error: Error) => void;
+    let liveRunSessionId: string | undefined;
     const admissionError = new Error(
       'Session "agent:ops_bot:wecom:acct:dm:alice" changed while starting work. Retry.',
     );
@@ -1317,6 +1336,7 @@ describe("dispatchInboundEvent", () => {
       .mockImplementationOnce(
         () =>
           new Promise((_resolve, reject) => {
+            liveRunSessionId = "run-live";
             rejectFirst = reject;
           }),
       )
@@ -1324,11 +1344,14 @@ describe("dispatchInboundEvent", () => {
         await params.dispatcherOptions.deliver({ text: "后续消息完成" }, { kind: "final" });
         return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
       });
-    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-live");
-    openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
-      aborted: true,
-      drained: true,
-      forceCleared: false,
+    // A run only exists while a core dispatch is in flight, and accepting the
+    // abort is what releases it.
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockImplementation(
+      () => liveRunSessionId,
+    );
+    openClawHandoffState.abortAgentHarnessRun.mockImplementation(() => {
+      liveRunSessionId = undefined;
+      return true;
     });
     const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
     const common = {
@@ -1374,6 +1397,123 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
+    }
+  });
+
+  it("hands the peer over in the same tick the lingering run's abort is accepted", async () => {
+    // OpenClaw only classifies a harness abort as silent while the owning reply
+    // operation is already aborted, and that abort is what the previous
+    // dispatch performs on supersede. Publishing the handoff after the drain
+    // settled left a window in which the run we had just killed still reported
+    // itself failed, surfacing the core's generic failure copy in the chat.
+    vi.useFakeTimers();
+    const previousSupersede = vi.fn();
+    const previousRegistration = {
+      accountId: "acct",
+      peerKind: "direct" as const,
+      peerId: "alice",
+      handle: makeReplyHandle(previousSupersede, {
+        waitForSupersede: () => Promise.resolve(),
+      }),
+    };
+    registerActiveBotWsReplyHandle(previousRegistration);
+    // The run needs 800 ms to actually disappear after accepting the abort.
+    let lingeringRunSessionId: string | undefined = "run-finishing";
+    const releaseTimer = setTimeout(() => {
+      lingeringRunSessionId = undefined;
+    }, 800);
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockImplementation(
+      () => lingeringRunSessionId,
+    );
+    openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+
+    try {
+      const operation = dispatchInboundEvent({
+        core: makeCore(dispatchReplyWithBufferedBlockDispatcher) as any,
+        cfg: {} as any,
+        store: makeStore() as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-handoff-order", "接管旧任务"),
+        replyHandle: makeReplyHandle(),
+      });
+      // Microtasks only: the abort has been issued, the run has NOT released.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(openClawHandoffState.abortAgentHarnessRun).toHaveBeenCalledWith("run-finishing");
+      expect(previousSupersede).toHaveBeenCalledTimes(1);
+      expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await operation;
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+    } finally {
+      clearTimeout(releaseTimer);
+      unregisterActiveBotWsReplyHandle(previousRegistration);
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves the previous turn untouched when the lingering run refuses abort", async () => {
+    // The busy path must not supersede: a refused abort means the old run is
+    // committing a healthy answer, and superseding it would discard that answer
+    // while also refusing the new message.
+    vi.useFakeTimers();
+    const previousSupersede = vi.fn();
+    const previousRegistration = {
+      accountId: "acct",
+      peerKind: "direct" as const,
+      peerId: "alice",
+      handle: makeReplyHandle(previousSupersede, {
+        waitForSupersede: () => Promise.resolve(),
+      }),
+    };
+    registerActiveBotWsReplyHandle(previousRegistration);
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-committing");
+    openClawHandoffState.abortAgentHarnessRun.mockReturnValue(false);
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn();
+
+    try {
+      const operation = dispatchInboundEvent({
+        core: makeCore(dispatchReplyWithBufferedBlockDispatcher) as any,
+        cfg: {} as any,
+        store: makeStore() as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-handoff-refused", "打断收尾中的任务"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver }),
+      });
+      await vi.advanceTimersByTimeAsync(4_000);
+      await operation;
+
+      expect(previousSupersede).not.toHaveBeenCalled();
+      expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+      expect(deliver).toHaveBeenCalledWith(
+        { text: expect.stringContaining("确认新指令未执行后再重试") },
+        { kind: "final" },
+      );
+    } finally {
+      unregisterActiveBotWsReplyHandle(previousRegistration);
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
+      vi.useRealTimers();
     }
   });
 
@@ -1384,6 +1524,8 @@ describe("dispatchInboundEvent", () => {
     // generic core failure text in the chat.
     vi.useFakeTimers();
     openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-finishing");
+    // 2026.7.1 refuses abort while a run commits its terminal outcome.
+    openClawHandoffState.abortAgentHarnessRun.mockReturnValue(false);
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
       aborted: false,
       drained: false,
@@ -1409,9 +1551,9 @@ describe("dispatchInboundEvent", () => {
       await vi.advanceTimersByTimeAsync(4_000);
       await operation;
 
-      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalledTimes(1);
-      const drainParams = openClawHandoffState.abortAndDrainAgentHarnessRun.mock.calls[0]?.[0];
-      expect(drainParams?.forceClear).not.toBe(true);
+      expect(openClawHandoffState.abortAgentHarnessRun).toHaveBeenCalledTimes(1);
+      // No forceClear surface is reachable from the pre-dispatch guard at all.
+      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).not.toHaveBeenCalled();
       expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
       expect(deliver).toHaveBeenCalledWith(
         { text: expect.stringContaining("确认新指令未执行后再重试") },
@@ -1420,6 +1562,8 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
       vi.useRealTimers();
     }
   });
@@ -1457,7 +1601,9 @@ describe("dispatchInboundEvent", () => {
         event: makeEvent("msg-abort-accepted", "新消息"),
         replyHandle: makeReplyHandle(vi.fn(), { deliver }),
       });
-      await vi.advanceTimersByTimeAsync(500);
+      // The accepted abort owns the handoff; the bounded settle wait for the
+      // old run to disappear must not turn into a refusal.
+      await vi.advanceTimersByTimeAsync(2_000);
       await operation;
 
       expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
@@ -1465,6 +1611,8 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
       vi.useRealTimers();
     }
   });
@@ -1474,6 +1622,8 @@ describe("dispatchInboundEvent", () => {
     openClawHandoffState.resolveActiveEmbeddedRunSessionId
       .mockReturnValueOnce(undefined)
       .mockReturnValue("run-still-busy");
+    // 2026.7.1 refuses abort while a run commits its terminal outcome.
+    openClawHandoffState.abortAgentHarnessRun.mockReturnValue(false);
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
       aborted: false,
       drained: false,
@@ -1512,6 +1662,8 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
       vi.useRealTimers();
     }
   });
@@ -1521,6 +1673,8 @@ describe("dispatchInboundEvent", () => {
     openClawHandoffState.resolveActiveEmbeddedRunSessionId
       .mockReturnValueOnce(undefined)
       .mockReturnValue("run-still-busy");
+    // 2026.7.1 refuses abort while a run commits its terminal outcome.
+    openClawHandoffState.abortAgentHarnessRun.mockReturnValue(false);
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
       aborted: false,
       drained: false,
@@ -1561,6 +1715,8 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
       vi.useRealTimers();
     }
   });
@@ -1584,6 +1740,8 @@ describe("dispatchInboundEvent", () => {
     openClawHandoffState.resolveActiveEmbeddedRunSessionId
       .mockReturnValueOnce(undefined)
       .mockReturnValue("run-finishing");
+    // 2026.7.1 refuses abort while a run commits its terminal outcome.
+    openClawHandoffState.abortAgentHarnessRun.mockReturnValue(false);
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
       aborted: false,
       drained: false,
@@ -1632,6 +1790,8 @@ describe("dispatchInboundEvent", () => {
       releaseOldRun();
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
       vi.useRealTimers();
     }
   });
@@ -1639,6 +1799,8 @@ describe("dispatchInboundEvent", () => {
   it("reports that a busy inbound was not accepted after the lingering run refuses abort", async () => {
     vi.useFakeTimers();
     openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-busy");
+    // 2026.7.1 refuses abort while a run commits its terminal outcome.
+    openClawHandoffState.abortAgentHarnessRun.mockReturnValue(false);
     openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
       aborted: false,
       drained: false,
@@ -1676,6 +1838,8 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
       vi.useRealTimers();
     }
   });
@@ -1725,6 +1889,8 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
     }
   });
 
@@ -1782,11 +1948,13 @@ describe("dispatchInboundEvent", () => {
       }),
     };
     registerActiveBotWsReplyHandle(staleRegistration);
-    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("stale-core-run");
-    openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
-      aborted: true,
-      drained: true,
-      forceCleared: false,
+    let staleRunSessionId: string | undefined = "stale-core-run";
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockImplementation(
+      () => staleRunSessionId,
+    );
+    openClawHandoffState.abortAgentHarnessRun.mockImplementation(() => {
+      staleRunSessionId = undefined;
+      return true;
     });
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
       queuedFinal: true,
@@ -1807,13 +1975,13 @@ describe("dispatchInboundEvent", () => {
         replyHandle: makeReplyHandle(),
       });
 
-      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).toHaveBeenCalledWith(
-        expect.objectContaining({ sessionId: "stale-core-run" }),
-      );
+      expect(openClawHandoffState.abortAgentHarnessRun).toHaveBeenCalledWith("stale-core-run");
     } finally {
       unregisterActiveBotWsReplyHandle(staleRegistration);
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
     }
   });
 
@@ -1896,9 +2064,11 @@ describe("dispatchInboundEvent", () => {
     openClawHandoffState.resolveActiveEmbeddedRunSessionId
       .mockReturnValueOnce(undefined)
       .mockReturnValue("run-never-drains");
-    openClawHandoffState.abortAndDrainAgentHarnessRun
-      .mockResolvedValueOnce({ aborted: true, drained: true, forceCleared: false })
-      .mockImplementationOnce(() => new Promise(() => undefined));
+    // Only the supersede drain goes through abortAndDrain; the pre-dispatch
+    // guard aborts synchronously and then polls for the release.
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockImplementation(
+      () => new Promise(() => undefined),
+    );
     let dispatchCount = 0;
     let settleFirstCore!: () => void;
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(() => {
@@ -1958,6 +2128,8 @@ describe("dispatchInboundEvent", () => {
       settleFirstCore?.();
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
       vi.useRealTimers();
     }
   });
@@ -1998,6 +2170,8 @@ describe("dispatchInboundEvent", () => {
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
       vi.useRealTimers();
     }
   });

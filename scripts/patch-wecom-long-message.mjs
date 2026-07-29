@@ -71,6 +71,16 @@ function status() {
     (
       reply.includes("bodyText: markdownChunks[0] ?? \"\"") &&
       reply.includes("await params.client.replyStream(params.frame, finalStreamId, firstStreamChunk, true)")
+    ) ||
+    // v147: an error final keeps the reasoning block the user was watching, so
+    // the first stream frame is the chunk plus that prefix. The B2 shape — one
+    // chunk over the stream, the remainder via active push — is unchanged.
+    (
+      reply.includes("const firstStreamChunk = markdownChunks[0] ?? \"\"") &&
+      reply.includes("const firstStreamContent = keepThinkingOnFinal") &&
+      reply.includes("withReplySendTimeout(") &&
+      reply.includes("params.client.replyStream(params.frame, finalStreamId, firstStreamContent, true)") &&
+      reply.includes("\"stream final\"")
     );
   const remainderPushReady =
     reply.includes("await params.client.sendMessage(peerId,") ||

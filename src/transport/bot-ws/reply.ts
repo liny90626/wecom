@@ -262,6 +262,14 @@ function isTerminalReplyError(error: unknown): boolean {
   );
 }
 
+/** WeCom answered that this stream can never take another frame (unknown
+ * req_id, or the ~6-minute stream window closed). Unlike a missing ACK — which
+ * only means the gateway did not confirm in time — nothing can revive it, so it
+ * is the only failure that may permanently retire the progress lane. */
+function isDeadStreamError(error: unknown): boolean {
+  return isInvalidReqIdError(error) || isExpiredStreamUpdateError(error);
+}
+
 function withReplySendTimeout<T>(
   promise: Promise<T>,
   operation: string,
@@ -990,15 +998,19 @@ export function createBotWsReplyHandle(params: {
           );
           return;
         }
-        if (!isTerminalReplyError(error)) {
+        if (!isDeadStreamError(error)) {
+          // A missing ACK is not a dead stream: the keepalive re-sends, and the
+          // first progress update takes the bubble over. Retiring the stream
+          // here left long tasks stuck on the placeholder for their whole run.
           console.warn(
             `[wecom-preview] placeholder-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
           );
+          if (isAckTimeoutError(error)) {
+            streamAckUnreliable = true;
+            params.onFail?.(error);
+          }
           return;
         }
-        // SDK 1.0.6 matches ACKs only by req_id. After an ACK timeout, a late
-        // placeholder ACK could resolve a newer frame if this callback req_id
-        // were reused, so all subsequent delivery must leave the old stream.
         streamUpdateUnreliable = true;
         settleStream();
         params.onFail?.(error);
@@ -1051,6 +1063,13 @@ export function createBotWsReplyHandle(params: {
   let supersededAt: number | undefined;
   let visibleReplyStarted = false;
   let streamUpdateUnreliable = false;
+  // A frame this req_id never got an ACK for. The stream itself stays writable
+  // — progress updates keep painting — but the SDK matches ACKs by req_id only,
+  // so a late ACK can resolve the NEXT frame's promise. Anything whose delivery
+  // must be trusted (final, stream close, supersede notice) therefore leaves
+  // this stream for the active-push path.
+  let streamAckUnreliable = false;
+  const streamDeliveryUntrusted = (): boolean => streamUpdateUnreliable || streamAckUnreliable;
   // Start the progress clock with the task, not with the first visible block.
   // Tool/reasoning work can precede that block by several minutes.
   const handleStartedAt = Date.now();
@@ -1524,16 +1543,28 @@ export function createBotWsReplyHandle(params: {
       isError: boolean;
     },
   ): Promise<boolean | "retry-scheduled"> => {
+    // A stream frame replaces the whole bubble, so an error final would erase
+    // the reasoning the user has been watching and leave a failed long task
+    // showing nothing but a one-line error. Keep the thinking block with it.
+    const keepThinkingOnFinal = options.isError && Boolean(accumulatedThinkingText);
+    // The reasoning prefix has to come out of the same 12 000-byte frame budget.
+    const thinkingLimits = keepThinkingOnFinal
+      ? resolveThinkingAwareBodyLimits(accumulatedThinkingText)
+      : { maxChars: WECOM_STREAM_FINAL_MAX_CHARS, maxBytes: WECOM_STREAM_MAX_BYTES };
+    const finalMaxChars = Math.min(WECOM_STREAM_FINAL_MAX_CHARS, thinkingLimits.maxChars);
+    const finalMaxBytes = Math.min(WECOM_STREAM_MAX_BYTES, thinkingLimits.maxBytes);
     const markdownChunks = withOptionalCompletionMarker(
-      chunkWeComMarkdownV2(
-        finalText,
-        WECOM_STREAM_FINAL_MAX_CHARS,
-        WECOM_STREAM_MAX_BYTES,
-      ).map(escapeLiteralThinkTags),
+      chunkWeComMarkdownV2(finalText, finalMaxChars, finalMaxBytes).map(escapeLiteralThinkTags),
       options.appendCompletionMarker,
     );
     const finalStreamId = resolveStreamId();
     const firstStreamChunk = markdownChunks[0] ?? "";
+    const firstStreamContent = keepThinkingOnFinal
+      ? composeProgressStreamTextWithThinking({
+          thinkingText: accumulatedThinkingText,
+          bodyText: firstStreamChunk,
+        })
+      : firstStreamChunk;
     const pendingAckCleared = await waitForPendingReplyAckToClear({
       client: params.client,
       frame: params.frame,
@@ -1607,7 +1638,7 @@ export function createBotWsReplyHandle(params: {
       }
       return true;
     }
-    if (streamUpdateUnreliable) {
+    if (streamDeliveryUntrusted()) {
       console.warn(
         `[wecom-b3] stream-final-skip-unreliable account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId}`,
       );
@@ -1629,7 +1660,7 @@ export function createBotWsReplyHandle(params: {
         `[wecom-b3] stream-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} chunks=${markdownChunks.length}`,
       );
       await withHandleSendTimeout(
-        params.client.replyStream(params.frame, finalStreamId, firstStreamChunk, true),
+        params.client.replyStream(params.frame, finalStreamId, firstStreamContent, true),
         "stream final",
       );
       visibleReplyStarted = true;
@@ -1679,8 +1710,8 @@ export function createBotWsReplyHandle(params: {
 
     if (markdownChunks.length > 1) {
       const progress = resolveFinalPushProgress(finalText, options.appendCompletionMarker, {
-        maxChars: WECOM_STREAM_FINAL_MAX_CHARS,
-        maxBytes: WECOM_STREAM_MAX_BYTES,
+        maxChars: finalMaxChars,
+        maxBytes: finalMaxBytes,
       });
       const retryRequest: FinalPushRetryRequest = {
         text: finalText,
@@ -1689,8 +1720,8 @@ export function createBotWsReplyHandle(params: {
         appendCompletionMarker: options.appendCompletionMarker,
         alreadyMarkedDelivered: true,
         preserveDeliveryClaim: true,
-        maxChars: WECOM_STREAM_FINAL_MAX_CHARS,
-        maxBytes: WECOM_STREAM_MAX_BYTES,
+        maxChars: finalMaxChars,
+        maxBytes: finalMaxBytes,
       };
       progress.delivered = Math.max(progress.delivered, 1);
       if (!trackPendingFinalRetry(retryRequest)) {
@@ -1702,8 +1733,8 @@ export function createBotWsReplyHandle(params: {
           reason: "stream-remainder",
           appendCompletionMarker: options.appendCompletionMarker,
           progress,
-          maxChars: WECOM_STREAM_FINAL_MAX_CHARS,
-          maxBytes: WECOM_STREAM_MAX_BYTES,
+          maxChars: finalMaxChars,
+          maxBytes: finalMaxBytes,
           isObsolete: () => !isCurrentReplyActivation(),
         });
         if (!isCurrentReplyActivation()) {
@@ -1736,7 +1767,7 @@ export function createBotWsReplyHandle(params: {
     }
     const finalStreamId = streamId;
     settleStream();
-    if (!finalStreamId || isEvent || supersededByNewInbound || streamUpdateUnreliable) {
+    if (!finalStreamId || isEvent || supersededByNewInbound || streamDeliveryUntrusted()) {
       // A dead stream would reject the source-stream close with a guaranteed 846608;
       // settling locally is all the cleanup an expired window needs.
       return;
@@ -2013,31 +2044,31 @@ export function createBotWsReplyHandle(params: {
         return false;
       }
     } catch (error) {
-      if (isTerminalReplyError(error)) {
-        if (isLocalReplyTimeoutError(error)) {
-          void previewSendPromise.then(
-            (result) => {
-              if (
-                result === "skipped" ||
-                supersededByNewInbound
-              ) {
-                return;
+      if (isLocalReplyTimeoutError(error)) {
+        void previewSendPromise.then(
+          (result) => {
+            if (
+              result === "skipped" ||
+              supersededByNewInbound
+            ) {
+              return;
+            }
+            if (streamSettled) {
+              if (previewShowsVisibleBody(options)) {
+                visibleReplyStarted = true;
               }
-              if (streamSettled) {
-                if (previewShowsVisibleBody(options)) {
-                  visibleReplyStarted = true;
-                }
-                recordDeliveredBodySource(options);
-              } else {
-                recordDeliveredPreview(previewText, now, options);
-              }
-              console.info(
-                `[wecom-preview] late-delivery-confirmed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
-              );
-            },
-            () => undefined,
-          );
-        }
+              recordDeliveredBodySource(options);
+            } else {
+              recordDeliveredPreview(previewText, now, options);
+            }
+            console.info(
+              `[wecom-preview] late-delivery-confirmed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
+            );
+          },
+          () => undefined,
+        );
+      }
+      if (isDeadStreamError(error)) {
         console.warn(
           `[wecom-preview] terminal-update-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
         );
@@ -2049,6 +2080,21 @@ export function createBotWsReplyHandle(params: {
         // freeze the preview, yet their tasks equally deserve the deferred
         // background notice — the 9-minute gate itself filters short tasks.
         maybeSendPreviewExpiredNotice(true);
+        return false;
+      }
+      if (isTerminalReplyError(error)) {
+        // One unacknowledged frame is a gateway hiccup, not a dead stream.
+        // Latching the whole lane off here cost the user every later thinking
+        // block and progress update of the turn, permanently, after a single
+        // 5 s ACK timeout — keep painting progress and only distrust this
+        // stream for deliveries that must be proven.
+        console.warn(
+          `[wecom-preview] update-ack-missing account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
+        );
+        streamAckUnreliable = true;
+        if (directAttempt && !pendingPreview) {
+          queuePendingPreview(previewText, options);
+        }
         return false;
       }
       console.warn(
@@ -2128,6 +2174,10 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     if (Date.now() >= pendingPreview.deadline) {
+      // Unlike a single unacknowledged frame, this is a SUSTAINED inability to
+      // write: the req_id has had an ACK pending for the whole grace window, so
+      // the progress lane really is unusable and the background notice is the
+      // only remaining feedback channel.
       console.warn(
         `[wecom-preview] update-delayed-expired account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
       );
@@ -2360,7 +2410,7 @@ export function createBotWsReplyHandle(params: {
       supersededNoticeSent ||
       visibleReplyStarted ||
       streamSettled ||
-      streamUpdateUnreliable ||
+      streamDeliveryUntrusted() ||
       placeholderInFlight ||
       previewInFlightCount > 0 ||
       hasPendingReplyAck(params.client, params.frame)
@@ -2379,8 +2429,10 @@ export function createBotWsReplyHandle(params: {
         );
       })
       .catch((error) => {
-        if (isTerminalReplyError(error)) {
+        if (isDeadStreamError(error)) {
           streamUpdateUnreliable = true;
+        } else if (isTerminalReplyError(error)) {
+          streamAckUnreliable = true;
         }
         console.warn(
           `[wecom-b3] supersede-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${noticeStreamId} error=${formatFallbackError(error)}`,
@@ -2490,6 +2542,17 @@ export function createBotWsReplyHandle(params: {
         finishPendingFinalRetry(false);
         finalDelivered = true;
         await closeOpenedStreamSilently(lastPreviewText);
+        return;
+      }
+
+      if (info.kind === "final" && supersededByNewInbound && payload.isError === true) {
+        // The user replaced this turn themselves, and handing the session over
+        // is what ends the old run — pushing the core's failure copy for it
+        // lands an unexplained "Something went wrong" next to the new answer.
+        settleStream();
+        console.info(
+          `[wecom-b3] superseded-final-skip-error account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} supersededAt=${supersededAt ?? 0}`,
+        );
         return;
       }
 
@@ -2877,7 +2940,7 @@ export function createBotWsReplyHandle(params: {
         params.onFail?.(error);
         return;
       }
-      if (!isEvent && params.inboundKind !== "welcome" && streamUpdateUnreliable) {
+      if (!isEvent && params.inboundKind !== "welcome" && streamDeliveryUntrusted()) {
         // The stream already died terminally (e.g. 846608); writing the error
         // text to it is guaranteed to fail and would leave the user with a
         // broken "完成后将以新消息发送" promise. Route through active push.
@@ -2898,7 +2961,7 @@ export function createBotWsReplyHandle(params: {
           params.onFail?.(error);
           return;
         }
-        if (!pendingAckCleared || streamUpdateUnreliable) {
+        if (!pendingAckCleared || streamDeliveryUntrusted()) {
           await sendFailNoticeOnce();
           params.onFail?.(error);
           return;

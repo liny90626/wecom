@@ -35,6 +35,8 @@ const WECOM_PENDING_ACK_GRACE_MS = 5_500;
 const WECOM_PENDING_ACK_POLL_MS = 100;
 const THINKING_BLOCK_MAX_CHARS = 3_000;
 const THINKING_BLOCK_MAX_BYTES = 8_000;
+/** Bytes `<think></think>` plus its trailing newline costs around the content. */
+const THINK_BLOCK_WRAPPER_BYTES = 16;
 const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const STRUCTURED_TAIL_MIN_DUPLICATE_LINES = 4;
@@ -799,17 +801,17 @@ function trimToUtf8Bytes(value: string, maxBytes: number): string {
   return out;
 }
 
-function renderThinkContent(text: string): string {
+function renderThinkContent(text: string, maxBytes = THINKING_BLOCK_MAX_BYTES): string {
   return stripDanglingThinkMarkup(
     trimToUtf8Bytes(
       escapeThinkBlockText(text || "progress").slice(0, THINKING_BLOCK_MAX_CHARS),
-      THINKING_BLOCK_MAX_BYTES,
+      Math.min(THINKING_BLOCK_MAX_BYTES, maxBytes),
     ).trim(),
   );
 }
 
-function renderInlineThinkBlock(text: string): string {
-  const escaped = renderThinkContent(text);
+function renderInlineThinkBlock(text: string, maxBytes = THINKING_BLOCK_MAX_BYTES): string {
+  const escaped = renderThinkContent(text, maxBytes);
   return escaped ? `<think>${escaped}</think>` : "";
 }
 
@@ -1534,6 +1536,21 @@ export function createBotWsReplyHandle(params: {
     return `${isError ? "任务未完成" : "继续输出"}：\n\n${remainder}`;
   };
 
+  // Renders the accumulated reasoning ahead of a final frame using only the
+  // room that frame has left. The answer keeps the full 12 000-byte budget; the
+  // reasoning shrinks, or drops out entirely, if there is nothing spare.
+  const prependThinkingWithinFrameBudget = (bodyText: string): string => {
+    const availableBytes =
+      WECOM_STREAM_MAX_BYTES -
+      Buffer.byteLength(bodyText, "utf8") -
+      THINK_BLOCK_WRAPPER_BYTES;
+    if (availableBytes <= 0) {
+      return bodyText;
+    }
+    const thinkingBlock = renderInlineThinkBlock(accumulatedThinkingText, availableBytes);
+    return thinkingBlock ? `${thinkingBlock}\n${bodyText}` : bodyText;
+  };
+
   const deliverNormalFinalViaStream = async (
     finalText: string,
     options: {
@@ -1543,28 +1560,25 @@ export function createBotWsReplyHandle(params: {
       isError: boolean;
     },
   ): Promise<boolean | "retry-scheduled"> => {
-    // A stream frame replaces the whole bubble, so an error final would erase
-    // the reasoning the user has been watching and leave a failed long task
-    // showing nothing but a one-line error. Keep the thinking block with it.
-    const keepThinkingOnFinal = options.isError && Boolean(accumulatedThinkingText);
-    // The reasoning prefix has to come out of the same 12 000-byte frame budget.
-    const thinkingLimits = keepThinkingOnFinal
-      ? resolveThinkingAwareBodyLimits(accumulatedThinkingText)
-      : { maxChars: WECOM_STREAM_FINAL_MAX_CHARS, maxBytes: WECOM_STREAM_MAX_BYTES };
-    const finalMaxChars = Math.min(WECOM_STREAM_FINAL_MAX_CHARS, thinkingLimits.maxChars);
-    const finalMaxBytes = Math.min(WECOM_STREAM_MAX_BYTES, thinkingLimits.maxBytes);
     const markdownChunks = withOptionalCompletionMarker(
-      chunkWeComMarkdownV2(finalText, finalMaxChars, finalMaxBytes).map(escapeLiteralThinkTags),
+      chunkWeComMarkdownV2(
+        finalText,
+        WECOM_STREAM_FINAL_MAX_CHARS,
+        WECOM_STREAM_MAX_BYTES,
+      ).map(escapeLiteralThinkTags),
       options.appendCompletionMarker,
     );
     const finalStreamId = resolveStreamId();
     const firstStreamChunk = markdownChunks[0] ?? "";
-    const firstStreamContent = keepThinkingOnFinal
-      ? composeProgressStreamTextWithThinking({
-          thinkingText: accumulatedThinkingText,
-          bodyText: firstStreamChunk,
-        })
-      : firstStreamChunk;
+    // A stream frame replaces the whole bubble, so an error final would erase
+    // the reasoning the user has been watching and leave a failed long task
+    // showing nothing but a one-line error. The reasoning is decoration: it
+    // rides in whatever the frame has left and must never shrink the answer's
+    // own chunking, which would fragment the remainder into extra messages.
+    const firstStreamContent =
+      options.isError && accumulatedThinkingText
+        ? prependThinkingWithinFrameBudget(firstStreamChunk)
+        : firstStreamChunk;
     const pendingAckCleared = await waitForPendingReplyAckToClear({
       client: params.client,
       frame: params.frame,
@@ -1710,8 +1724,8 @@ export function createBotWsReplyHandle(params: {
 
     if (markdownChunks.length > 1) {
       const progress = resolveFinalPushProgress(finalText, options.appendCompletionMarker, {
-        maxChars: finalMaxChars,
-        maxBytes: finalMaxBytes,
+        maxChars: WECOM_STREAM_FINAL_MAX_CHARS,
+        maxBytes: WECOM_STREAM_MAX_BYTES,
       });
       const retryRequest: FinalPushRetryRequest = {
         text: finalText,
@@ -1720,8 +1734,8 @@ export function createBotWsReplyHandle(params: {
         appendCompletionMarker: options.appendCompletionMarker,
         alreadyMarkedDelivered: true,
         preserveDeliveryClaim: true,
-        maxChars: finalMaxChars,
-        maxBytes: finalMaxBytes,
+        maxChars: WECOM_STREAM_FINAL_MAX_CHARS,
+        maxBytes: WECOM_STREAM_MAX_BYTES,
       };
       progress.delivered = Math.max(progress.delivered, 1);
       if (!trackPendingFinalRetry(retryRequest)) {
@@ -1733,8 +1747,8 @@ export function createBotWsReplyHandle(params: {
           reason: "stream-remainder",
           appendCompletionMarker: options.appendCompletionMarker,
           progress,
-          maxChars: finalMaxChars,
-          maxBytes: finalMaxBytes,
+          maxChars: WECOM_STREAM_FINAL_MAX_CHARS,
+          maxBytes: WECOM_STREAM_MAX_BYTES,
           isObsolete: () => !isCurrentReplyActivation(),
         });
         if (!isCurrentReplyActivation()) {
@@ -1984,6 +1998,12 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     stopPlaceholderKeepalive();
+    if (!streamUpdateUnreliable) {
+      // The lane just proved it can still paint, so the deferred background
+      // notice armed by an earlier missing ACK is no longer warranted. A
+      // retired lane keeps its notice: nothing will ever confirm it again.
+      stopPreviewExpiredNoticeTimer();
+    }
     if (previewShowsVisibleBody(options)) {
       visibleReplyStarted = true;
     }
@@ -2092,6 +2112,11 @@ export function createBotWsReplyHandle(params: {
           `[wecom-preview] update-ack-missing account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
         );
         streamAckUnreliable = true;
+        // If the ACKs never come back, this bubble may already be frozen for
+        // the rest of the task, and the deferred background push is the only
+        // feedback left. Arm it now — a confirmed preview disarms it again, so
+        // a single hiccup on a healthy stream costs the user nothing.
+        maybeSendPreviewExpiredNotice(true);
         if (directAttempt && !pendingPreview) {
           queuePendingPreview(previewText, options);
         }
@@ -2545,7 +2570,16 @@ export function createBotWsReplyHandle(params: {
         return;
       }
 
-      if (info.kind === "final" && supersededByNewInbound && payload.isError === true) {
+      if (
+        info.kind === "final" &&
+        supersededByNewInbound &&
+        payload.isError === true &&
+        // Failure copy only. A superseded final that still carries an artifact
+        // keeps the normal superseded path, which uploads it and explains why.
+        !payload.mediaUrl &&
+        (payload.mediaUrls?.length ?? 0) === 0 &&
+        deferredMediaUrls.length === 0
+      ) {
         // The user replaced this turn themselves, and handing the session over
         // is what ends the old run — pushing the core's failure copy for it
         // lands an unexplained "Something went wrong" next to the new answer.

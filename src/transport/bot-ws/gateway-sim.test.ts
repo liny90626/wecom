@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 import { __resetBotWsReplyTestState, createBotWsReplyHandle } from "./reply.js";
+import { uploadAndSendBotWsMedia } from "./media.js";
 import { asWsClient, WecomGatewaySim } from "../../test-utils/wecom-gateway-sim.js";
 import type { ReplyHandle } from "../../types/index.js";
 
@@ -225,6 +226,60 @@ describe("WeCom gateway simulation", () => {
     expect(bubble?.content).toContain("继续检索，调用了 12 个工具");
   });
 
+  it("does not fragment a long error final just because reasoning rides along", async () => {
+    // The reasoning prefix must come out of the frame's leftover room, never
+    // out of the answer's chunk size — shrinking that splits the remainder into
+    // extra push messages spaced 800 ms apart.
+    const longBody = "结论段落。".repeat(900);
+    const runErrorFinal = async (thinking: string): Promise<number> => {
+      const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+      const handle = startTurn(sim, `req-${thinking.length}`);
+      await tick(100);
+      if (thinking) {
+        await deliverAndTick(handle, { text: thinking, isReasoning: true }, { kind: "block" }, 200);
+      }
+      await deliverAndTick(handle, { text: longBody, isError: true }, { kind: "final" }, 2_000);
+      for (let i = 0; i < 12; i += 1) {
+        await tick(800);
+      }
+      return sim.chat.filter((entry) => entry.kind === "push").length;
+    };
+
+    const withoutThinking = await runErrorFinal("");
+    const withThinking = await runErrorFinal("推理过程。".repeat(600));
+    expect(withThinking).toBe(withoutThinking);
+  });
+
+  it("falls back to background notices when the gateway stops acknowledging", async () => {
+    // A stream that never ACKs again may also have stopped rendering, so the
+    // deferred push is the only feedback the user can still get.
+    const sim = new WecomGatewaySim({
+      ackLatencyMs: 60,
+      dropAckOnSend: Array.from({ length: 40 }, (_, index) => index + 2),
+    });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "长任务进度", isReasoning: true }, { kind: "block" }, 500);
+
+    expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
+    await tick(9 * 60_000);
+    const pushes = sim.chat.filter((entry) => entry.kind === "push");
+    expect(pushes.length).toBeGreaterThanOrEqual(1);
+    expect(pushes[0]?.content).toContain("执行长任务中");
+  });
+
+  it("does not arm background notices after a single recovered ACK hiccup", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, dropAckOnSend: [2] });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "第一步", isReasoning: true }, { kind: "block" }, 200);
+    await tick(6_000);
+    await deliverAndTick(handle, { text: "第二步", isReasoning: true }, { kind: "block" }, 4_000);
+
+    await tick(10 * 60_000);
+    expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
+  });
+
   it("never pushes a superseded turn's core failure text as a new message", async () => {
     const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
     const handle = startTurn(sim);
@@ -251,6 +306,30 @@ describe("WeCom gateway simulation", () => {
 
     expect(sim.visibleText().join("\n")).not.toContain("Something went wrong");
     expect(sim.streamBubble("req-sim")?.content).toContain("已收到新消息");
+  });
+
+  it("still delivers media on a superseded error final", async () => {
+    // The failure-copy suppression must not swallow an artifact the run
+    // produced; that path keeps the normal superseded handling.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(100);
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "user-1",
+      reason: "new-inbound",
+    });
+    await tick(200);
+    await deliverAndTick(
+      handle,
+      { text: "⚠️ Something went wrong while processing your request.", isError: true,
+        mediaUrls: ["/tmp/report.pdf"] },
+      { kind: "final" },
+      3_000,
+    );
+
+    expect(vi.mocked(uploadAndSendBotWsMedia)).toHaveBeenCalledTimes(1);
   });
 
   it("still pushes a superseded turn's real answer as a new message", async () => {

@@ -1,15 +1,15 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-07-29（v147 候选已完成，未发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-07-29（v2.5.110-147 已发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 已发布正式版本：`2.5.110-146`，标签 `released/2.5.110-146`。
-- **未发布**：分支 `fix/v147-progress-lane-and-handoff-order`（基于 `main`，4 个提交），修复现网反馈的三类问题，见第 2 节。**尚未打包 / 打 tag / 改 README 与 changelog / 推远端**，等待批准。
+- 当前正式版本：`2.5.110-147`，发布标签 `released/2.5.110-147`。开发分支 `fix/v147-progress-lane-and-handoff-order` 已合入 `main` 并推送 `fork`。
+- v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现），见第 2 节。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**，`peerDependencies` 仍为 `^2026.6.11`，**代码必须继续双版本兼容**（v147 用到的 `abortAgentHarnessRun` 已核实 6.11/7.1 均导出且同为同步 boolean 契约）。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
-- 测试基线：44 文件 / **486 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
+- 测试基线：44 文件 / **490 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
 - `reply.test.ts` 与 `gateway-sim.test.ts` 头部都有 `vi.setConfig({ testTimeout: 30_000 })`：这两套 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s。不要改回全局 timeout。
 - 涉及释放等待的 dispatcher 用例必须用 `vi.useFakeTimers()` 并在 `finally` 里 `vi.useRealTimers()`，否则污染后续用例（已发生过一次超时）。
 
@@ -22,11 +22,17 @@
 1. **一次丢失的 ACK 让整轮进度永久失声**（对应 ②③）。`isTerminalReplyError` 把「回执超时」和「流已死」当同一件事，任何一帧 5 秒未回执就永久熄灭进度通道：后续所有思考块、块预览全部被丢弃，用户盯着「⏳ 正在思考中…」直到任务结束，答案再以另一条新消息推来。长任务每几秒发一帧，命中概率很高——这正是「机率性」的来源。
    → 拆成两个latch：只有 **846605 / 846608**（未知 req_id、流窗口过期）才退休通道；**回执缺失只标记该 `req_id` 的回执账本不可信**（`streamAckUnreliable`），进度继续画，而必须证明送达的动作（final、收流、接管提示）照旧改走主动推送。**持续型**失败（整个宽限窗口都有帧待回执）仍然退休通道并转后台通知。
 2. **错误 final 抹掉用户正在看的过程**（对应 ②）。企微流式帧整条覆盖气泡，`LLM request timed out.` 一来，`<think>` 块连同全部进度瞬间消失，用户看到的就是「过程没有任何其他信息」。
-   → 错误 final 现在把思考块一起带上（在同一个 12000 字节帧预算内按 `resolveThinkingAwareBodyLimits` 收缩正文限额）。
+   → 错误 final 现在把思考块一起带上。思考块只占用该帧**剩余**的字节预算（`prependThinkingWithinFrameBudget`），答案自身的分段限额不变。
 3. **被接管回合的核心失败文案被当成新消息推给用户**（对应 ①）。会话交接本身就是终结旧 run 的原因，旧 run 的失败文案对用户毫无价值，却以主动推送落在新答案旁边。
-   → 被接管 + `isError` 的 final 直接静默丢弃；**被接管回合的真实答案仍然照旧推送**（有专门用例守住）。
+   → 被接管 + `isError` 且**不带媒体**的 final 直接静默丢弃；**被接管回合的真实答案、以及带媒体的 final 仍然照旧推送**（各有专门用例守住）。
 4. **v146 把接管公告推迟到排空之后，开了一个「杀掉的 run 仍然在线」的窗口**（对应 ①，频率变高的直接原因）。v146 之前 `registerActiveBotWsReplyHandle`（也就是通知上一轮「你被接管了」→ abort 它的 replyOperation）发生在预派发排空**之前**；v146 移到了**之后**，于是从「在 harness 层杀掉旧 run」到「告诉旧 dispatch 它被接管」之间有最长 settle+释放等待的空窗。OpenClaw 只有在 replyOperation 已被中止时才把 harness abort 判为静默的 user abort，空窗期内被我们杀掉的 run 会把自己算成失败并把文案投出来。
    → 改用同步的 `abortAgentHarnessRun` 取回「是否接受中止」，**接受的那一刻同一 tick 内发布接管**；被拒绝（7.1 冻结中止＝健康 run 正在提交答案）则完全不碰旧回合，保留原有有界释放等待与拒收路径。释放等待轮询从 150ms 降到 50ms（纯交接延迟）。
+
+**独立 code review 追加的三处修复**（都已补回归用例并做过敏感性验证）：
+
+- 思考块前缀原本从**答案**的分段预算里扣（`resolveThinkingAwareBodyLimits` 是预览通道的辅助函数，从 3500 字符上限扣前缀），且缩小后的限额被一路传进续文推送：3000 字符思考块 + 4500 字符错误 final 会从 2 条推送变成 5 条。改为思考块只吃该帧**剩余字节**，答案分段完全不变。
+- 只丢回执的流原本再也走不到 9 分钟后台通知：挂载点原来在「通道退休」分支，而「持续型」截止分支对纯回执超时不可达（SDK 在自己的 5 秒超时时出队，`hasPendingReplyAck` 早已变 false）。改为回执 latch 触发即挂载，**预览一旦确认送达就撤销**。
+- 被接管失败文案的抑制会连同该 final 携带的媒体一起吞掉，已限定为纯失败文案。
 
 ## 3. OpenClaw / 企微 SDK 核心机制速查（源码级已验证）
 
@@ -74,7 +80,7 @@
 16. **不要删掉 `pre-dispatch-run-release-wait` 那条有界等待**：7.1 长任务收尾会拒绝中止，去掉它就退回「每个长任务后的下一条消息被拒收」。
 17. **不要把「回执超时」重新并回 `isTerminalReplyError` 的通道退休分支**（v147）：`isDeadStreamError`（846605/846608）才能永久熄灭进度通道，回执缺失只能置 `streamAckUnreliable`。合并回去会直接复发「思考块经常不出现」。
 18. **不要让 `streamAckUnreliable` 放行 final / 收流 / 接管提示**：SDK 只按 `req_id` 匹配回执，迟到 ACK 会 resolve 下一帧，误判「已送达」＝静默丢答案。这三处必须继续走 `streamDeliveryUntrusted()`。
-19. **不要让被接管回合的 `isError` final 复活**（v147），但**不得**顺手把非错误的 final 一起丢掉——旧回合的真实答案仍要推送。
+19. **不要让被接管回合的纯失败文案 final 复活**（v147），但**不得**顺手把非错误的 final 或带媒体的 final 一起丢掉——旧回合的真实答案与产物仍要送达。
 20. **不要移除 `sendPreviewUpdate` 排队分支里的 `stopPlaceholderKeepalive()`**：`req_id` 只有一个串行回执槽，占位保活会抢走排队进度帧的槽位，把它推向宽限截止（＝通道退休）。
 
 ## 6. 已知边界与待办观察
@@ -93,4 +99,4 @@
 
 ## 7. 版本脉络备忘
 
-`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → **v147（候选，未发布）** 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布。
+`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → **v147（当前版本）** 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布。

@@ -178,6 +178,27 @@ describe("WeCom gateway simulation", () => {
     expect(sim.streamBubble("req-sim")?.content).toContain("第一段思考");
   });
 
+  it("still retires the lane and falls back to background notices on a dead stream", async () => {
+    // 846608 is WeCom closing the ~6-minute stream window. That one really is
+    // unrecoverable, so the lane must retire and the deferred background push
+    // must take over — splitting missing ACKs out must not weaken this.
+    const sim = new WecomGatewaySim({
+      ackLatencyMs: 60,
+      rejectOnSend: [{ index: 2, errcode: 846608, errmsg: "stream message update expired" }],
+    });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "长任务进度", isReasoning: true }, { kind: "block" }, 500);
+
+    expect(sim.streamBubble("req-sim")?.content).toContain("正在思考中");
+    // The 9-minute gate filters short tasks before the first background push.
+    expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
+    await tick(9 * 60_000);
+    const pushes = sim.chat.filter((entry) => entry.kind === "push");
+    expect(pushes.length).toBeGreaterThanOrEqual(1);
+    expect(pushes[0]?.content).toContain("执行长任务中");
+  });
+
   it("keeps the reasoning visible when the turn ends in an error", async () => {
     const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
     const handle = startTurn(sim);

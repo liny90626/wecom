@@ -15,6 +15,8 @@
  *   what the user sees; `finish: true` closes the bubble.
  */
 
+import type { WSClient } from "@wecom/aibot-node-sdk";
+
 const REPLY_ACK_TIMEOUT_MS = 5_000;
 
 export type SimStreamFrame = {
@@ -193,13 +195,16 @@ export class WecomGatewaySim {
   }
 }
 
-/** Casts the simulator into the shape `createBotWsReplyHandle` expects. */
-export function asWsClient(sim: WecomGatewaySim): never {
+/**
+ * Exposes the simulator as the subset of `WSClient` the reply handle uses. The
+ * cast is confined here so tests never repeat it.
+ */
+export function asWsClient(sim: WecomGatewaySim): WSClient {
   return {
     replyStream: sim.replyStream.bind(sim),
     replyStreamNonBlocking: sim.replyStreamNonBlocking.bind(sim),
     hasPendingReplyAck: sim.hasPendingReplyAck.bind(sim),
     sendMessage: sim.sendMessage.bind(sim),
     replyWelcome: sim.replyWelcome.bind(sim),
-  } as never;
+  } as unknown as WSClient;
 }

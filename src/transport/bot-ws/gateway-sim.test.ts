@@ -1,0 +1,253 @@
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+
+import { __resetBotWsReplyTestState, createBotWsReplyHandle } from "./reply.js";
+import { asWsClient, WecomGatewaySim } from "../../test-utils/wecom-gateway-sim.js";
+import type { ReplyHandle } from "../../types/index.js";
+
+vi.mock("./media.js", () => ({
+  uploadAndSendBotWsMedia: vi.fn(async () => ({ ok: true, messageId: "media-1" })),
+}));
+
+vi.setConfig({ testTimeout: 30_000 });
+
+type Frame = Parameters<typeof createBotWsReplyHandle>[0]["frame"];
+
+const buildFrame = (reqId: string): Frame =>
+  ({
+    headers: { req_id: reqId },
+    body: { from: { userid: "user-1" } },
+    cmd: "aibot_msg_callback",
+  }) as unknown as Frame;
+
+const flush = async (times = 12) => {
+  for (let i = 0; i < times; i += 1) {
+    await Promise.resolve();
+  }
+};
+
+const tick = async (ms: number) => {
+  await flush();
+  await vi.advanceTimersByTimeAsync(ms);
+  await flush();
+};
+
+/**
+ * `deliver` awaits gateway ACKs, and those only settle once fake time moves, so
+ * every delivery has to be raced against the clock instead of awaited first.
+ */
+const deliverAndTick = async (
+  handle: ReplyHandle,
+  payload: Parameters<ReplyHandle["deliver"]>[0],
+  info: Parameters<ReplyHandle["deliver"]>[1],
+  ms: number,
+): Promise<void> => {
+  let settled = false;
+  const delivery = handle.deliver(payload, info).finally(() => {
+    settled = true;
+  });
+  await tick(ms);
+  // A dropped ACK holds the delivery until the SDK's 5 s timeout fires, so keep
+  // the simulated clock moving until it settles instead of deadlocking.
+  for (let i = 0; i < 20 && !settled; i += 1) {
+    await tick(1_000);
+  }
+  await delivery;
+};
+
+/**
+ * These run the real reply handle against a faithful model of the WeCom SDK's
+ * per-req_id serial ACK queue, which is the only way the reported field
+ * symptoms (no thinking blocks, a bare error where the progress was, a stray
+ * "Something went wrong") reproduce at all.
+ */
+describe("WeCom gateway simulation", () => {
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    __resetBotWsReplyTestState();
+    vi.stubEnv("OPENCLAW_STATE_DIR", "/tmp/wecom-sim-state");
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({
+      config: { loadConfig: () => ({ channels: { wecom: {} } }) },
+    } as never);
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  const startTurn = (sim: WecomGatewaySim, reqId = "req-sim"): ReplyHandle => {
+    const handle = createBotWsReplyHandle({
+      client: asWsClient(sim),
+      frame: buildFrame(reqId),
+      accountId: "default",
+      inboundKind: "text",
+      deferActivation: true,
+    });
+    handle.startPlaceholder?.();
+    handle.activate?.();
+    return handle;
+  };
+
+  const bubbleRevisions = (sim: WecomGatewaySim): string[] => {
+    const bubble = sim.streamBubble("req-sim");
+    return bubble?.kind === "stream" ? bubble.history : [];
+  };
+
+  it("streams thinking, progress and the answer into one bubble", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(100);
+    expect(sim.streamBubble("req-sim")?.content).toContain("正在思考中");
+
+    await deliverAndTick(handle, { text: "读取仓库结构", isReasoning: true }, { kind: "block" }, 200);
+    await tick(3_000);
+    await deliverAndTick(handle, { text: "分析依赖关系", isReasoning: true }, { kind: "block" }, 200);
+    await tick(2_000);
+    await deliverAndTick(handle, { text: "先说结论：" }, { kind: "block" }, 200);
+    await tick(2_000);
+    await deliverAndTick(handle, { text: "先说结论：改动可行。" }, { kind: "final" }, 1_000);
+
+    const bubble = sim.streamBubble("req-sim");
+    expect(bubble?.closed).toBe(true);
+    expect(bubble?.content).toContain("改动可行");
+    expect(bubbleRevisions(sim).some((text) => text.includes("<think>分析依赖关系") ||
+      text.includes("分析依赖关系</think>"))).toBe(true);
+    expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
+  });
+
+  it("keeps streaming thinking after a single lost ACK", async () => {
+    // Frame 1 is the placeholder, frame 2 the first thinking snapshot. Losing
+    // one ACK used to retire the progress lane for the whole turn: the user
+    // then watched "正在思考中" for minutes and got the answer as a new message.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, dropAckOnSend: [2] });
+    const handle = startTurn(sim);
+    await tick(100);
+
+    await deliverAndTick(handle, { text: "第一步：读取代码", isReasoning: true }, { kind: "block" }, 200);
+    await tick(6_000);
+    for (let i = 0; i < 5; i += 1) {
+      await deliverAndTick(
+        handle,
+        { text: `第${i + 2}步：继续分析`, isReasoning: true },
+        { kind: "block" },
+        4_000,
+      );
+    }
+    await deliverAndTick(handle, { text: "答案正文开始" }, { kind: "block" }, 4_000);
+
+    const revisions = bubbleRevisions(sim);
+    expect(revisions.some((text) => text.includes("第6步：继续分析"))).toBe(true);
+    expect(revisions.at(-1)).toContain("答案正文开始");
+  });
+
+  it("keeps streaming progress after the placeholder ACK is lost", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, dropAckOnSend: [1] });
+    const handle = startTurn(sim);
+    await tick(6_000);
+
+    await deliverAndTick(handle, { text: "思考中的内容", isReasoning: true }, { kind: "block" }, 4_000);
+    await deliverAndTick(handle, { text: "正文进度" }, { kind: "block" }, 4_000);
+
+    const revisions = bubbleRevisions(sim);
+    expect(revisions.some((text) => text.includes("思考中的内容"))).toBe(true);
+    expect(revisions.at(-1)).toContain("正文进度");
+  });
+
+  it("does not let the placeholder keepalive steal the ACK slot from queued progress", async () => {
+    // The req_id has a single serial ACK slot, so queueing a progress snapshot
+    // must retire the keepalive: another placeholder frame would take that slot
+    // and push the snapshot toward the grace deadline that retires the whole
+    // progress lane.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 2_600 });
+    const handle = startTurn(sim);
+    await tick(100);
+    const delivery = handle.deliver({ text: "第一段思考", isReasoning: true }, { kind: "block" });
+    // The placeholder ACK is still outstanding, so this snapshot is queued and
+    // the 3 s keepalive fires while it waits.
+    await tick(4_000);
+    await delivery;
+    // Let the queued snapshot take the slot and be acknowledged.
+    await tick(3_000);
+
+    const placeholderFrames = sim.sentFrames.filter((frame) =>
+      frame.content.includes("正在思考中"),
+    );
+    expect(placeholderFrames).toHaveLength(1);
+    expect(sim.streamBubble("req-sim")?.content).toContain("第一段思考");
+  });
+
+  it("keeps the reasoning visible when the turn ends in an error", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "正在检索超长上下文", isReasoning: true }, { kind: "block" }, 3_500);
+    await deliverAndTick(
+      handle,
+      { text: "继续检索，调用了 12 个工具", isReasoning: true },
+      { kind: "block" },
+      3_500,
+    );
+    await deliverAndTick(
+      handle,
+      { text: "LLM request timed out.", isError: true },
+      { kind: "final" },
+      2_000,
+    );
+
+    const bubble = sim.streamBubble("req-sim");
+    expect(bubble?.closed).toBe(true);
+    expect(bubble?.content).toContain("LLM request timed out.");
+    // The whole point: the failure must not erase the work the user watched.
+    expect(bubble?.content).toContain("正在检索超长上下文");
+    expect(bubble?.content).toContain("继续检索，调用了 12 个工具");
+  });
+
+  it("never pushes a superseded turn's core failure text as a new message", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "思考中", isReasoning: true }, { kind: "block" }, 200);
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "user-1",
+      reason: "new-inbound",
+    });
+    await tick(200);
+
+    await deliverAndTick(
+      handle,
+      {
+        text: "⚠️ Something went wrong while processing your request. Please try again, or use /new to start a fresh session.",
+        isError: true,
+      },
+      { kind: "final" },
+      3_000,
+    );
+
+    expect(sim.visibleText().join("\n")).not.toContain("Something went wrong");
+    expect(sim.streamBubble("req-sim")?.content).toContain("已收到新消息");
+  });
+
+  it("still pushes a superseded turn's real answer as a new message", async () => {
+    // The error-only suppression must not swallow an actual result.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "思考中", isReasoning: true }, { kind: "block" }, 200);
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "user-1",
+      reason: "new-inbound",
+    });
+    await tick(200);
+    await deliverAndTick(handle, { text: "旧任务的真实答案" }, { kind: "final" }, 3_000);
+
+    expect(sim.visibleText().join("\n")).toContain("旧任务的真实答案");
+  });
+});

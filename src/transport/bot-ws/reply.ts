@@ -46,6 +46,11 @@ const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
 // genuinely long tasks: hold it until the task has been running 9 minutes.
 const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = 9 * 60_000;
 const PREVIEW_EXPIRED_NOTICE_REPEAT_MS = 60_000;
+// Shown while a long task is still running, both as the frozen bubble's status
+// suffix and as the deferred background push. Interrupting a running turn is
+// what forces a session handoff, so the wording asks the user to hold on.
+const LONG_TASK_FOCUS_NOTICE_TEXT =
+  "正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。";
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
 const REPLY_MODEL_TIMEOUT_NOTICE_TEXT = "⚠️ 模型响应超时，本次任务未完成，请稍后重试。";
 const REPLY_PREPARE_TIMEOUT_NOTICE_TEXT =
@@ -639,16 +644,20 @@ function formatFallbackError(error: unknown): string {
   return String(error);
 }
 
-function formatElapsedStatus(elapsedMs: number): string {
+function formatElapsedDuration(elapsedMs: number): string {
   // A zero-duration measurement is not useful to the user; keep a one-second
   // minimum while retaining the existing whole-second display precision.
   const elapsedSeconds = Math.max(1, Math.floor(Math.max(0, elapsedMs) / 1000));
   if (elapsedSeconds < 60) {
-    return `执行长任务中，当前用时${elapsedSeconds}s`;
+    return `${elapsedSeconds}s`;
   }
   const elapsedMinutes = Math.floor(elapsedSeconds / 60);
   const remainingSeconds = elapsedSeconds % 60;
-  return `执行长任务中，当前用时${elapsedMinutes}m${String(remainingSeconds).padStart(2, "0")}s`;
+  return `${elapsedMinutes}m${String(remainingSeconds).padStart(2, "0")}s`;
+}
+
+function formatElapsedStatus(elapsedMs: number): string {
+  return `${LONG_TASK_FOCUS_NOTICE_TEXT} 当前长任务用时${formatElapsedDuration(elapsedMs)}`;
 }
 
 function appendFinalCompletionMarker(text: string): string {
@@ -1519,10 +1528,28 @@ export function createBotWsReplyHandle(params: {
     finalPushRetryTimer.unref?.();
   };
 
+  // A failed turn whose work was all tool calls has no visible body at all, and
+  // by then a long task's stream window is usually closed, so the push route
+  // would deliver one bare provider line — no hint of what ran or for how long.
+  // The reasoning itself stays out: it is only ever shown inside the collapsed
+  // <think> block, never promoted to visible text.
+  //
+  // The elapsed value is snapshotted on first use: this text IS the retry
+  // identity, and a drifting timestamp would reset the tracked chunk progress
+  // and re-push chunks the user already received.
+  // The elapsed value is snapshotted on first use: this text IS the retry
+  // identity, and a drifting timestamp would reset the tracked chunk progress
+  // and re-push chunks the user already received.
+  let failureContextElapsedMs: number | undefined;
+  const withFailureContext = (errorText: string): string => {
+    failureContextElapsedMs ??= Date.now() - handleStartedAt;
+    return `⚠️ 本次任务未完成（已运行 ${formatElapsedDuration(failureContextElapsedMs)}）：\n\n${errorText}`;
+  };
+
   const resolveStreamFallbackText = (finalText: string, isError = false): string => {
     const deliveredSourceText = previewFrozenDeliveredSourceText || lastDeliveredBodySourceText;
     if (!deliveredSourceText || !finalText.startsWith(deliveredSourceText)) {
-      return finalText;
+      return isError ? withFailureContext(finalText) : finalText;
     }
     const remainder = finalText.slice(deliveredSourceText.length).trimStart();
     if (!remainder) {
@@ -2749,6 +2776,15 @@ export function createBotWsReplyHandle(params: {
             : mediaNotes.join("\n");
         }
         deferredMediaUrls = [];
+      }
+      if (info.kind === "final" && payload.isError === true) {
+        // OpenClaw genericises unclassifiable provider errors ("LLM request
+        // failed.") and drops the raw text before it ever reaches a channel, so
+        // this line is what lets a report be correlated with the gateway's own
+        // `embedded run agent end … rawError=…` entry.
+        console.warn(
+          `[wecom-reply] error-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} elapsedMs=${Date.now() - handleStartedAt} bodyChars=${accumulatedText.length} thinkingChars=${accumulatedThinkingText.length} streamDead=${String(streamUpdateUnreliable)} ackUntrusted=${String(streamAckUnreliable)} text=${JSON.stringify(finalText.slice(0, 200))}`,
+        );
       }
       if (info.kind === "final") {
         const reasoningOnlyFinal = !finalText && !!accumulatedThinkingText;

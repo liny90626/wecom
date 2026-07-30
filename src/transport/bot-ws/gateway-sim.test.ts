@@ -197,7 +197,7 @@ describe("WeCom gateway simulation", () => {
     await tick(9 * 60_000);
     const pushes = sim.chat.filter((entry) => entry.kind === "push");
     expect(pushes.length).toBeGreaterThanOrEqual(1);
-    expect(pushes[0]?.content).toContain("执行长任务中");
+    expect(pushes[0]?.content).toContain("正在专注任务中");
   });
 
   it("keeps the reasoning visible when the turn ends in an error", async () => {
@@ -265,7 +265,7 @@ describe("WeCom gateway simulation", () => {
     await tick(9 * 60_000);
     const pushes = sim.chat.filter((entry) => entry.kind === "push");
     expect(pushes.length).toBeGreaterThanOrEqual(1);
-    expect(pushes[0]?.content).toContain("执行长任务中");
+    expect(pushes[0]?.content).toContain("正在专注任务中");
   });
 
   it("does not arm background notices after a single recovered ACK hiccup", async () => {
@@ -278,6 +278,36 @@ describe("WeCom gateway simulation", () => {
 
     await tick(10 * 60_000);
     expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
+  });
+
+  it("gives a failed long task context instead of one bare provider line", async () => {
+    // The reported case: a long task whose work was all tool calls (no visible
+    // body), whose ~6-minute stream window has closed, then fails. The final
+    // has to leave on the push route, where it used to arrive as nothing but
+    // "LLM request failed." with no hint of what ran or for how long.
+    const sim = new WecomGatewaySim({
+      ackLatencyMs: 60,
+      rejectOnSend: [{ index: 2, errcode: 846608, errmsg: "stream message update expired" }],
+    });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "调用第 1 个工具", isReasoning: true }, { kind: "block" }, 500);
+    await tick(11 * 60_000);
+
+    await deliverAndTick(
+      handle,
+      { text: "LLM request failed.", isError: true },
+      { kind: "final" },
+      3_000,
+    );
+
+    const pushes = sim.chat.filter((entry) => entry.kind === "push");
+    const finalPush = pushes.at(-1)?.content ?? "";
+    expect(finalPush).toContain("LLM request failed.");
+    expect(finalPush).not.toBe("LLM request failed.");
+    // Elapsed time and an explicit "did not finish" framing, in the user's language.
+    expect(finalPush).toContain("未完成");
+    expect(finalPush).toMatch(/1[01]m\d{2}s/);
   });
 
   it("never pushes a superseded turn's core failure text as a new message", async () => {

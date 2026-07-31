@@ -1546,6 +1546,20 @@ export function createBotWsReplyHandle(params: {
     return `⚠️ 本次任务未完成（已运行 ${formatElapsedDuration(failureContextElapsedMs)}）：\n\n${errorText}`;
   };
 
+  /** Visible body the user has not been shown yet, "" when it cannot be aligned. */
+  const resolveUndeliveredProgressText = (bodyText: string): string => {
+    if (!bodyText) {
+      return "";
+    }
+    const deliveredSourceText = previewFrozenDeliveredSourceText || lastDeliveredBodySourceText;
+    if (!deliveredSourceText) {
+      return bodyText;
+    }
+    return bodyText.startsWith(deliveredSourceText)
+      ? bodyText.slice(deliveredSourceText.length).trimStart()
+      : "";
+  };
+
   const resolveStreamFallbackText = (finalText: string, isError = false): string => {
     const deliveredSourceText = previewFrozenDeliveredSourceText || lastDeliveredBodySourceText;
     if (!deliveredSourceText || !finalText.startsWith(deliveredSourceText)) {
@@ -1974,12 +1988,25 @@ export function createBotWsReplyHandle(params: {
     stopPreviewExpiredNoticeTimer();
     previewExpiredNoticeInFlight = true;
     const elapsedMs = Date.now() - handleStartedAt;
-    void sendMarkdownChunksViaActivePush(formatElapsedStatus(elapsedMs), {
-      reason: "preview-expired",
-    })
+    // The bubble is unrepaintable but the agent keeps producing: carry whatever
+    // the user has not seen out with the status line instead of dropping it.
+    // Reasoning stays out — only the visible body travels this way.
+    const progressSnapshot = accumulatedText;
+    const undeliveredProgress = resolveUndeliveredProgressText(progressSnapshot);
+    void sendMarkdownChunksViaActivePush(
+      undeliveredProgress
+        ? `${undeliveredProgress}\n\n${formatElapsedStatus(elapsedMs)}`
+        : formatElapsedStatus(elapsedMs),
+      { reason: "preview-expired" },
+    )
       .then(() => {
+        if (undeliveredProgress) {
+          // Only after a confirmed push: the final resolves its remainder from
+          // this bookkeeping, so advancing it on a failed push would lose text.
+          recordDeliveredBodySource({ bodySourceText: progressSnapshot });
+        }
         console.info(
-          `[wecom-preview] expired-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${elapsedMs}`,
+          `[wecom-preview] expired-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${elapsedMs} progressChars=${undeliveredProgress.length}`,
         );
       })
       .catch((error) => {

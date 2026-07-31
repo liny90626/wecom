@@ -515,12 +515,15 @@ describe("createBotWsReplyHandle", () => {
     await vi.advanceTimersByTimeAsync(9 * 60_000);
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+    // The preview never became writable, so this progress has not been seen at
+    // all — it travels out with the status instead of being dropped.
     expect(String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content)).toBe(
-      "正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时9m00s",
+      "正在读取材料\n\n正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时9m00s",
     );
     await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+    // Already delivered above, so the repeat carries the status only.
     expect(String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content)).toBe(
       "正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时10m00s",
     );

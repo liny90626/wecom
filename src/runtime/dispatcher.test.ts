@@ -288,6 +288,137 @@ describe("dispatchInboundEvent", () => {
     );
   });
 
+  it("carries a running message's text into the file that arrives right after it", async () => {
+    // Sending the instruction first and attaching the file second is just as
+    // common as the other order, but a text turn starts running immediately, so
+    // the file's dispatch aborts it — the agent then only ever sees the file.
+    // The text has to move across with it, exactly like the pending case.
+    let releaseTextRun!: () => void;
+    const textRun = new Promise<{ queuedFinal: boolean; counts: Record<string, number> }>(
+      (resolve) => {
+        releaseTextRun = () => resolve({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+      },
+    );
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementationOnce(() => textRun)
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const store = makeStore();
+    const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const fileMedia = {
+      normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+      saveInboundAttachment: vi.fn(),
+    };
+    const fileEvent = {
+      ...makeEvent("msg-late-file", "[file] report.pdf"),
+      inboundKind: "file" as const,
+      attachments: [{ name: "report.pdf", remoteUrl: "https://wecom/report.pdf" }],
+    };
+
+    try {
+      const first = dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-early-text", "请把这个文件转成表格"),
+        replyHandle: makeReplyHandle(),
+      });
+      // The text turn is already inside OpenClaw when the file lands.
+      await vi.waitFor(() =>
+        expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1),
+      );
+
+      const second = dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: fileMedia as any,
+        event: fileEvent,
+        replyHandle: makeReplyHandle(),
+      });
+      await second;
+      releaseTextRun();
+      await first;
+
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+      const body = String(
+        dispatchReplyWithBufferedBlockDispatcher.mock.calls[1]?.[0]?.ctx?.Body ?? "",
+      );
+      expect(body).toContain("请把这个文件转成表格");
+      expect(fileMedia.normalizeFirstAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attachments: [expect.objectContaining({ remoteUrl: "https://wecom/report.pdf" })],
+        }),
+      );
+    } finally {
+      releaseTextRun();
+    }
+  });
+
+  it("never folds a message the user is already reading into the next inbound", async () => {
+    // Carrying a running message across is only safe while the user has seen
+    // nothing from it. Once part of the reply is visible, re-asking it would
+    // regenerate text the user is already reading.
+    let releaseFirstDispatch!: () => void;
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementationOnce(async (params: any) => {
+        // Visible body only — no final yet.
+        await params.dispatcherOptions.deliver({ text: "第一条的答案开头" }, { kind: "block" });
+        await new Promise<void>((resolve) => {
+          releaseFirstDispatch = resolve;
+        });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      })
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const store = makeStore();
+    const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const mediaService = {
+      normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+      saveInboundAttachment: vi.fn(),
+    };
+    const common = {
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: mediaService as any,
+    };
+
+    try {
+      const first = dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-answered", "第一条问题"),
+        replyHandle: makeReplyHandle(),
+      });
+      // The final is out but the dispatch has not settled yet.
+      await vi.waitFor(() => expect(releaseFirstDispatch).toBeTypeOf("function"));
+
+      await dispatchInboundEvent({
+        ...common,
+        event: makeEvent("msg-after-answer", "第二条问题"),
+        replyHandle: makeReplyHandle(),
+      });
+      releaseFirstDispatch();
+      await first;
+
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+      expect(
+        String(dispatchReplyWithBufferedBlockDispatcher.mock.calls[1]?.[0]?.ctx?.Body ?? ""),
+      ).toBe("第二条问题");
+    } finally {
+      releaseFirstDispatch?.();
+    }
+  });
+
   it("waits for a non-abortable run to release instead of rejecting the inbound", async () => {
     // OpenClaw 2026.7.1 freezes abort once a turn commits its terminal outcome
     // (runAgentTurnWithFallback -> replyOperation.freezeAbort), so a healthy run

@@ -17,6 +17,7 @@ import { buildRawEnvelopeSummary } from "../observability/raw-envelope-log.js";
 import type { ReplyHandle, UnifiedInboundEvent } from "../types/index.js";
 import type { WecomMediaService } from "../shared/media-service.js";
 import { isRetryableReplySessionAdmissionError } from "../shared/reply-errors.js";
+import { hasVisibleReplyBody } from "../shared/reply-visibility.js";
 import {
   getActiveBotWsReplyHandle,
   registerActiveBotWsReplyHandle,
@@ -32,7 +33,18 @@ const PRE_DISPATCH_RUN_RELEASE_WAIT_MS = 3_000;
 // A released session is a Map lookup, so poll tightly: this interval is pure
 // handoff latency on every follow-up message that lands on a busy session.
 const PRE_DISPATCH_RUN_RELEASE_POLL_MS = 50;
-type PendingBotWsInbound = { handle: ReplyHandle; event: UnifiedInboundEvent };
+type PendingBotWsInbound = {
+  handle: ReplyHandle;
+  event: UnifiedInboundEvent;
+  /** True once this inbound owns the peer and its OpenClaw dispatch has begun. */
+  dispatched: boolean;
+  /**
+   * True once the user has seen something from this turn. Its content must not
+   * be folded into a later inbound after that: re-asking would regenerate a
+   * reply the user is already reading.
+   */
+  visibleOutput: boolean;
+};
 const pendingBotWsInboundsByPeer = new Map<string, PendingBotWsInbound>();
 
 function buildPendingBotWsReplyKey(event: UnifiedInboundEvent): string {
@@ -64,11 +76,13 @@ function canAdoptSupersededPendingInbound(
   );
 }
 
-// A pending inbound is superseded before it ever reaches OpenClaw, so its text
-// and attachments would disappear with it — a file whose download outlives the
-// next message would be lost while the user is told the messages were merged.
-// Folding it into its successor keeps that promise true and matches v118, where
-// both messages still reached the agent.
+// A superseded inbound loses its turn either way — a pending one is aborted
+// before it reaches OpenClaw, and a dispatched one has its run killed by the
+// pre-dispatch guard — so its text and attachments would disappear with it.
+// A file whose download outlives the next message, or the instruction the user
+// typed just before attaching that file, would be lost while they are told the
+// messages were merged. Folding it into its successor keeps that promise true
+// and matches v118, where both messages still reached the agent.
 function adoptSupersededPendingInbound(
   previous: UnifiedInboundEvent,
   next: UnifiedInboundEvent,
@@ -510,8 +524,15 @@ export async function dispatchInboundEvent(params: {
       new Error("WeCom Bot WS reply aborted: transport runtime retired."),
     );
   });
+  let pendingInbound: PendingBotWsInbound | undefined;
   const activeReplyHandle: ReplyHandle = {
     ...replyHandle,
+    deliver: async (payload, info) => {
+      if (pendingInbound && (info.kind === "final" || hasVisibleReplyBody(payload, info.kind))) {
+        pendingInbound.visibleOutput = true;
+      }
+      await replyHandle.deliver(payload, info);
+    },
     waitForSupersede: () => supersedeDrain,
     supersedeByNewInbound: (meta) => {
       try {
@@ -545,31 +566,41 @@ export async function dispatchInboundEvent(params: {
     );
     const previousPending = pendingBotWsInboundsByPeer.get(pendingReplyKey);
     if (previousPending && previousPending.handle !== activeReplyHandle) {
-      const adopted = canAdoptSupersededPendingInbound(previousPending.event, inboundEvent);
+      const adopted =
+        !previousPending.visibleOutput &&
+        canAdoptSupersededPendingInbound(previousPending.event, inboundEvent);
       if (adopted) {
         inboundEvent = adoptSupersededPendingInbound(previousPending.event, inboundEvent);
       }
       console.info(
-        `[wecom-b3] pending-inbound-${adopted ? "adopted" : "dropped"} account=${event.accountId} messageId=${event.messageId} previousMessageId=${previousPending.event.messageId} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
+        `[wecom-b3] pending-inbound-${adopted ? "adopted" : "dropped"} account=${event.accountId} messageId=${event.messageId} previousMessageId=${previousPending.event.messageId} dispatched=${String(previousPending.dispatched)} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
       );
-      try {
-        previousPending.handle.supersedeByNewInbound?.({
-          accountId: event.accountId,
-          peerKind: event.conversation.peerKind,
-          peerId: event.conversation.peerId,
-          reason: adopted ? "new-inbound" : "new-inbound-unmerged",
-        });
-        previousSupersedeDrain = previousPending.handle.waitForSupersede?.();
-      } catch (error) {
-        console.warn(
-          `[wecom-b3] superseded-pending-handoff-failed account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} error=${String(error)}`,
-        );
+      // A predecessor that already reached OpenClaw must NOT be superseded here:
+      // only an accepted abort may claim the peer, or a busy refusal would
+      // discard the answer it is still producing (see the pre-dispatch guard).
+      if (!previousPending.dispatched) {
+        try {
+          previousPending.handle.supersedeByNewInbound?.({
+            accountId: event.accountId,
+            peerKind: event.conversation.peerKind,
+            peerId: event.conversation.peerId,
+            reason: adopted ? "new-inbound" : "new-inbound-unmerged",
+          });
+          previousSupersedeDrain = previousPending.handle.waitForSupersede?.();
+        } catch (error) {
+          console.warn(
+            `[wecom-b3] superseded-pending-handoff-failed account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} error=${String(error)}`,
+          );
+        }
       }
     }
-    pendingBotWsInboundsByPeer.set(pendingReplyKey, {
+    pendingInbound = {
       handle: activeReplyHandle,
       event: inboundEvent,
-    });
+      dispatched: false,
+      visibleOutput: false,
+    };
+    pendingBotWsInboundsByPeer.set(pendingReplyKey, pendingInbound);
   }
   if (isBotWsReplySession) {
     // v118 opened the placeholder the moment the frame arrived. Keep that first
@@ -678,9 +709,13 @@ export async function dispatchInboundEvent(params: {
         );
         if (abortController.signal.aborted) return;
       }
-      // Stay adoptable until the core dispatch is about to start: a message
-      // superseded inside the handoff window has still not reached OpenClaw.
-      clearPendingReply();
+      // The record stays until this dispatch settles. Its content remains
+      // adoptable — a successor kills this run before it can answer, so the
+      // text has to travel with it — but from here on only an accepted abort
+      // may supersede this handle.
+      if (pendingInbound) {
+        pendingInbound.dispatched = true;
+      }
       replyHandle.activate?.();
     }
     console.info(

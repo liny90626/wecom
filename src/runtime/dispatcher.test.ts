@@ -362,6 +362,79 @@ describe("dispatchInboundEvent", () => {
     }
   });
 
+  it("carries the attachment forward even after the file's own turn started replying", async () => {
+    // File first, instruction second: a bare file makes the agent answer fast
+    // ("what should I do with it?"), so by the time the user finishes typing,
+    // that turn is already visible. The attachment is an input, not work the
+    // user has seen — it still has to travel to the instruction's turn.
+    let releaseFileRun!: () => void;
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementationOnce(async (params: any) => {
+        await params.dispatcherOptions.deliver(
+          { text: "我收到了一个 PDF 文件，需要我做什么？" },
+          { kind: "block" },
+        );
+        await new Promise<void>((resolve) => {
+          releaseFileRun = resolve;
+        });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      })
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const store = makeStore();
+    const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const textMedia = {
+      normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+      saveInboundAttachment: vi.fn(),
+    };
+    const fileEvent = {
+      ...makeEvent("msg-file-first", "[file] https://wecom/report.pdf"),
+      inboundKind: "file" as const,
+      attachments: [{ name: "file", remoteUrl: "https://wecom/report.pdf" }],
+    };
+
+    try {
+      const first = dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: fileEvent,
+        replyHandle: makeReplyHandle(),
+      });
+      await vi.waitFor(() => expect(releaseFileRun).toBeTypeOf("function"));
+
+      await dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: textMedia as any,
+        event: makeEvent("msg-text-second", "帮我把这个转成表格"),
+        replyHandle: makeReplyHandle(),
+      });
+      releaseFileRun();
+      await first;
+
+      expect(textMedia.normalizeFirstAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attachments: [expect.objectContaining({ remoteUrl: "https://wecom/report.pdf" })],
+        }),
+      );
+      // The file's own label must not come along as if it were an instruction.
+      expect(
+        String(dispatchReplyWithBufferedBlockDispatcher.mock.calls[1]?.[0]?.ctx?.Body ?? ""),
+      ).toBe("帮我把这个转成表格");
+    } finally {
+      releaseFileRun?.();
+    }
+  });
+
   it("never folds a message the user is already reading into the next inbound", async () => {
     // Carrying a running message across is only safe while the user has seen
     // nothing from it. Once part of the reply is visible, re-asking it would

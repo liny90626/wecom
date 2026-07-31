@@ -86,8 +86,9 @@ function canAdoptSupersededPendingInbound(
 function adoptSupersededPendingInbound(
   previous: UnifiedInboundEvent,
   next: UnifiedInboundEvent,
+  options: { includeText: boolean },
 ): UnifiedInboundEvent {
-  const previousText = previous.text.trim();
+  const previousText = options.includeText ? previous.text.trim() : "";
   const nextText = next.text.trim();
   // Newest attachment first: only the first one becomes MediaPath, and a
   // replacement upload should win over the one it replaced.
@@ -566,11 +567,19 @@ export async function dispatchInboundEvent(params: {
     );
     const previousPending = pendingBotWsInboundsByPeer.get(pendingReplyKey);
     if (previousPending && previousPending.handle !== activeReplyHandle) {
-      const adopted =
-        !previousPending.visibleOutput &&
-        canAdoptSupersededPendingInbound(previousPending.event, inboundEvent);
+      const mergeable = canAdoptSupersededPendingInbound(previousPending.event, inboundEvent);
+      // An attachment is an INPUT the new instruction needs, so it always
+      // travels — a file sent before the instruction is answered fast ("what
+      // should I do with it?"), and dropping it there is exactly how the
+      // instruction ends up answered without the file. The predecessor's TEXT
+      // is different: re-asking it would regenerate a reply already on screen.
+      const adoptText = mergeable && !previousPending.visibleOutput;
+      const carriesAttachments = (previousPending.event.attachments?.length ?? 0) > 0;
+      const adopted = mergeable && (adoptText || carriesAttachments);
       if (adopted) {
-        inboundEvent = adoptSupersededPendingInbound(previousPending.event, inboundEvent);
+        inboundEvent = adoptSupersededPendingInbound(previousPending.event, inboundEvent, {
+          includeText: adoptText,
+        });
       }
       console.info(
         `[wecom-b3] pending-inbound-${adopted ? "adopted" : "dropped"} account=${event.accountId} messageId=${event.messageId} previousMessageId=${previousPending.event.messageId} dispatched=${String(previousPending.dispatched)} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,

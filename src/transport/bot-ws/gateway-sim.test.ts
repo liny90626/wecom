@@ -280,6 +280,38 @@ describe("WeCom gateway simulation", () => {
     expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
   });
 
+  it("carries new progress out with the background notice instead of dropping it", async () => {
+    // Once the stream window closes the bubble can no longer be repainted, but
+    // the agent keeps producing text. Sending only the bare status line leaves
+    // the user staring at a stale bubble while real output piles up unseen.
+    const sim = new WecomGatewaySim({
+      ackLatencyMs: 60,
+      rejectOnSend: [{ index: 3, errcode: 846608, errmsg: "stream message update expired" }],
+    });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "第一段进度" }, { kind: "block" }, 500);
+    // Frame 3 closes the window; everything after it accumulates unseen.
+    await deliverAndTick(handle, { text: "第一段进度\n第二段进度" }, { kind: "block" }, 2_000);
+    await deliverAndTick(handle, { text: "第一段进度\n第二段进度\n第三段进度" }, { kind: "block" }, 2_000);
+
+    await tick(9 * 60_000);
+    const notice = sim.chat.filter((entry) => entry.kind === "push").at(-1)?.content ?? "";
+    expect(notice).toContain("第三段进度");
+    expect(notice).toContain("正在专注任务中");
+
+    await deliverAndTick(
+      handle,
+      { text: "第一段进度\n第二段进度\n第三段进度\n最终答案" },
+      { kind: "final" },
+      3_000,
+    );
+    const finalPush = sim.chat.filter((entry) => entry.kind === "push").at(-1)?.content ?? "";
+    expect(finalPush).toContain("最终答案");
+    // What the background notice already delivered must not be repeated.
+    expect(finalPush).not.toContain("第三段进度");
+  });
+
   it("gives a failed long task context instead of one bare provider line", async () => {
     // The reported case: a long task whose work was all tool calls (no visible
     // body), whose ~6-minute stream window has closed, then fails. The final

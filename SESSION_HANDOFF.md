@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-- 当前正式版本：`2.5.110-149`，发布标签 `released/2.5.110-149`（打包记录见 `changelog/v2.5.110-149.md`）。开发分支 `fix/v149-inbound-merge-and-progress` 已合入 `main` 并推送 `fork`。
+- 当前正式版本：`2.5.110-149`，发布标签 `released/2.5.110-149`，包 `yanhaidao-wecom-2.5.110-149.tgz`（214,854 bytes；139 文件；npm shasum `d624f7738cbc1a9da7c983c63439f1b90257a663`；SHA-256 `3c3aab4ade62369da4b29383c430dfac8c5147463becdea1fd79c642efc3ffce`）。开发分支 `fix/v149-inbound-merge-and-progress` 已合入 `main` 并推送 `fork`。
 - v149 修复「文件+文字互相丢一半」「长任务产出被后台提示丢弃」「一次主动推送永久熄灭长任务反馈」，见第 2c 节；v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**，`peerDependencies` 仍为 `^2026.6.11`，**代码必须继续双版本兼容**（v147 用到的 `abortAgentHarnessRun` 已核实 6.11/7.1 均导出且同为同步 boolean 契约）。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。

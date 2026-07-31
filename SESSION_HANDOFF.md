@@ -1,15 +1,16 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-07-30（v2.5.110-148 已发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-07-31（v149 候选已完成，未发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
 - 当前正式版本：`2.5.110-148`，发布标签 `released/2.5.110-148`，包 `yanhaidao-wecom-2.5.110-148.tgz`（212,994 bytes；139 文件；npm shasum `d37dcca2b86b4353b55e65b6858cdfdf0c969751`；SHA-256 `e654f0fcde1a706dc63465ce730bc77d53d6a52428b289b05f71ead7099d427d`）。开发分支 `fix/v148-failed-long-task-context` 已合入 `main` 并推送 `fork`。
-- v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2 节末；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
+- **未发布**：分支 `fix/v149-inbound-merge-and-progress`（基于 `main`，3 个提交），修复「文字+文件只响应文件」与「长任务产出被后台提示丢弃」，见第 2c 节。**尚未打包 / 打 tag / 改 README 与 changelog / 推远端**，等待批准。
+- v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**，`peerDependencies` 仍为 `^2026.6.11`，**代码必须继续双版本兼容**（v147 用到的 `abortAgentHarnessRun` 已核实 6.11/7.1 均导出且同为同步 boolean 契约）。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
-- 测试基线：44 文件 / **492 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
+- 测试基线：44 文件 / **495 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
 - `reply.test.ts` 与 `gateway-sim.test.ts` 头部都有 `vi.setConfig({ testTimeout: 30_000 })`：这两套 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s。不要改回全局 timeout。
 - 涉及释放等待的 dispatcher 用例必须用 `vi.useFakeTimers()` 并在 `finally` 里 `vi.useRealTimers()`，否则污染后续用例（已发生过一次超时）。
 
@@ -46,6 +47,19 @@
 
 长任务进行中的提示统一为 `LONG_TASK_FOCUS_NOTICE_TEXT`（「正在专注任务中…尽量不要打断我…」）+ `当前长任务用时X`，冻结气泡后缀与 9 分钟后台推送共用；耗时格式化拆为 `formatElapsedDuration`。
 
+## 2c. v149（候选）：入站合并与长任务产出
+
+**① 文字在前、文件在后 ⇒ Agent 只看到文件。** 适配器只为**媒体**帧保留 1 秒合并窗口（`MEDIA_FIRST_TEXT_MERGE_WINDOW_MS`），文字帧立即派发。所以「先打字、后附文件」时：文字回合已经在跑，文件作为独立入站进来，而此时文字的 pending 记录早已在 `activate` 前被移除 ⇒ 无法并入；文件的预派发守卫再把文字的 run 杀掉，最终只带文件进 OpenClaw。**复现**：`dispatcher.test.ts > carries a running message's text into the file that arrives right after it`，修复前 `ctx.Body === "[file] report.pdf"`。
+
+修复：pending 记录**保留到该次 dispatch 结算**（原来在核心派发前删除），后继消息因此可以并入一个「它即将杀死」的回合的正文。两条边界：
+
+- 已经进入 OpenClaw 的前驱**不在注册时 supersede**——只有被接受的中止才能认领 peer，否则 busy 拒绝路径会丢掉它正在提交的答案（禁改 9）；
+- 一旦用户**已经看到该回合的任何可见输出**（`hasVisibleReplyBody` 或 final），就停止并入，避免重跑用户正在读的回复。
+
+**② 长任务的产出被后台提示丢弃。** 流窗口关闭后气泡无法再刷新，但 Agent 仍在产出；9 分钟后的循环推送只带状态行，于是这段产出直到 final 才出现（现网案例：两条纯提示气泡覆盖了整整一分钟的真实输出）。
+
+修复：后台推送先带上**用户尚未看到的可见正文**，再接状态行；**只有推送成功后**才推进 `recordDeliveredBodySource` 的已投递书签——final 用同一份书签算续文，因此既不重复也不丢。推理不参与（只在折叠 `<think>` 块内展示），`visibleReplyStarted` 也刻意不置位，保证之后被接管时剩余答案仍会推送。
+
 ## 3. OpenClaw / 企微 SDK 核心机制速查（源码级已验证）
 
 - **企微 SDK 1.0.7 投递层**（`node_modules/@wecom/aibot-node-sdk/dist/index.cjs.js`）：
@@ -67,7 +81,7 @@
 
 ## 4. 生产观察关键词
 
-`[wecom-b3] pending-inbound-adopted|dropped` · `pre-dispatch-run-drain` · `pre-dispatch-run-drain-result aborted=… released=…` · `pre-dispatch-run-release-wait released=true|false`（仅在中止被拒绝时出现，7.1 特有） · `pre-dispatch-run-busy` · `dispatch-handoff-retry reason=init-conflict|busy-result`（仅一次） · `dispatch-absorbed-by-active-run` · `dispatch-busy-not-accepted` · `dispatch-deferred-no-visible-reply` · `superseded-final-skip-error`（v147：被接管回合的核心失败文案已丢弃） · `superseded-final-skip-visible` · `[wecom-reply] error-final`（v148：错误 final 的耗时/正文规模/投递路线，用于对齐网关 rawError）· `[wecom-preview] update-ack-missing`（v147：某帧未回执，进度继续、投递改道） · `terminal-update-stopped`（846605/846608，通道退休） · `update-delayed-expired` · `expired-notice` · `progress-delivery-failed` · `progress-drain-timeout` · `final-retry-failed ambiguous=…` · `final-retry-exhausted` · `[wecom-ws] merged media+text`。
+`[wecom-b3] pending-inbound-adopted|dropped dispatched=true|false`（v149：`dispatched=true` 表示并入的是一个已进入 OpenClaw 的回合）· `pre-dispatch-run-drain` · `pre-dispatch-run-drain-result aborted=… released=…` · `pre-dispatch-run-release-wait released=true|false`（仅在中止被拒绝时出现，7.1 特有） · `pre-dispatch-run-busy` · `dispatch-handoff-retry reason=init-conflict|busy-result`（仅一次） · `dispatch-absorbed-by-active-run` · `dispatch-busy-not-accepted` · `dispatch-deferred-no-visible-reply` · `superseded-final-skip-error`（v147：被接管回合的核心失败文案已丢弃） · `superseded-final-skip-visible` · `[wecom-reply] error-final`（v148：错误 final 的耗时/正文规模/投递路线，用于对齐网关 rawError）· `[wecom-preview] update-ack-missing`（v147：某帧未回执，进度继续、投递改道） · `terminal-update-stopped`（846605/846608，通道退休） · `update-delayed-expired` · `expired-notice progressChars=N`（v149：N>0 表示这次后台推送带出了新产出） · `progress-delivery-failed` · `progress-drain-timeout` · `final-retry-failed ambiguous=…` · `final-retry-exhausted` · `[wecom-ws] merged media+text`。
 
 - `update-ack-missing` 偶发是正常网络抖动；**持续大量出现**说明企微网关回执普遍变慢，此时 final 会长期走主动推送（答案以新消息到达、气泡停在最后一帧进度）。
 - `pre-dispatch-run-release-wait released=false` 频繁 ⇒ 旧任务 >3s 仍占住会话，优先查 OpenClaw active run/诊断日志，**不要在插件侧 forceClear**。
@@ -95,10 +109,14 @@
 19. **不要让被接管回合的纯失败文案 final 复活**（v147），但**不得**顺手把非错误的 final 或带媒体的 final 一起丢掉——旧回合的真实答案与产物仍要送达。
 20. **失败文案里的耗时必须快照，不能每次重算**（v148）：`resolveStreamFallbackText` 的输出就是 final 重试身份，时间戳漂移会让 `resolveFinalPushProgress` 认不出同一次推送，把已送达分片重推一遍。
 21. **不要把推理内容放进主动推送**：推理只在折叠 `<think>` 块内展示，任何 push 文案都不得包含它。
-22. **不要移除 `sendPreviewUpdate` 排队分支里的 `stopPlaceholderKeepalive()`**：`req_id` 只有一个串行回执槽，占位保活会抢走排队进度帧的槽位，把它推向宽限截止（＝通道退休）。
+22. **pending 记录必须保留到 dispatch 结算**（v149）：删早了，「先打字后附文件」就会只带文件进 OpenClaw。但**已派发的前驱不得在注册时 supersede**，也**不得在用户已看到其可见输出后再并入**。
+23. **后台长任务推送推进已投递书签必须在推送成功之后**（v149）：提前推进会让 final 的续文跳过这段正文＝静默丢失。
+24. **不要移除 `sendPreviewUpdate` 排队分支里的 `stopPlaceholderKeepalive()`**：`req_id` 只有一个串行回执槽，占位保活会抢走排队进度帧的槽位，把它推向宽限截止（＝通道退休）。
 
 ## 6. 已知边界与待办观察
 
+- 群聊中「他人消息接管了正在运行的回合」时，旧回合收到的仍是「已收到新消息，合并思考。✅」，但跨成员并不合并内容——文案不够准确（既有问题，需要第三种提示语才能修）。
+- 流仍然健康、但预览已冻结（>5 分钟或 >3000 字）时，冻结点之后的新正文仍要等到 final 才可见：后台推送只在通道退休/回执不可信时才启动。
 - 一旦本轮出现过回执缺失，final 就固定走主动推送：答案以新消息到达，进度气泡停在最后一帧且不再收口。这是「宁可多一条消息，也不能静默丢答案」的既有取舍。
 - 媒体在前仍保留 1 秒合并窗口，占位气泡已在窗口开始时显示。
 - 群聊中不同成员的消息不合并内容；被顶掉的一方会收到「尚未开始处理」提示。
@@ -113,4 +131,4 @@
 
 ## 7. 版本脉络备忘
 
-`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → **v148（当前版本）** 失败长任务的推送带上耗时与框架、新增 `error-final` 诊断日志、长任务提示词改为请勿打断。
+`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增 `error-final` 诊断日志、长任务提示词改为请勿打断 → **v149（候选，未发布）** 文字+文件跨回合并入、长任务产出随后台提示一起送达。

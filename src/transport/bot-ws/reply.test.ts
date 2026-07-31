@@ -2579,7 +2579,7 @@ describe("createBotWsReplyHandle", () => {
     expect(onFail).not.toHaveBeenCalled();
   });
 
-  it("does not rearm recurring status after external activity while a push is in flight", async () => {
+  it("defers but does not retire recurring status after external activity", async () => {
     const expiredError = {
       headers: { req_id: "req-recurring-status-external-activity" },
       errcode: 846608,
@@ -2619,10 +2619,20 @@ describe("createBotWsReplyHandle", () => {
     handle.markExternalActivity?.();
     releaseStatusPush?.();
     await flushPromises();
-    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    // Nothing piles onto the message that just reached the user, and the
+    // in-flight push must not arm a second timer on top of the deferred one.
+    await vi.advanceTimersByTimeAsync(45_000);
     await flushPromises();
-
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    // The turn is still running, so the cadence has to come back — retiring it
+    // here silenced the whole long task after one spawned-task completion.
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(3);
   });
 
   it("drops the deferred background notice when a new message supersedes the task", async () => {

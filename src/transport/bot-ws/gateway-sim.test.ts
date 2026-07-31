@@ -312,6 +312,46 @@ describe("WeCom gateway simulation", () => {
     expect(finalPush).not.toContain("第三段进度");
   });
 
+  it("keeps the background notice cadence after an external message", async () => {
+    // Any active push on this peer (a spawned task's completion is the common
+    // one) marks external activity. Retiring the whole notice cadence there
+    // silences the running long task for the rest of its turn.
+    const sim = new WecomGatewaySim({
+      ackLatencyMs: 60,
+      rejectOnSend: [{ index: 2, errcode: 846608, errmsg: "stream message update expired" }],
+    });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "长任务进度", isReasoning: true }, { kind: "block" }, 500);
+    await tick(9 * 60_000);
+    const beforeExternal = sim.chat.filter((entry) => entry.kind === "push").length;
+    expect(beforeExternal).toBeGreaterThanOrEqual(1);
+
+    handle.markExternalActivity?.();
+    // The external message just reached the user, so nothing right away...
+    await tick(30_000);
+    expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(beforeExternal);
+    // ...but the cadence must come back.
+    await tick(2 * 60_000);
+    expect(sim.chat.filter((entry) => entry.kind === "push").length).toBeGreaterThan(
+      beforeExternal,
+    );
+  });
+
+  it("keeps refreshing the frozen bubble status after an external message", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(100);
+    // Over the freeze threshold, so the bubble switches to status refreshes.
+    await deliverAndTick(handle, { text: "进度。".repeat(1_200) }, { kind: "block" }, 500);
+    await tick(20_000);
+    const beforeExternal = sim.sentFrames.length;
+
+    handle.markExternalActivity?.();
+    await tick(60_000);
+    expect(sim.sentFrames.length).toBeGreaterThan(beforeExternal);
+  });
+
   it("gives a failed long task context instead of one bare provider line", async () => {
     // The reported case: a long task whose work was all tool calls (no visible
     // body), whose ~6-minute stream window has closed, then fails. The final

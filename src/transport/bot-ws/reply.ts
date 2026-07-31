@@ -1095,6 +1095,10 @@ export function createBotWsReplyHandle(params: {
   let previewExpiredNoticeInFlight = false;
   let previewExpiredNoticeCancelled = false;
   let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+  // Only a cadence that has actually started may be deferred: arming one from
+  // external activity alone would push notices for a perfectly healthy stream.
+  let previewExpiredNoticeStarted = false;
+  let previewExpiredNoticeAllowUnfrozen = false;
   let previewWatchdogExpired = false;
   let failNoticeSent = false;
   let finalPushRetryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1934,6 +1938,21 @@ export function createBotWsReplyHandle(params: {
     stopPreviewExpiredNoticeTimer();
   };
 
+  // An external message just reached this peer, so push the recurring notice
+  // out by one interval rather than retiring it. Cancelling here used to
+  // silence a running long task for the rest of its turn — one spawned task's
+  // completion push was enough to stop every later progress update.
+  const deferPreviewExpiredNotice = (): void => {
+    if (!previewExpiredNoticeStarted) {
+      return;
+    }
+    stopPreviewExpiredNoticeTimer();
+    schedulePreviewExpiredNotice(
+      PREVIEW_EXPIRED_NOTICE_REPEAT_MS,
+      previewExpiredNoticeAllowUnfrozen,
+    );
+  };
+
   // Recurring active push after the frozen preview channel dies (typically
   // errcode 846608 once the WeCom stream window closes at ~6 min). Without
   // it the bubble goes silent forever while the task is still running. The
@@ -1954,6 +1973,8 @@ export function createBotWsReplyHandle(params: {
     ) {
       return;
     }
+    previewExpiredNoticeStarted = true;
+    previewExpiredNoticeAllowUnfrozen = allowUnfrozen;
     previewExpiredNoticeTimer = setTimeout(() => {
       previewExpiredNoticeTimer = undefined;
       maybeSendPreviewExpiredNotice(allowUnfrozen);
@@ -3097,10 +3118,12 @@ export function createBotWsReplyHandle(params: {
     markExternalActivity: () => {
       notifyPeerActive();
       stopPlaceholderKeepalive();
-      stopPreviewFreezeTimeout();
-      stopPreviewStatusInterval();
-      cancelPreviewExpiredNotice();
       clearPendingPreview();
+      // Defer our own cadence by one interval so it does not pile onto the
+      // message that just arrived — but never retire it: the turn is still
+      // running, and this handle owns its only progress feedback.
+      lastPreviewStatusAt = Date.now();
+      deferPreviewExpiredNotice();
     },
     supersedeByNewInbound: (meta) => {
       if (

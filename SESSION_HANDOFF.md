@@ -1,16 +1,15 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-07-31（v149 候选已完成，未发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-07-31（v2.5.110-149 已发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 当前正式版本：`2.5.110-148`，发布标签 `released/2.5.110-148`，包 `yanhaidao-wecom-2.5.110-148.tgz`（212,994 bytes；139 文件；npm shasum `d37dcca2b86b4353b55e65b6858cdfdf0c969751`；SHA-256 `e654f0fcde1a706dc63465ce730bc77d53d6a52428b289b05f71ead7099d427d`）。开发分支 `fix/v148-failed-long-task-context` 已合入 `main` 并推送 `fork`。
-- **未发布**：分支 `fix/v149-inbound-merge-and-progress`（基于 `main`，5 个提交），修复「文字+文件只响应文件」与「长任务产出被后台提示丢弃」，见第 2c 节。**尚未打包 / 打 tag / 改 README 与 changelog / 推远端**，等待批准。
-- v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
+- 当前正式版本：`2.5.110-149`，发布标签 `released/2.5.110-149`（打包记录见 `changelog/v2.5.110-149.md`）。开发分支 `fix/v149-inbound-merge-and-progress` 已合入 `main` 并推送 `fork`。
+- v149 修复「文件+文字互相丢一半」「长任务产出被后台提示丢弃」「一次主动推送永久熄灭长任务反馈」，见第 2c 节；v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**，`peerDependencies` 仍为 `^2026.6.11`，**代码必须继续双版本兼容**（v147 用到的 `abortAgentHarnessRun` 已核实 6.11/7.1 均导出且同为同步 boolean 契约）。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
-- 测试基线：44 文件 / **496 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
+- 测试基线：44 文件 / **498 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
 - `reply.test.ts` 与 `gateway-sim.test.ts` 头部都有 `vi.setConfig({ testTimeout: 30_000 })`：这两套 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s。不要改回全局 timeout。
 - 涉及释放等待的 dispatcher 用例必须用 `vi.useFakeTimers()` 并在 `finally` 里 `vi.useRealTimers()`，否则污染后续用例（已发生过一次超时）。
 
@@ -63,6 +62,14 @@
 
 修复：后台推送先带上**用户尚未看到的可见正文**，再接状态行；**只有推送成功后**才推进 `recordDeliveredBodySource` 的已投递书签——final 用同一份书签算续文，因此既不重复也不丢。推理不参与（只在折叠 `<think>` 块内展示），`visibleReplyStarted` 也刻意不置位，保证之后被接管时剩余答案仍会推送。
 
+### v149 第三项：外部活动不得熄灭长任务反馈
+
+**子任务返回推到企微是 OpenClaw 的设计，不是插件行为。** `sessions_spawn` 默认 `mode:"run"`（结果作为工具返回值回父 agent）；到达企微的是**完成通知**——OpenClaw 把子任务结果作为提示投给**父会话**，`expectsCompletionMessage` 默认 `true` 走 direct 优先：父会话在跑就 steer 进当前回合，已空闲则新起一个父回合并把**它的答复**投到渠道。要关闭得在 OpenClaw 侧调 `mode` / `expectsCompletionMessage` / `subagent_delivery_target` hook；插件拿到的 sessionKey 是父会话的，无法区分。
+
+**但插件被牵连出一个真缺陷**：outbound 每次主动推送后调 `markExternalActivity()`，它原本 `stopPreviewStatusInterval()` + `cancelPreviewExpiredNotice()`，而后者是**永久闩锁**。于是长任务途中只要发生过一次主动推送（子任务完成通知最常见），该回合此后**再无任何进度反馈**——这是独立于「丢 ACK」和「流窗口过期」的第三条静默成因。
+
+修复：改为**顺延一个间隔**（重置状态计时 + 按重复间隔重挂通知）。只有**已启动过**的循环才可顺延，外部活动永远不会为健康的流凭空挂通知；推送在途时 `schedulePreviewExpiredNotice` 自身 bail，其 `finally` 只补挂一次，因此不会重复挂载。
+
 ## 3. OpenClaw / 企微 SDK 核心机制速查（源码级已验证）
 
 - **企微 SDK 1.0.7 投递层**（`node_modules/@wecom/aibot-node-sdk/dist/index.cjs.js`）：
@@ -114,7 +121,8 @@
 21. **不要把推理内容放进主动推送**：推理只在折叠 `<think>` 块内展示，任何 push 文案都不得包含它。
 22. **pending 记录必须保留到 dispatch 结算**（v149）：删早了，「先打字后附文件」就会只带文件进 OpenClaw。但**已派发的前驱不得在注册时 supersede**；**附件必须永远随行**（输入），**前驱正文**只在用户尚未看到其可见输出时随行（否则重跑已在屏幕上的回复）。
 23. **后台长任务推送推进已投递书签必须在推送成功之后**（v149）：提前推进会让 final 的续文跳过这段正文＝静默丢失。
-24. **不要移除 `sendPreviewUpdate` 排队分支里的 `stopPlaceholderKeepalive()`**：`req_id` 只有一个串行回执槽，占位保活会抢走排队进度帧的槽位，把它推向宽限截止（＝通道退休）。
+24. **`markExternalActivity` 只能顺延、不能退休长任务反馈**（v149）：`cancelPreviewExpiredNotice()` 是永久闩锁，放在这里会让一次主动推送（子任务完成通知）永久熄灭该回合的全部进度反馈。顺延时只允许对**已启动过**的循环操作。
+25. **不要移除 `sendPreviewUpdate` 排队分支里的 `stopPlaceholderKeepalive()`**：`req_id` 只有一个串行回执槽，占位保活会抢走排队进度帧的槽位，把它推向宽限截止（＝通道退休）。
 
 ## 6. 已知边界与待办观察
 
@@ -134,4 +142,4 @@
 
 ## 7. 版本脉络备忘
 
-`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增 `error-final` 诊断日志、长任务提示词改为请勿打断 → **v149（候选，未发布）** 文字+文件跨回合并入、长任务产出随后台提示一起送达。
+`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增 `error-final` 诊断日志、长任务提示词改为请勿打断 → **v149（当前版本）** 文件/文字双向跨回合并入、长任务产出随后台提示一起送达、外部活动不再熄灭长任务反馈。

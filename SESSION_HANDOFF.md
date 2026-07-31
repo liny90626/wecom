@@ -5,12 +5,12 @@
 ## 1. 当前状态
 
 - 当前正式版本：`2.5.110-148`，发布标签 `released/2.5.110-148`，包 `yanhaidao-wecom-2.5.110-148.tgz`（212,994 bytes；139 文件；npm shasum `d37dcca2b86b4353b55e65b6858cdfdf0c969751`；SHA-256 `e654f0fcde1a706dc63465ce730bc77d53d6a52428b289b05f71ead7099d427d`）。开发分支 `fix/v148-failed-long-task-context` 已合入 `main` 并推送 `fork`。
-- **未发布**：分支 `fix/v149-inbound-merge-and-progress`（基于 `main`，3 个提交），修复「文字+文件只响应文件」与「长任务产出被后台提示丢弃」，见第 2c 节。**尚未打包 / 打 tag / 改 README 与 changelog / 推远端**，等待批准。
+- **未发布**：分支 `fix/v149-inbound-merge-and-progress`（基于 `main`，5 个提交），修复「文字+文件只响应文件」与「长任务产出被后台提示丢弃」，见第 2c 节。**尚未打包 / 打 tag / 改 README 与 changelog / 推远端**，等待批准。
 - v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**，`peerDependencies` 仍为 `^2026.6.11`，**代码必须继续双版本兼容**（v147 用到的 `abortAgentHarnessRun` 已核实 6.11/7.1 均导出且同为同步 boolean 契约）。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
-- 测试基线：44 文件 / **495 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
+- 测试基线：44 文件 / **496 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
 - `reply.test.ts` 与 `gateway-sim.test.ts` 头部都有 `vi.setConfig({ testTimeout: 30_000 })`：这两套 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s。不要改回全局 timeout。
 - 涉及释放等待的 dispatcher 用例必须用 `vi.useFakeTimers()` 并在 `finally` 里 `vi.useRealTimers()`，否则污染后续用例（已发生过一次超时）。
 
@@ -51,10 +51,13 @@
 
 **① 文字在前、文件在后 ⇒ Agent 只看到文件。** 适配器只为**媒体**帧保留 1 秒合并窗口（`MEDIA_FIRST_TEXT_MERGE_WINDOW_MS`），文字帧立即派发。所以「先打字、后附文件」时：文字回合已经在跑，文件作为独立入站进来，而此时文字的 pending 记录早已在 `activate` 前被移除 ⇒ 无法并入；文件的预派发守卫再把文字的 run 杀掉，最终只带文件进 OpenClaw。**复现**：`dispatcher.test.ts > carries a running message's text into the file that arrives right after it`，修复前 `ctx.Body === "[file] report.pdf"`。
 
-修复：pending 记录**保留到该次 dispatch 结算**（原来在核心派发前删除），后继消息因此可以并入一个「它即将杀死」的回合的正文。两条边界：
+**反向同样有问题：先附件、后文字。** 裸文件会让 Agent 很快给出可见回复（「收到一个 PDF，需要我做什么？」），等用户打完字，那个回合早已有可见输出——于是并入被整体挡掉，指令带着**零附件**进 OpenClaw。**复现**：`dispatcher.test.ts > carries the attachment forward even after the file's own turn started replying`。
+
+修复：pending 记录**保留到该次 dispatch 结算**（原来在核心派发前删除），后继消息因此可以并入一个「它即将杀死」的回合。三条边界：
 
 - 已经进入 OpenClaw 的前驱**不在注册时 supersede**——只有被接受的中止才能认领 peer，否则 busy 拒绝路径会丢掉它正在提交的答案（禁改 9）；
-- 一旦用户**已经看到该回合的任何可见输出**（`hasVisibleReplyBody` 或 final），就停止并入，避免重跑用户正在读的回复。
+- **附件永远随行**：它是新指令需要的**输入**，不是用户已看到的产出；媒体事件自己的正文只是 `[file] <url>` 标签，丢掉不损失信息；
+- **前驱正文**只在用户**尚未看到该回合任何可见输出**（`hasVisibleReplyBody` 或 final）时随行，避免重跑用户正在读的回复。
 
 **② 长任务的产出被后台提示丢弃。** 流窗口关闭后气泡无法再刷新，但 Agent 仍在产出；9 分钟后的循环推送只带状态行，于是这段产出直到 final 才出现（现网案例：两条纯提示气泡覆盖了整整一分钟的真实输出）。
 
@@ -109,7 +112,7 @@
 19. **不要让被接管回合的纯失败文案 final 复活**（v147），但**不得**顺手把非错误的 final 或带媒体的 final 一起丢掉——旧回合的真实答案与产物仍要送达。
 20. **失败文案里的耗时必须快照，不能每次重算**（v148）：`resolveStreamFallbackText` 的输出就是 final 重试身份，时间戳漂移会让 `resolveFinalPushProgress` 认不出同一次推送，把已送达分片重推一遍。
 21. **不要把推理内容放进主动推送**：推理只在折叠 `<think>` 块内展示，任何 push 文案都不得包含它。
-22. **pending 记录必须保留到 dispatch 结算**（v149）：删早了，「先打字后附文件」就会只带文件进 OpenClaw。但**已派发的前驱不得在注册时 supersede**，也**不得在用户已看到其可见输出后再并入**。
+22. **pending 记录必须保留到 dispatch 结算**（v149）：删早了，「先打字后附文件」就会只带文件进 OpenClaw。但**已派发的前驱不得在注册时 supersede**；**附件必须永远随行**（输入），**前驱正文**只在用户尚未看到其可见输出时随行（否则重跑已在屏幕上的回复）。
 23. **后台长任务推送推进已投递书签必须在推送成功之后**（v149）：提前推进会让 final 的续文跳过这段正文＝静默丢失。
 24. **不要移除 `sendPreviewUpdate` 排队分支里的 `stopPlaceholderKeepalive()`**：`req_id` 只有一个串行回执槽，占位保活会抢走排队进度帧的槽位，把它推向宽限截止（＝通道退休）。
 

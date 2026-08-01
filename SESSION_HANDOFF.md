@@ -1,15 +1,16 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-07-31（v2.5.110-149 已发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-08-01（v150 候选已完成，未发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 当前正式版本：`2.5.110-149`，发布标签 `released/2.5.110-149`，包 `yanhaidao-wecom-2.5.110-149.tgz`（214,854 bytes；139 文件；npm shasum `d624f7738cbc1a9da7c983c63439f1b90257a663`；SHA-256 `3c3aab4ade62369da4b29383c430dfac8c5147463becdea1fd79c642efc3ffce`）。开发分支 `fix/v149-inbound-merge-and-progress` 已合入 `main` 并推送 `fork`。
+- **未发布**：分支 `fix/v150-time-driven-long-task-feedback`（基于 `main`，2 个提交），根治「零产出长任务全程静默」，见第 2d 节。**尚未打包 / 打 tag / 改 README 与 changelog / 推远端**，等待批准。
+- 已发布正式版本：`2.5.110-149`，发布标签 `released/2.5.110-149`，包 `yanhaidao-wecom-2.5.110-149.tgz`（214,854 bytes；139 文件；npm shasum `d624f7738cbc1a9da7c983c63439f1b90257a663`；SHA-256 `3c3aab4ade62369da4b29383c430dfac8c5147463becdea1fd79c642efc3ffce`）。开发分支 `fix/v149-inbound-merge-and-progress` 已合入 `main` 并推送 `fork`。
 - v149 修复「文件+文字互相丢一半」「长任务产出被后台提示丢弃」「一次主动推送永久熄灭长任务反馈」，见第 2c 节；v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
 - 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**，`peerDependencies` 仍为 `^2026.6.11`，**代码必须继续双版本兼容**（v147 用到的 `abortAgentHarnessRun` 已核实 6.11/7.1 均导出且同为同步 boolean 契约）。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
-- 测试基线：44 文件 / **498 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
+- 测试基线：44 文件 / **501 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
 - `reply.test.ts` 与 `gateway-sim.test.ts` 头部都有 `vi.setConfig({ testTimeout: 30_000 })`：这两套 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s。不要改回全局 timeout。
 - 涉及释放等待的 dispatcher 用例必须用 `vi.useFakeTimers()` 并在 `finally` 里 `vi.useRealTimers()`，否则污染后续用例（已发生过一次超时）。
 
@@ -70,6 +71,25 @@
 
 修复：改为**顺延一个间隔**（重置状态计时 + 按重复间隔重挂通知）。只有**已启动过**的循环才可顺延，外部活动永远不会为健康的流凭空挂通知；推送在途时 `schedulePreviewExpiredNotice` 自身 bail，其 `finally` 只补挂一次，因此不会重复挂载。
 
+## 2d. v150（候选）：零产出长任务为什么全程静默
+
+现网案例只有两个气泡：`正在思考...` 和 10m08s 后的失败文案。**从这两个气泡可以确定性推出**：（1）占位气泡 10 分钟没被改写过 ⇒ 没有任何一次预览成功送达；（2）9 分钟的后台通知**完全没出现** ⇒ 它从未被挂载——而它的挂载点只有「预览遇到死流 / 预览回执超时 / pending 预览超期」三处，**全都要求先发生过一次预览发送尝试**。结论：这一轮插件**根本没拿到任何可画的内容**，不是画了画不出去。跟 v147（丢回执）、v148（错误文案）、v149（外部活动）都不是同一条路径。
+
+**根因（源码级）**：OpenClaw 的 `reasoningMode` 默认 `"off"`（`selection-8ixiqbew.js`：`params.reasoningMode ?? "off"`），而 `streamReasoning = (streamReasoningInNonStreamModes === true ? reasoningMode !== "on" : reasoningMode === "stream") && ...`。插件没有设 `streamReasoningInNonStreamModes`，所以 **`onReasoningStream` 根本不会被调用**；纯工具型回合也不产生 assistant 文本，于是没有 block。插件订阅的三个来源（reasoning / tool-result（只留 fast） / block）在这种回合上**全部为空**。
+
+**为什么不是「再加一层保护」**：插件当时的三条反馈通道**全部以模型产出为前提**——占位保活重复同一句静态文本且 120 秒后停、冻结状态刷新要求已渲染过预览、后台通知要求先有一次**失败的**预览发送。真正的缺陷是「反馈依赖产出」这个前提本身。
+
+**修复：把心跳改成时间驱动，并删掉旧机制。**
+
+- 占位保活升级为回合心跳：超过 `LONG_TASK_STATUS_AFTER_MS`（30s）后渲染 `formatElapsedStatus(elapsed)` 而不是静态文本，节奏由 3s 放慢到冻结状态同款的 15s，上界改用既有的 1 小时看门狗。**删除** `MAX_KEEPALIVE_MS`(120s) 及只为延长它而存在的 reasoning 重置计时器。
+- 心跳在预览通道渲染出任何内容后立即让位（`lastPreviewText` 守卫），绝不覆盖真实进度。
+- 心跳撞上死流时**退休通道并交给后台推送**，不再 `settleStream()`——后者会连带取消那条推送，正是「静默到底」的最后一环。
+- 外部活动**顺延**心跳而不是杀掉它（与 v149 对后台通知的处理一致）。
+
+**帧数实测**：静默 10 分钟共 **33 帧**流式 + 2 条后台推送；旧行为是**前 2 分钟 40 帧、之后彻底静默**。所以这是**更少的流量 + 全程有反馈**。
+
+**失败本身（`LLM request timed out.`）不是插件问题**：OpenClaw 默认 run budget 是 48 小时（`DEFAULT_AGENT_TIMEOUT_SECONDS = 2880*60`），排除预算超时；`isTimeoutErrorMessage` 会把 `connection error / network error / fetch failed / socket hang up / ECONNRESET` 一并渲染成这句话。本例 **10m08s ≈ 608 秒**非常接近 600 秒边界，典型来源是模型网关前置代理的 `proxy_read_timeout`。且本轮没有任何 block 投递，插件对 OpenClaw 的 dispatcher **零背压**，不可能是插件造成。**要定案只需一条证据**：用插件的 `[wecom-reply] error-final`（含 elapsed/reqId）去对齐同一时刻 OpenClaw 网关的 `embedded run agent end … rawError=…`。
+
 ## 3. OpenClaw / 企微 SDK 核心机制速查（源码级已验证）
 
 - **企微 SDK 1.0.7 投递层**（`node_modules/@wecom/aibot-node-sdk/dist/index.cjs.js`）：
@@ -122,7 +142,8 @@
 22. **pending 记录必须保留到 dispatch 结算**（v149）：删早了，「先打字后附文件」就会只带文件进 OpenClaw。但**已派发的前驱不得在注册时 supersede**；**附件必须永远随行**（输入），**前驱正文**只在用户尚未看到其可见输出时随行（否则重跑已在屏幕上的回复）。
 23. **后台长任务推送推进已投递书签必须在推送成功之后**（v149）：提前推进会让 final 的续文跳过这段正文＝静默丢失。
 24. **`markExternalActivity` 只能顺延、不能退休长任务反馈**（v149）：`cancelPreviewExpiredNotice()` 是永久闩锁，放在这里会让一次主动推送（子任务完成通知）永久熄灭该回合的全部进度反馈。顺延时只允许对**已启动过**的循环操作。
-25. **不要移除 `sendPreviewUpdate` 排队分支里的 `stopPlaceholderKeepalive()`**：`req_id` 只有一个串行回执槽，占位保活会抢走排队进度帧的槽位，把它推向宽限截止（＝通道退休）。
+25. **长任务反馈必须时间驱动，不得回退成内容驱动**（v150）：OpenClaw 默认不流式推理，纯工具回合零产出；把心跳改回静态占位、恢复 120 秒上限、或让死流分支重新 `settleStream()`，都会立刻复发「全程静默」。心跳必须在 `lastPreviewText` 出现后让位。
+26. **不要移除 `sendPreviewUpdate` 排队分支里的 `stopPlaceholderKeepalive()`**：`req_id` 只有一个串行回执槽，占位保活会抢走排队进度帧的槽位，把它推向宽限截止（＝通道退休）。
 
 ## 6. 已知边界与待办观察
 
@@ -142,4 +163,4 @@
 
 ## 7. 版本脉络备忘
 
-`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增 `error-final` 诊断日志、长任务提示词改为请勿打断 → **v149（当前版本）** 文件/文字双向跨回合并入、长任务产出随后台提示一起送达、外部活动不再熄灭长任务反馈。
+`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增 `error-final` 诊断日志、长任务提示词改为请勿打断 → `v149` 文件/文字双向跨回合并入、长任务产出随后台提示一起送达、外部活动不再熄灭长任务反馈 → **v150（候选，未发布）** 长任务反馈改为时间驱动，零产出回合不再全程静默。

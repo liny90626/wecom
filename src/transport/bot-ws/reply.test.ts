@@ -3489,7 +3489,7 @@ describe("createBotWsReplyHandle", () => {
     expect(onDeliver).toHaveBeenCalledTimes(1);
   });
 
-  it("does not let an undelivered old retry outlive a newer same-peer activation", async () => {
+  it("keeps retrying an undelivered final until it lands, even after a successor replied", async () => {
     const expiredError = {
       headers: { req_id: "req-old-undelivered-retry" },
       errcode: 846608,
@@ -3532,12 +3532,15 @@ describe("createBotWsReplyHandle", () => {
     await vi.advanceTimersByTimeAsync(200_000);
     await flushPromises();
 
-    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+    // The old answer was never delivered, so it must not be thrown away just
+    // because the successor replied first — late beats lost.
     expect(
       mockClient.sendMessage.mock.calls.some((call) =>
-        String((call[1] as any).markdown.content).includes("本次回复投递中断"),
+        String((call[1] as any).markdown.content).includes("旧任务最终结果"),
       ),
-    ).toBe(false);
+    ).toBe(true);
+    // Still bounded: the ladder stops at FINAL_PUSH_MAX_RETRIES.
+    expect(mockClient.sendMessage.mock.calls.length).toBeLessThanOrEqual(6);
   });
 
   it("retires a deferred reply before it is activated", () => {
@@ -4713,10 +4716,13 @@ describe("createBotWsReplyHandle", () => {
     expect(noticeAttempts).toHaveLength(1);
   });
 
-  it("cancels an orphaned final retry after a new activation owns the same peer", async () => {
+  it("delivers a final the user never received even after a new activation", async () => {
+    // Reliability invariant: a real answer from OpenClaw must not be dropped.
+    // The first push failed, so the user has seen NOTHING of this final; the
+    // next message arriving on the peer must not destroy it.
     const pushError = Object.assign(new Error("push rejected"), { errcode: 95001 });
     const expiredError = {
-      headers: { req_id: "req-survive-activation" },
+      headers: { req_id: "req-undelivered-final" },
       errcode: 846608,
       errmsg: "stream message update expired (>6 minutes), cannot update",
     };
@@ -4726,7 +4732,7 @@ describe("createBotWsReplyHandle", () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
-        headers: { req_id: "req-survive-activation" },
+        headers: { req_id: "req-undelivered-final" },
         body: { from: { userid: "alice" }, chattype: "single" },
       } as unknown as ReplyHandleParams["frame"],
       accountId: "default",
@@ -4734,20 +4740,16 @@ describe("createBotWsReplyHandle", () => {
       autoSendPlaceholder: false,
     });
 
-    // The old dispatch has already returned and is no longer registered for
-    // supersede, but its detached retry remains pending after a visible preview.
     await handle.deliver({ text: "预览片段", isReasoning: false }, { kind: "block" });
     await flushPromises();
-    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
     mockClient.replyStream.mockRejectedValueOnce(expiredError);
     await handle.deliver({ text: "迟到的完整答案", isReasoning: false }, { kind: "final" });
     await flushPromises();
 
-    // A new message activates a fresh handle for the same peer.
     createBotWsReplyHandle({
       client: mockClient,
       frame: {
-        headers: { req_id: "req-survive-activation-next" },
+        headers: { req_id: "req-undelivered-final-next" },
         body: { from: { userid: "alice" }, chattype: "single" },
       } as unknown as ReplyHandleParams["frame"],
       accountId: "default",
@@ -4758,12 +4760,60 @@ describe("createBotWsReplyHandle", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     await drainChunkTimers();
 
-    // The successor owns this peer, so the detached old retry must not inject a
-    // late final (or an eventual failure notice) into the new conversation.
-    const attempts = mockClient.sendMessage.mock.calls.filter((call) =>
-      String((call[1] as any).markdown.content).includes("迟到的完整答案"),
-    );
-    expect(attempts).toHaveLength(1);
+    expect(
+      mockClient.sendMessage.mock.calls.filter((call) =>
+        String((call[1] as any).markdown.content).includes("迟到的完整答案"),
+      ).length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("does not re-push a final the user already partially received", async () => {
+    // The other half of the invariant: once a chunk of THIS push is confirmed
+    // delivered, a retry would duplicate what the user already has, so a newer
+    // activation may retire it.
+    const pushError = Object.assign(new Error("push rejected"), { errcode: 95001 });
+    const expiredError = {
+      headers: { req_id: "req-partial-received" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockRejectedValueOnce(expiredError).mockResolvedValue({} as any);
+    // Chunk 1 lands, chunk 2 fails: delivered > 0.
+    mockClient.sendMessage.mockResolvedValueOnce({} as any).mockRejectedValue(pushError);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-partial-received" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    // The chunk loop sleeps 800 ms between sends, so the delivery only settles
+    // once the simulated clock moves.
+    const delivery = handle.deliver({ text: "长答案。".repeat(1_200) }, { kind: "final" });
+    await drainChunkTimers();
+    await delivery;
+    const deliveredBefore = mockClient.sendMessage.mock.calls.length;
+    expect(deliveredBefore).toBeGreaterThanOrEqual(2);
+
+    createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-partial-received-next" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    }).activate?.();
+
+    await vi.advanceTimersByTimeAsync(200_000);
+    await drainChunkTimers();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(deliveredBefore);
   });
 
   it("stays silent when a superseded reasoning-only handle receives an empty final", async () => {

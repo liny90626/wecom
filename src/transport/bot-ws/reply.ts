@@ -1387,12 +1387,11 @@ export function createBotWsReplyHandle(params: {
         obsoleteFinalRetry = true;
         finishPendingFinalRetry(true);
       },
-      // A newer activation owns this peer once an already-finished request
-      // leaves a retry behind. Preserve only an explicitly superseded,
-      // entirely invisible final: that result still belongs to the handoff.
-      shouldCancelForNewActivation: () =>
-        !supersededByNewInbound ||
-        (visibleReplyStarted && (finalPushProgress?.delivered ?? 0) > 0),
+      // A newer activation owning the peer is NOT a reason to destroy an answer
+      // the user never received — that is a silently dropped message. Cancel
+      // only once a chunk of THIS push is confirmed delivered, where re-pushing
+      // would duplicate what they already have.
+      shouldCancelForNewActivation: () => (finalPushProgress?.delivered ?? 0) > 0,
     });
     return true;
   };

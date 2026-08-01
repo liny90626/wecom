@@ -345,6 +345,7 @@ async function dispatchRuntimeReplyWithHandoffRetry(params: {
         },
       }
     : replyHandle;
+  let retryReason: "busy-result" | "init-conflict" | undefined;
   try {
     await dispatchRuntimeReply({
       ...dispatchParams,
@@ -353,7 +354,7 @@ async function dispatchRuntimeReplyWithHandoffRetry(params: {
     });
     return;
   } catch (error) {
-    const retryReason = error instanceof WeComReplyBusyNotAcceptedError
+    retryReason = error instanceof WeComReplyBusyNotAcceptedError
       ? "busy-result"
       : isRetryableReplySessionAdmissionError(error)
         ? "init-conflict"
@@ -371,15 +372,18 @@ async function dispatchRuntimeReplyWithHandoffRetry(params: {
       `[wecom-b3] dispatch-handoff-retry reason=${retryReason} delayMs=${SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS} sessionKey=${params.session.ctx.SessionKey ?? params.session.route.sessionKey}`,
     );
   }
-  await boundDrainWait(
-    drainSupersededOpenClawRun({
-      sessionKey: params.session.ctx.SessionKey ?? params.session.route.sessionKey,
-      sessionId: resolvePreparedSessionId(params.session.ctx),
-    }),
-    "init-conflict-run-drain",
-  );
-  // Admission conflicts and flagless zero-output busy results occur before a
-  // new run starts, so this one bounded retry cannot repeat tools.
+  if (retryReason === "init-conflict") {
+    await boundDrainWait(
+      drainSupersededOpenClawRun({
+        sessionKey: params.session.ctx.SessionKey ?? params.session.route.sessionKey,
+        sessionId: resolvePreparedSessionId(params.session.ctx),
+      }),
+      "init-conflict-run-drain",
+    );
+  }
+  // A session-init conflict identifies a stale run and keeps the established
+  // drain. A flagless zero result is also used by inbound dedupe, so it must
+  // never abort by session identity: wait once, then retry the same message id.
   await waitForRetryDelay(SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS, params.abortSignal);
   await dispatchRuntimeReply({
     ...dispatchParams,

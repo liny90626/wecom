@@ -6,6 +6,10 @@ import type { PreparedSession } from "./session-manager.js";
 
 type DispatchReply = PluginRuntime["channel"]["reply"]["dispatchReplyWithBufferedBlockDispatcher"];
 type ReplyOptions = NonNullable<Parameters<DispatchReply>[0]["replyOptions"]>;
+type CompatibleReplyOptions = ReplyOptions & {
+  // Added in 2026.7.1. Older cores ignore the extra runtime option.
+  onTurnAdopted?: () => void | Promise<void>;
+};
 
 // Progress callbacks are intentionally detached from OpenClaw's model stream,
 // but the detached lane still needs ordering at turn close. Keep the barrier
@@ -72,6 +76,8 @@ export async function dispatchRuntimeReply(params: {
   let visibleBodySeen = false;
   let finalDelivered = false;
   let observedReplyDelivery = false;
+  let turnAdopted = false;
+  let agentRunStarted = false;
   let runActivityObserved = false;
   let fastOffPending = false;
   let fastOffEmptyFinalSuppressed = false;
@@ -254,11 +260,19 @@ export async function dispatchRuntimeReply(params: {
     finalDelivered = true;
   };
 
-  const botWsReplyOptions: ReplyOptions | undefined = isBotWsReply
+  const botWsReplyOptions: CompatibleReplyOptions | undefined = isBotWsReply
     ? {
         disableBlockStreaming: false,
         allowProgressCallbacksWhenSourceDeliverySuppressed: true,
         abortSignal,
+        // 6.11 exposes run-start evidence; 7.1 adds turn adoption so a turn
+        // steered into an existing run is covered as well.
+        onAgentRunStart: () => {
+          agentRunStarted = true;
+        },
+        onTurnAdopted: () => {
+          turnAdopted = true;
+        },
         onObservedReplyDelivery: () => {
           observedReplyDelivery = true;
         },
@@ -460,10 +474,15 @@ export async function dispatchRuntimeReply(params: {
       return;
     }
     const absorbingRunSessionId = resolveActiveRunSessionId(sessionKey);
-    if (absorbingRunSessionId) {
-      // OpenClaw ran the admission and still holds an active run for this
-      // session: the inbound was steered into that run (or queued behind it),
-      // not refused. Report it as absorbed and never re-dispatch it.
+    const adoptedIntoExistingRun =
+      turnAdopted && !agentRunStarted && result.beforeAgentRunBlocked !== true;
+    if (
+      adoptedIntoExistingRun ||
+      (!agentRunStarted && result.beforeAgentRunBlocked !== true && absorbingRunSessionId)
+    ) {
+      // 7.1 reports successful steering through onTurnAdopted without starting
+      // another agent run. On 6.11 the active lookup remains the compatibility
+      // signal. Either fact means the inbound was accepted and must not retry.
       await deliverHandoffNotice({
         text: BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT,
         logEvent: "dispatch-absorbed-by-active-run",
@@ -485,20 +504,34 @@ export async function dispatchRuntimeReply(params: {
     !fastAutoOnText &&
     !sourceDeliverySuppressed
   ) {
-    const busyRunSessionId = resolveActiveRunSessionId(sessionKey);
-    if (busyRunSessionId) {
-      // No fallback flag means the dispatch never reached the agent turn:
-      // OpenClaw released the inbound at reply-operation admission, so one
-      // bounded retry is safe and a "not executed" notice is accurate.
-      await deliverHandoffNotice({
-        text: BOT_WS_BUSY_INBOUND_NOTICE_TEXT,
-        logEvent: "dispatch-busy-not-accepted",
-        runSessionId: busyRunSessionId,
-        throwForRetry: retryFlaglessBusy,
-      });
+    if (result.beforeAgentRunBlocked === true) {
+      // onTurnAdopted fires before the before_agent_run hooks in 7.1. When the
+      // configured silent-reply policy suppresses the fallback flag, this bit
+      // is the only remaining proof that the turn was blocked rather than
+      // accepted as an intentional silent reply.
+      return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
+    }
+    if (turnAdopted || agentRunStarted) {
+      // OpenClaw omits the fallback flag when the configured silent reply
+      // policy allows an accepted turn to finish without visible output.
+      // Keep the transport lifecycle balanced without inventing a failure.
+      console.info(`[wecom-b3] dispatch-adopted-silent-reply sessionKey=${sessionKey}`);
+      await closeReply();
       return;
     }
-    return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
+
+    // Both reply-operation admission refusal and inbound dedupe return the
+    // same flagless zero result. The active-operation registry can be released
+    // between that return and this check, so its current value is diagnostic
+    // only. Since neither acceptance callback fired, one bounded retry cannot
+    // repeat a newly accepted turn; a second zero result becomes the notice.
+    await deliverHandoffNotice({
+      text: BOT_WS_BUSY_INBOUND_NOTICE_TEXT,
+      logEvent: "dispatch-busy-not-accepted",
+      runSessionId: resolveActiveRunSessionId(sessionKey),
+      throwForRetry: retryFlaglessBusy,
+    });
+    return;
   }
   await closeReply();
 }

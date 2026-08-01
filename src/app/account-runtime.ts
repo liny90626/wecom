@@ -61,6 +61,8 @@ export class WecomAccountRuntime {
 
   async handleEvent(event: UnifiedInboundEvent, replyHandle: ReplyHandle): Promise<void> {
     const dispatchStartedAt = Date.now();
+    let replyFailureHandled = false;
+    let handledReplyFailure: unknown;
     this.runtimeStatus.lastInboundAt = Date.now();
     this.runtimeStatus.recentInboundSummary = `${event.transport} ${event.inboundKind} ${event.messageId}`;
     this.log.info?.(
@@ -113,6 +115,8 @@ export class WecomAccountRuntime {
           `[wecom-runtime] reply-fail account=${event.accountId} transport=${replyHandle.context.transport} messageId=${event.messageId} error=${formattedError}`,
         );
         await replyHandle.fail?.(error);
+        handledReplyFailure = error;
+        replyFailureHandled = true;
       },
       markExternalActivity: () => {
         replyHandle.markExternalActivity?.();
@@ -141,6 +145,19 @@ export class WecomAccountRuntime {
         `[wecom-runtime] dispatch-done account=${event.accountId} transport=${event.transport} kind=${event.inboundKind} messageId=${event.messageId} durationMs=${Date.now() - dispatchStartedAt}`,
       );
     } catch (error) {
+      if (
+        replyHandle.context.transport === "bot-ws" &&
+        replyFailureHandled &&
+        Object.is(error, handledReplyFailure)
+      ) {
+        // The tracked fail boundary already recorded the issue and let the
+        // transport deliver its one-time failure notice. Contain that exact
+        // error here so the WS frame boundary does not record it a second time.
+        this.log.info?.(
+          `[wecom-runtime] dispatch-failure-contained account=${event.accountId} transport=${event.transport} kind=${event.inboundKind} messageId=${event.messageId} durationMs=${Date.now() - dispatchStartedAt}`,
+        );
+        return;
+      }
       this.log.error?.(
         `[wecom-runtime] dispatch-fail account=${event.accountId} transport=${event.transport} kind=${event.inboundKind} messageId=${event.messageId} durationMs=${Date.now() - dispatchStartedAt} error=${formatErrorMessage(error)}`,
       );

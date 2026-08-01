@@ -51,6 +51,8 @@ describe("dispatchRuntimeReply", () => {
         replyOptions: expect.objectContaining({
           disableBlockStreaming: false,
           allowProgressCallbacksWhenSourceDeliverySuppressed: true,
+          onAgentRunStart: expect.any(Function),
+          onTurnAdopted: expect.any(Function),
           onReasoningStream: expect.any(Function),
           onReasoningEnd: expect.any(Function),
           onToolResult: expect.any(Function),
@@ -718,10 +720,14 @@ describe("dispatchRuntimeReply", () => {
       { block: 0, final: 0, tool: 0 },
       { block: 0, final: 0, tool: 1 },
     ]) {
-      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
-        queuedFinal: false,
-        counts,
-        noVisibleReplyFallbackEligible: true,
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+        await params.replyOptions.onTurnAdopted();
+        await params.replyOptions.onAgentRunStart("run-empty");
+        return {
+          queuedFinal: false,
+          counts,
+          noVisibleReplyFallbackEligible: true,
+        };
       });
       await expect(
         dispatchRuntimeReply({
@@ -773,6 +779,108 @@ describe("dispatchRuntimeReply", () => {
       { text: expect.stringContaining("已并入当前任务") },
       { kind: "final" },
     );
+  });
+
+  it("keeps an adopted steer accepted after its active run releases before triage", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onTurnAdopted();
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        noVisibleReplyFallbackEligible: true,
+      };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-adopted-steer-released" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+        retryFlaglessBusy: true,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(agentHarnessState.resolveActiveEmbeddedRunSessionId).toHaveReturnedWith(undefined);
+    expect(deliver).toHaveBeenCalledWith(
+      { text: expect.stringContaining("已并入当前任务") },
+      { kind: "final" },
+    );
+    expect(fail).not.toHaveBeenCalled();
+  });
+
+  it("still fails a turn blocked before the agent run despite adoption bookkeeping", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onTurnAdopted();
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        noVisibleReplyFallbackEligible: true,
+        beforeAgentRunBlocked: true,
+      };
+    });
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-before-agent-blocked" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver: vi.fn(),
+          fail,
+        } as any,
+      }),
+    ).rejects.toThrow("no visible output");
+
+    expect(fail).toHaveBeenCalledOnce();
+  });
+
+  it("still fails a flagless blocked turn when silent-reply policy hides the fallback flag", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onTurnAdopted();
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        beforeAgentRunBlocked: true,
+      };
+    });
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-flagless-before-agent-blocked" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver: vi.fn(),
+          fail,
+        } as any,
+        retryFlaglessBusy: true,
+      }),
+    ).rejects.toThrow("no visible output");
+
+    expect(fail).toHaveBeenCalledOnce();
   });
 
   it("tells the user an absorbed inbound is being handled by the running task", async () => {
@@ -1210,7 +1318,7 @@ describe("dispatchRuntimeReply", () => {
     expect(String(payload?.text)).toContain("确认新指令未执行后再重试");
   });
 
-  it("fails a flagless empty result when no active run proves the session is busy", async () => {
+  it("retries an unadopted flagless empty result after the active run has released", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
       queuedFinal: false,
       counts: { block: 0, final: 0, tool: 0 },
@@ -1232,12 +1340,77 @@ describe("dispatchRuntimeReply", () => {
           deliver,
           fail,
         } as any,
+        retryFlaglessBusy: true,
       }),
-    ).rejects.toThrow("no visible output");
+    ).rejects.toMatchObject({ name: "WeComReplyBusyNotAcceptedError" });
 
     expect(deliver).not.toHaveBeenCalled();
-    expect(fail).toHaveBeenCalledOnce();
+    expect(fail).not.toHaveBeenCalled();
   });
+
+  it("reports an unadopted flagless empty result after the bounded retry", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
+      queuedFinal: false,
+      counts: { block: 0, final: 0, tool: 0 },
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-empty-after-retry" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(deliver).toHaveBeenCalledWith(
+      { text: expect.stringContaining("确认新指令未执行后再重试") },
+      { kind: "final" },
+    );
+    expect(fail).not.toHaveBeenCalled();
+  });
+
+  it.each(["onAgentRunStart", "onTurnAdopted"] as const)(
+    "settles a flagless empty turn accepted through %s without reporting a failure",
+    async (adoptionCallback) => {
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+        await params.replyOptions[adoptionCallback]("run-adopted-silent");
+        return { queuedFinal: false, counts: { block: 0, final: 0, tool: 0 } };
+      });
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const fail = vi.fn().mockResolvedValue(undefined);
+
+      await expect(
+        dispatchRuntimeReply({
+          core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+          cfg: {} as any,
+          session: { ctx: { SessionKey: "session-adopted-silent" } } as any,
+          replyHandle: {
+            context: {
+              transport: "bot-ws",
+              accountId: "default",
+              raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+            },
+            deliver,
+            fail,
+          } as any,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(deliver).toHaveBeenCalledWith({ text: "" }, { kind: "final" });
+      expect(fail).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps Fast progress but rejects auto-off without a later body", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {

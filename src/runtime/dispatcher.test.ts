@@ -1821,18 +1821,59 @@ describe("dispatchInboundEvent", () => {
     }
   });
 
+  it("retries flagless zero when the busy run releases before result triage", async () => {
+    vi.useFakeTimers();
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue(undefined);
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValueOnce({
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+      })
+      .mockImplementationOnce(async (params) => {
+        await params.replyOptions.onTurnAdopted();
+        await params.dispatcherOptions.deliver({ text: "上一轮结束后已正常回复" }, { kind: "final" });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      });
+
+    try {
+      const operation = dispatchInboundEvent({
+        core: makeCore(dispatchReplyWithBufferedBlockDispatcher) as any,
+        cfg: {} as any,
+        store: makeStore() as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-active-released-before-triage", "上一轮完成后的新消息"),
+        replyHandle: makeReplyHandle(vi.fn(), { deliver, fail }),
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      await operation;
+
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver).toHaveBeenCalledWith(
+        { text: "上一轮结束后已正常回复" },
+        { kind: "final" },
+      );
+      expect(fail).not.toHaveBeenCalled();
+      expect(openClawHandoffState.abortAndDrainAgentHarnessRun).not.toHaveBeenCalled();
+    } finally {
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReset();
+      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
+      vi.useRealTimers();
+    }
+  });
+
   it("reports busy once after one flagless busy retry", async () => {
     vi.useFakeTimers();
-    openClawHandoffState.resolveActiveEmbeddedRunSessionId
-      .mockReturnValueOnce(undefined)
-      .mockReturnValue("run-still-busy");
-    // 2026.7.1 refuses abort while a run commits its terminal outcome.
-    openClawHandoffState.abortAgentHarnessRun.mockReturnValue(false);
-    openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
-      aborted: false,
-      drained: false,
-      forceCleared: false,
-    });
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue(undefined);
     const deliver = vi.fn().mockResolvedValue(undefined);
     const fail = vi.fn().mockResolvedValue(undefined);
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({

@@ -51,6 +51,12 @@ export type WecomGatewaySimOptions = {
   dropAckOnSend?: number[];
   /** Frames (1-based) the gateway rejects with an errcode. */
   rejectOnSend?: Array<{ index: number; errcode: number; errmsg: string }>;
+  /**
+   * Closes the stream window this long after the first frame, after which every
+   * frame is rejected with 846608 — how WeCom actually retires a ~6-minute
+   * stream, rather than at a frame index a test would have to guess.
+   */
+  rejectAfterMs?: number;
 };
 
 /**
@@ -63,6 +69,7 @@ export class WecomGatewaySim {
   private readonly queues = new Map<string, QueueItem[]>();
   private readonly pendingAcks = new Map<string, { timer: ReturnType<typeof setTimeout> }>();
   private sendCount = 0;
+  private firstSendAtMs: number | undefined;
 
   constructor(private readonly options: WecomGatewaySimOptions = {}) {}
 
@@ -144,7 +151,15 @@ export class WecomGatewaySim {
     this.sendCount += 1;
     const sendIndex = this.sendCount;
     this.sentFrames.push(item.frame);
-    const rejection = this.options.rejectOnSend?.find((entry) => entry.index === sendIndex);
+    this.firstSendAtMs ??= Date.now();
+    const windowClosed =
+      this.options.rejectAfterMs !== undefined &&
+      Date.now() - this.firstSendAtMs >= this.options.rejectAfterMs;
+    const rejection =
+      this.options.rejectOnSend?.find((entry) => entry.index === sendIndex) ??
+      (windowClosed
+        ? { index: sendIndex, errcode: 846608, errmsg: "stream message update expired" }
+        : undefined);
     const dropped = this.options.dropAckOnSend?.includes(sendIndex) === true;
 
     const settle = (deliver: boolean): void => {

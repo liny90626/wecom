@@ -1132,6 +1132,14 @@ export function createBotWsReplyHandle(params: {
         console.info(
           `[wecom-b3] final-skip already-delivered account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
         );
+      } else {
+        // A SECOND final with different content on one handle. The dedup is
+        // built for retries of the same answer, so this drops a distinct
+        // message; no WeCom case has been observed, and this line is what would
+        // prove one.
+        console.warn(
+          `[wecom-b3] final-skip second-distinct account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+        );
       }
       return false;
     }

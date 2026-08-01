@@ -20,7 +20,10 @@ import {
 import { uploadAndSendBotWsMedia } from "./media.js";
 
 const PLACEHOLDER_KEEPALIVE_MS = 3000;
-const MAX_KEEPALIVE_MS = 120 * 1000; // Force stop keepalive after 120s if ignored
+// After this the turn is plainly a long task, so the bubble switches from the
+// static placeholder to the elapsed status and slows to the frozen-status
+// cadence — fewer frames than the old 3 s-for-120 s keepalive, not more.
+const LONG_TASK_STATUS_AFTER_MS = 30_000;
 const B2_PEER_FINAL_DEDUP_TTL_MS = 120_000;
 const WECOM_STREAM_MAX_CHARS = 3_500;
 const WECOM_STREAM_FINAL_MAX_CHARS = 2_000;
@@ -886,8 +889,7 @@ export function createBotWsReplyHandle(params: {
   const placeholderText = params.placeholderContent?.trim() || "⏳ 正在思考中...\n\n";
   let streamSettled = false;
   let placeholderInFlight = false;
-  let placeholderKeepalive: ReturnType<typeof setInterval> | undefined;
-  let placeholderTimeout: ReturnType<typeof setTimeout> | undefined;
+  let placeholderKeepalive: ReturnType<typeof setTimeout> | undefined;
   let previewFreezeTimeout: ReturnType<typeof setTimeout> | undefined;
   let previewStatusInterval: ReturnType<typeof setInterval> | undefined;
   let previewStatusInFlight = false;
@@ -940,12 +942,8 @@ export function createBotWsReplyHandle(params: {
 
   const stopPlaceholderKeepalive = () => {
     if (placeholderKeepalive) {
-      clearInterval(placeholderKeepalive);
+      clearTimeout(placeholderKeepalive);
       placeholderKeepalive = undefined;
-    }
-    if (placeholderTimeout) {
-      clearTimeout(placeholderTimeout);
-      placeholderTimeout = undefined;
     }
 
     // Remove from registry
@@ -997,9 +995,20 @@ export function createBotWsReplyHandle(params: {
   const sendPlaceholder = () => {
     if (runtimeRetired || !placeholderStarted || streamSettled || placeholderInFlight || isEvent)
       return;
+    // The preview lane owns the bubble once it has rendered anything; a late
+    // heartbeat must never overwrite real content with the clock.
+    if (lastPreviewText) {
+      return;
+    }
     placeholderInFlight = true;
+    const elapsedMs = Date.now() - handleStartedAt;
+    // A turn that produces nothing (all tool work, and OpenClaw's reasoning
+    // stream is off by default) has no other feedback: repeating one static
+    // line taught the user nothing, so show the clock instead.
+    const heartbeatText =
+      elapsedMs >= LONG_TASK_STATUS_AFTER_MS ? formatElapsedStatus(elapsedMs) : placeholderText;
     withHandleSendTimeout(
-      params.client.replyStream(params.frame, resolveStreamId(), placeholderText, false),
+      params.client.replyStream(params.frame, resolveStreamId(), heartbeatText, false),
       "stream placeholder",
       )
       .catch((error) => {
@@ -1022,8 +1031,12 @@ export function createBotWsReplyHandle(params: {
           }
           return;
         }
+        // The bubble is unrepaintable, but the turn is still running. Settling
+        // the whole handle here cancelled the deferred background push too, so
+        // a silent long task stayed silent; retire the lane and hand over.
         streamUpdateUnreliable = true;
-        settleStream();
+        stopPlaceholderKeepalive();
+        maybeSendPreviewExpiredNotice(true);
         params.onFail?.(error);
       })
       .finally(() => {
@@ -1118,6 +1131,14 @@ export function createBotWsReplyHandle(params: {
       if (key === finalDeliveryKey) {
         console.info(
           `[wecom-b3] final-skip already-delivered account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+        );
+      } else {
+        // A SECOND final with different content on one handle. The dedup is
+        // built for retries of the same answer, so this drops a distinct
+        // message; no WeCom case has been observed, and this line is what would
+        // prove one.
+        console.warn(
+          `[wecom-b3] final-skip second-distinct account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
         );
       }
       return false;
@@ -1374,12 +1395,11 @@ export function createBotWsReplyHandle(params: {
         obsoleteFinalRetry = true;
         finishPendingFinalRetry(true);
       },
-      // A newer activation owns this peer once an already-finished request
-      // leaves a retry behind. Preserve only an explicitly superseded,
-      // entirely invisible final: that result still belongs to the handoff.
-      shouldCancelForNewActivation: () =>
-        !supersededByNewInbound ||
-        (visibleReplyStarted && (finalPushProgress?.delivered ?? 0) > 0),
+      // A newer activation owning the peer is NOT a reason to destroy an answer
+      // the user never received — that is a silently dropped message. Cancel
+      // only once a chunk of THIS push is confirmed delivered, where re-pushing
+      // would duplicate what they already have.
+      shouldCancelForNewActivation: () => (finalPushProgress?.delivered ?? 0) > 0,
     });
     return true;
   };
@@ -2545,6 +2565,30 @@ export function createBotWsReplyHandle(params: {
   // the whole download. Claiming the peer (and retiring an older activation's
   // pending retry) stays in activate, which only runs once this inbound owns
   // the conversation.
+  // Self-rescheduling so the cadence can slow down as the turn ages. The only
+  // stop conditions are the ones that mean nobody is waiting on this bubble any
+  // more: settled, retired, a dead stream, or the hour-long watchdog.
+  const scheduleHeartbeat = (): void => {
+    if (streamSettled || runtimeRetired || streamUpdateUnreliable || lastPreviewText) {
+      return;
+    }
+    const elapsedMs = Date.now() - handleStartedAt;
+    if (elapsedMs >= PREVIEW_WATCHDOG_MAX_MS) {
+      return;
+    }
+    placeholderKeepalive = setTimeout(
+      () => {
+        placeholderKeepalive = undefined;
+        sendPlaceholder();
+        scheduleHeartbeat();
+      },
+      elapsedMs >= LONG_TASK_STATUS_AFTER_MS
+        ? BLOCK_PREVIEW_STATUS_UPDATE_MS
+        : PLACEHOLDER_KEEPALIVE_MS,
+    );
+    placeholderKeepalive.unref?.();
+  };
+
   const startPlaceholder = (): void => {
     if (placeholderStarted) {
       return;
@@ -2557,15 +2601,7 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     sendPlaceholder();
-    placeholderKeepalive = setInterval(() => {
-      sendPlaceholder();
-    }, PLACEHOLDER_KEEPALIVE_MS);
-
-    // Safety net: force stop keepalive after MAX_KEEPALIVE_MS
-    // in case the message is completely ignored by the core and never triggers deliver/fail
-    placeholderTimeout = setTimeout(() => {
-      stopPlaceholderKeepalive();
-    }, MAX_KEEPALIVE_MS);
+    scheduleHeartbeat();
 
     // Register keepalive
     let keepalives = activeKeepalivesByScope.get(replyPeerKey);
@@ -2687,13 +2723,6 @@ export function createBotWsReplyHandle(params: {
       }
 
       if (payload.isReasoning) {
-        // We reset the safety timeout if reasoning is actively streaming
-        if (placeholderTimeout && !isEvent) {
-          clearTimeout(placeholderTimeout);
-          placeholderTimeout = setTimeout(() => {
-            stopPlaceholderKeepalive();
-          }, MAX_KEEPALIVE_MS);
-        }
         const thinkingText = payload.text?.trim() || "";
         if (isEvent || supersededByNewInbound || streamSettled || !thinkingText) {
           return;
@@ -3117,12 +3146,16 @@ export function createBotWsReplyHandle(params: {
     },
     markExternalActivity: () => {
       notifyPeerActive();
-      stopPlaceholderKeepalive();
       clearPendingPreview();
       // Defer our own cadence by one interval so it does not pile onto the
       // message that just arrived — but never retire it: the turn is still
       // running, and this handle owns its only progress feedback.
       lastPreviewStatusAt = Date.now();
+      if (placeholderKeepalive) {
+        clearTimeout(placeholderKeepalive);
+        placeholderKeepalive = undefined;
+      }
+      scheduleHeartbeat();
       deferPreviewExpiredNotice();
     },
     supersedeByNewInbound: (meta) => {

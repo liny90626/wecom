@@ -312,6 +312,62 @@ describe("WeCom gateway simulation", () => {
     expect(finalPush).not.toContain("第三段进度");
   });
 
+  it("keeps a zero-output long task alive in the bubble and then on the push", async () => {
+    // The reported case: a tool-only turn. Reasoning defaults to "off" in
+    // OpenClaw (`reasoningMode ?? "off"`), so onReasoningStream never fires, and
+    // a turn that produces no assistant text never emits a block either — the
+    // plugin gets NO progress callback at all for ten minutes. Every feedback
+    // path was gated on content: the placeholder repeated one static line and
+    // died at 120 s, the frozen status needed a rendered preview, and the
+    // background notice was only ever armed by a FAILED preview send. So the
+    // user saw "正在思考..." and then, ten minutes later, a failure.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 6 * 60_000 });
+    const handle = startTurn(sim);
+    await tick(100);
+    expect(sim.streamBubble("req-sim")?.content).toContain("正在思考中");
+
+    // Still nothing from OpenClaw, but the user must not be staring at a static
+    // bubble: the elapsed time has to keep moving.
+    await tick(3 * 60_000);
+    const atThreeMinutes = sim.streamBubble("req-sim")?.content ?? "";
+    expect(atThreeMinutes).toContain("当前长任务用时");
+    expect(atThreeMinutes).toContain("正在专注任务中");
+
+    await tick(2 * 60_000);
+    expect(sim.streamBubble("req-sim")?.content).not.toBe(atThreeMinutes);
+
+    // Past the ~6-minute stream window the bubble is unrepaintable, so the
+    // deferred background push has to take over at the 9-minute gate.
+    await tick(5 * 60_000);
+    const pushes = sim.chat.filter((entry) => entry.kind === "push");
+    expect(pushes.length).toBeGreaterThanOrEqual(1);
+    expect(pushes[0]?.content).toContain("正在专注任务中");
+  });
+
+  it("keeps a silent long task's clock running after an external message", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(2 * 60_000);
+    const beforeExternal = sim.streamBubble("req-sim")?.content ?? "";
+    expect(beforeExternal).toContain("当前长任务用时");
+
+    handle.markExternalActivity?.();
+    await tick(2 * 60_000);
+    expect(sim.streamBubble("req-sim")?.content).not.toBe(beforeExternal);
+  });
+
+  it("never lets the heartbeat overwrite real progress", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(2 * 60_000);
+    await deliverAndTick(handle, { text: "真正的进度", isReasoning: true }, { kind: "block" }, 500);
+    // An external message reschedules the cadence; the bubble must stay on the
+    // progress the preview lane rendered.
+    handle.markExternalActivity?.();
+    await tick(2 * 60_000);
+    expect(sim.streamBubble("req-sim")?.content).toContain("真正的进度");
+  });
+
   it("keeps the background notice cadence after an external message", async () => {
     // Any active push on this peer (a spawned task's completion is the common
     // one) marks external activity. Retiring the whole notice cadence there

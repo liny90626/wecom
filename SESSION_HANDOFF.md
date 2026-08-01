@@ -1,15 +1,16 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-07-31（v2.5.110-149 已发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-08-01（v150 候选已完成，未发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 当前正式版本：`2.5.110-149`，发布标签 `released/2.5.110-149`，包 `yanhaidao-wecom-2.5.110-149.tgz`（214,854 bytes；139 文件；npm shasum `d624f7738cbc1a9da7c983c63439f1b90257a663`；SHA-256 `3c3aab4ade62369da4b29383c430dfac8c5147463becdea1fd79c642efc3ffce`）。开发分支 `fix/v149-inbound-merge-and-progress` 已合入 `main` 并推送 `fork`。
+- **未发布**：分支 `fix/v150-time-driven-long-task-feedback`，含三部分——根治「零产出长任务全程静默」（第 2d 节）、「漏消息」审计与修复（第 2e 节）、**合并上游 `YanHaidao/wecom` 并按表处置分歧点**（第 2f 节）。版本号推进到 **`2.7.260-1`**：基线跟上上游的 2.7.260，**基线变化时构建号从 1 重新开始**。
+- 已发布正式版本：`2.5.110-149`，发布标签 `released/2.5.110-149`，包 `yanhaidao-wecom-2.5.110-149.tgz`（214,854 bytes；139 文件；npm shasum `d624f7738cbc1a9da7c983c63439f1b90257a663`；SHA-256 `3c3aab4ade62369da4b29383c430dfac8c5147463becdea1fd79c642efc3ffce`）。开发分支 `fix/v149-inbound-merge-and-progress` 已合入 `main` 并推送 `fork`。
 - v149 修复「文件+文字互相丢一半」「长任务产出被后台提示丢弃」「一次主动推送永久熄灭长任务反馈」，见第 2c 节；v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
-- 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**，`peerDependencies` 仍为 `^2026.6.11`，**代码必须继续双版本兼容**（v147 用到的 `abortAgentHarnessRun` 已核实 6.11/7.1 均导出且同为同步 boolean 契约）。
+- 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**，`peerDependencies` 仍为 `^2026.6.11`（**上游已收窄到 `^2026.7.0`，我们刻意不跟**，见第 2f 节），**代码必须继续双版本兼容**（v147 用到的 `abortAgentHarnessRun` 已核实 6.11/7.1 均导出且同为同步 boolean 契约）。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
-- 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
-- 测试基线：44 文件 / **498 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
+- 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；从 `origin` **拉取/合并**是允许且必要的（见第 2f 节），禁止的只有推送；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
+- 测试基线：44 文件 / **502 测试全绿**；`npm run build`、`npx tsc --noEmit`、`npm run verify-dist`、B1/B2/B3 检查链（三项 READY）与 `git diff --check` 全部通过，全部在 OpenClaw 2026.7.1 上完成。
 - `reply.test.ts` 与 `gateway-sim.test.ts` 头部都有 `vi.setConfig({ testTimeout: 30_000 })`：这两套 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s。不要改回全局 timeout。
 - 涉及释放等待的 dispatcher 用例必须用 `vi.useFakeTimers()` 并在 `finally` 里 `vi.useRealTimers()`，否则污染后续用例（已发生过一次超时）。
 
@@ -70,6 +71,56 @@
 
 修复：改为**顺延一个间隔**（重置状态计时 + 按重复间隔重挂通知）。只有**已启动过**的循环才可顺延，外部活动永远不会为健康的流凭空挂通知；推送在途时 `schedulePreviewExpiredNotice` 自身 bail，其 `finally` 只补挂一次，因此不会重复挂载。
 
+## 2d. v150（候选）：零产出长任务为什么全程静默
+
+现网案例只有两个气泡：`正在思考...` 和 10m08s 后的失败文案。**从这两个气泡可以确定性推出**：（1）占位气泡 10 分钟没被改写过 ⇒ 没有任何一次预览成功送达；（2）9 分钟的后台通知**完全没出现** ⇒ 它从未被挂载——而它的挂载点只有「预览遇到死流 / 预览回执超时 / pending 预览超期」三处，**全都要求先发生过一次预览发送尝试**。结论：这一轮插件**根本没拿到任何可画的内容**，不是画了画不出去。跟 v147（丢回执）、v148（错误文案）、v149（外部活动）都不是同一条路径。
+
+**根因（源码级）**：OpenClaw 的 `reasoningMode` 默认 `"off"`（`selection-8ixiqbew.js`：`params.reasoningMode ?? "off"`），而 `streamReasoning = (streamReasoningInNonStreamModes === true ? reasoningMode !== "on" : reasoningMode === "stream") && ...`。插件没有设 `streamReasoningInNonStreamModes`，所以 **`onReasoningStream` 根本不会被调用**；纯工具型回合也不产生 assistant 文本，于是没有 block。插件订阅的三个来源（reasoning / tool-result（只留 fast） / block）在这种回合上**全部为空**。
+
+**为什么不是「再加一层保护」**：插件当时的三条反馈通道**全部以模型产出为前提**——占位保活重复同一句静态文本且 120 秒后停、冻结状态刷新要求已渲染过预览、后台通知要求先有一次**失败的**预览发送。真正的缺陷是「反馈依赖产出」这个前提本身。
+
+**修复：把心跳改成时间驱动，并删掉旧机制。**
+
+- 占位保活升级为回合心跳：超过 `LONG_TASK_STATUS_AFTER_MS`（30s）后渲染 `formatElapsedStatus(elapsed)` 而不是静态文本，节奏由 3s 放慢到冻结状态同款的 15s，上界改用既有的 1 小时看门狗。**删除** `MAX_KEEPALIVE_MS`(120s) 及只为延长它而存在的 reasoning 重置计时器。
+- 心跳在预览通道渲染出任何内容后立即让位（`lastPreviewText` 守卫），绝不覆盖真实进度。
+- 心跳撞上死流时**退休通道并交给后台推送**，不再 `settleStream()`——后者会连带取消那条推送，正是「静默到底」的最后一环。
+- 外部活动**顺延**心跳而不是杀掉它（与 v149 对后台通知的处理一致）。
+
+**帧数实测**：静默 10 分钟共 **33 帧**流式 + 2 条后台推送；旧行为是**前 2 分钟 40 帧、之后彻底静默**。所以这是**更少的流量 + 全程有反馈**。
+
+**失败本身（`LLM request timed out.`）不是插件问题**：OpenClaw 默认 run budget 是 48 小时（`DEFAULT_AGENT_TIMEOUT_SECONDS = 2880*60`），排除预算超时；`isTimeoutErrorMessage` 会把 `connection error / network error / fetch failed / socket hang up / ECONNRESET` 一并渲染成这句话。本例 **10m08s ≈ 608 秒**非常接近 600 秒边界，典型来源是模型网关前置代理的 `proxy_read_timeout`。且本轮没有任何 block 投递，插件对 OpenClaw 的 dispatcher **零背压**，不可能是插件造成。**要定案只需一条证据**：用插件的 `[wecom-reply] error-final`（含 elapsed/reqId）去对齐同一时刻 OpenClaw 网关的 `embedded run agent end … rawError=…`。
+
+## 2e. v150（候选）：「漏消息」审计——交付链上每一个丢弃点
+
+现网反馈「v149 仍会漏消息」，要求**所有 OpenClaw 侧过来的真实消息都不得遗漏**。对 `deliver` 全链路逐条枚举丢弃点后，分成三类：
+
+**A. 合法丢弃（无内容损失）**：`wecomExternalFinalDelivered`（外部已送达）· 空 block / 空 final · block 预览节流（正文已进 `accumulatedText`）· 同 key 的 final 去重（key 含 `reqId`，跨回合不会误杀）· event 回合不支持流式分片（正文仍进最终推送）· 推理与 fast 进度（设计上不作为可见正文）。
+
+**B. 需要接管才会发生（B3 语义，窄）**：`superseded-final-skip-error` · `superseded-final-skip-visible` · `superseded-final-stop-after-media` · `stream-remainder-skip-superseded`。注意：被接管必然伴随 abort，而 orchestrator 在 `abortSignal.aborted` 时就丢掉了 final，**所以 reply 侧这几条大多根本走不到**；且被中止的 run 通常返回 `SILENT_REPLY_TOKEN`，本就没有真实 final。
+
+**C. 真实丢失（已修）**：**`shouldCancelForNewActivation` 会因为「有新一代活跃了同一个 peer」而取消一条尚未送达的 final 重试**。判据是 `!supersededByNewInbound`——对**任何一个正常结束的回合都为真**。于是：回合 A 结束 → final 推送失败（用户什么都没收到）→ 重试排在 20 秒后 → 用户在这 20 秒内发了下一条 → **A 的完整答案被永久销毁**。**不需要接管、不需要 abort**，这就是它躲过前几轮的原因。
+
+修复：只在**本次推送已有分片确认送达**（`finalPushProgress.delivered > 0`，重推会重复）时才取消。这同时把行为与禁改 2 已经写明的取舍对齐了——有界重复可以接受，静默丢失不可以。`runFinalPushRetry` 在执行点重算接管抑制的逻辑不变（禁改 5）。
+
+**D. 已识别但未证实**：同一个 handle 上出现**第二条内容不同的 final** 会被 `markFinalDelivered` 静默丢弃（去重是为同一答案的重试设计的）。企微上没观察到实例，已加 `[wecom-b3] final-skip second-distinct` 警告日志，出现即可证实。
+
+## 2f. 上游同步（v150）：与 `YanHaidao/wecom` 的分歧点
+
+上游在 2026-07-26 推了 4 个提交，**全部只动 `package.json`**（无代码变更），已用 `git merge origin/main` 合入主线。冲突逐条处置如下。**下次再合上游时照这张表处理，不要机械接受上游值。**
+
+| 字段 | 上游 | 合并前的我们 | 处置 | 原因 |
+| --- | --- | --- | --- | --- |
+| `version` | `2.7.260` | `2.5.110-149` | **`2.7.260-1`** | 基线跟上游走；基线一变，构建号从 1 重新计数 |
+| `peerDependencies.openclaw` | `^2026.7.0` | `^2026.6.11` | **保留我们的** | `^2026.6.11` = `>=2026.6.11 <2027.0.0`，已覆盖 2026.7.x，是上游区间的**超集**；换成上游值会把 6.11 用户挡在门外，违背双版本兼容要求 |
+| `devDependencies.openclaw` | `^2026.7.0` | `^2026.7.1` | **保留我们的** | 自测必须跑在与生产一致的 2026.7.1 上，下限更高才有约束力 |
+| `devDependencies.@types/node` | `^22.22.0` | `^25.2.0` | **`^22.20.1`**（取上游意图、改正其值） | 见下方专条 |
+| `dependencies` 三项 | `^1.0.0` / `5.3.4` / `^7.20.0` | `1.0.7` / `5.10.1` / `7.28.0` | **保留我们的精确钉版** | `reply.ts` 的整套传输模型是对 SDK **1.0.7** 源码的建模（串行回执槽、5s 回执超时、`replyStreamNonBlocking` 的 `"skipped"`）；插入号会让实际安装版本漂移，模型随之失效 |
+| `scripts.prepack` | 无 `rm dist` | 先删 `dist` | **保留我们的** | 防止陈旧 `dist` 混进发布包 |
+
+`dependencies` 与 `prepack` 两项上游本轮没动，三方合并自动保留了我们的值——但它们同样是刻意选择，未来上游若改到同一行会冲突，按上表处置。
+
+**`@types/node` 单独说明**：上游写的 `^22.22.0` **在 registry 上并不存在**——22 线最高只到 `22.20.1`，`npm view @types/node@^22.22.0` 返回 404，任何干净的 `npm install` 都会失败（这也是全量安装卡死的原因）。但上游的**意图**是对的：类型不应跑在运行时前面。`^25` 的类型领先于本机 Node 24，是唯一"编译通过、运行时才崩"的危险方向；把类型下限钉在最老的可能运行时上，误用新 API 会在编译期就被抓住。因此取其意图、改其值为 `^22.20.1`，并实测 `tsc --noEmit` 干净。
+
 ## 3. OpenClaw / 企微 SDK 核心机制速查（源码级已验证）
 
 - **企微 SDK 1.0.7 投递层**（`node_modules/@wecom/aibot-node-sdk/dist/index.cjs.js`）：
@@ -122,7 +173,10 @@
 22. **pending 记录必须保留到 dispatch 结算**（v149）：删早了，「先打字后附文件」就会只带文件进 OpenClaw。但**已派发的前驱不得在注册时 supersede**；**附件必须永远随行**（输入），**前驱正文**只在用户尚未看到其可见输出时随行（否则重跑已在屏幕上的回复）。
 23. **后台长任务推送推进已投递书签必须在推送成功之后**（v149）：提前推进会让 final 的续文跳过这段正文＝静默丢失。
 24. **`markExternalActivity` 只能顺延、不能退休长任务反馈**（v149）：`cancelPreviewExpiredNotice()` 是永久闩锁，放在这里会让一次主动推送（子任务完成通知）永久熄灭该回合的全部进度反馈。顺延时只允许对**已启动过**的循环操作。
-25. **不要移除 `sendPreviewUpdate` 排队分支里的 `stopPlaceholderKeepalive()`**：`req_id` 只有一个串行回执槽，占位保活会抢走排队进度帧的槽位，把它推向宽限截止（＝通道退休）。
+25. **长任务反馈必须时间驱动，不得回退成内容驱动**（v150）：OpenClaw 默认不流式推理，纯工具回合零产出；把心跳改回静态占位、恢复 120 秒上限、或让死流分支重新 `settleStream()`，都会立刻复发「全程静默」。心跳必须在 `lastPreviewText` 出现后让位。
+26. **不得因为「新一代活跃了同一 peer」就取消未送达的 final 重试**（v150）：判据必须是「本次推送已有分片确认送达」。改回 `!supersededByNewInbound` 会让任何正常结束的回合在 20 秒重试窗口内被下一条消息销毁答案。
+27. **不要移除 `sendPreviewUpdate` 排队分支里的 `stopPlaceholderKeepalive()`**：`req_id` 只有一个串行回执槽，占位保活会抢走排队进度帧的槽位，把它推向宽限截止（＝通道退休）。
+28. **合并上游时不得机械接受 `package.json`**（v150）：`peerDependencies` 不得跟随上游收窄到 `^2026.7.0`（会挡掉 6.11 用户）；三个运行时依赖必须保持精确钉版（`reply.ts` 建模的是 SDK **1.0.7**）；`prepack` 的清 `dist` 步骤不得丢。逐条依据见第 2f 节的对照表。
 
 ## 6. 已知边界与待办观察
 
@@ -142,4 +196,6 @@
 
 ## 7. 版本脉络备忘
 
-`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增 `error-final` 诊断日志、长任务提示词改为请勿打断 → **v149（当前版本）** 文件/文字双向跨回合并入、长任务产出随后台提示一起送达、外部活动不再熄灭长任务反馈。
+`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增 `error-final` 诊断日志、长任务提示词改为请勿打断 → `v149` 文件/文字双向跨回合并入、长任务产出随后台提示一起送达、外部活动不再熄灭长任务反馈 → **v150（候选，未发布）** 长任务反馈改为时间驱动、零产出回合不再全程静默；未送达的 final 重试不再被下一条消息销毁；合并上游并把版本基线推进到 2.7.260。
+
+**版本号规则**：`<上游基线>-<构建号>`。构建号在**同一基线内**单调递增；**上游基线一变就从 1 重新计数**——`2.5.110` 基线走到 `2.5.110-149`，合并上游 `2.7.260` 后重新从 `2.7.260-1` 开始。tag 为 `released/<完整版本号>`，简报为 `changelog/v<完整版本号>.md`。

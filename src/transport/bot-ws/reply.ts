@@ -13,17 +13,13 @@ import { getBotWsPushHandle, getWecomRuntime } from "../../runtime.js";
 import { isRetryableReplySessionAdmissionError } from "../../shared/reply-errors.js";
 import type { ReplyHandle, ReplyPayload } from "../../types/index.js";
 import {
-  chunkWeComMarkdownV2,
-  previewWeComMarkdownV2,
+  chunkFormattedWeComMarkdownV2,
   toWeComMarkdownV2,
 } from "../../wecom_msg_adapter/markdown_adapter.js";
 import { uploadAndSendBotWsMedia } from "./media.js";
 
-const PLACEHOLDER_KEEPALIVE_MS = 3000;
-// After this the turn is plainly a long task, so the bubble switches from the
-// static placeholder to the elapsed status and slows to the frozen-status
-// cadence — fewer frames than the old 3 s-for-120 s keepalive, not more.
-const LONG_TASK_STATUS_AFTER_MS = 30_000;
+const PLACEHOLDER_RETRY_MS = 3000;
+const LONG_TASK_STATUS_AFTER_MS = 8 * 60_000;
 const B2_PEER_FINAL_DEDUP_TTL_MS = 120_000;
 const WECOM_STREAM_MAX_CHARS = 3_500;
 const WECOM_STREAM_FINAL_MAX_CHARS = 2_000;
@@ -31,24 +27,24 @@ const WECOM_STREAM_MAX_BYTES = 12_000;
 const BLOCK_PREVIEW_MAX_MS = 300_000;
 const BLOCK_PREVIEW_MAX_CHARS = 3_000;
 const BLOCK_PREVIEW_MIN_UPDATE_MS = 1_500;
-const BLOCK_PREVIEW_STATUS_UPDATE_MS = 60_000;
+const BLOCK_PREVIEW_STATUS_UPDATE_MS = 15_000;
 const THINKING_PREVIEW_MIN_UPDATE_MS = 3_000;
 const WECOM_REPLY_SEND_TIMEOUT_MS = 8_000;
 const WECOM_PENDING_ACK_GRACE_MS = 5_500;
 const WECOM_PENDING_ACK_POLL_MS = 100;
 const THINKING_BLOCK_MAX_CHARS = 3_000;
 const THINKING_BLOCK_MAX_BYTES = 8_000;
-/** Bytes `<think></think>` plus its trailing newline costs around the content. */
+/** `<think></think>` plus its trailing newline costs around the content. */
+const THINK_BLOCK_WRAPPER_CHARS = 16;
 const THINK_BLOCK_WRAPPER_BYTES = 16;
 const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const STRUCTURED_TAIL_MIN_DUPLICATE_LINES = 4;
 const FINAL_COMPLETION_MARKER = "（回复完毕）";
+const LONG_TASK_STATUS_PREFIX = "【长任务处理中，请勿打断，已用时";
 const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
-// The background-processing notice is only worth a standalone message for
-// genuinely long tasks: hold it until the task has been running 9 minutes.
-const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = 9 * 60_000;
-const PREVIEW_EXPIRED_NOTICE_REPEAT_MS = 60_000;
+const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = LONG_TASK_STATUS_AFTER_MS;
+const PREVIEW_EXPIRED_NOTICE_REPEAT_MS = BLOCK_PREVIEW_STATUS_UPDATE_MS;
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
 const REPLY_MODEL_TIMEOUT_NOTICE_TEXT = "⚠️ 模型响应超时，本次任务未完成，请稍后重试。";
 const REPLY_PREPARE_TIMEOUT_NOTICE_TEXT =
@@ -65,27 +61,106 @@ const B3_SUPERSEDED_UNMERGED_NOTICE_TEXT =
   "已收到新消息，本条尚未开始处理，如仍需要请重新发送。";
 const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
 
-function appendPreviewSuffixWithinLimits(params: {
+type PreviewSuffixParams = {
   prefix: string;
   suffix: string;
   separator?: string;
   maxChars: number;
   maxBytes: number;
-}): string {
-  const suffix = previewWeComMarkdownV2(
-    params.suffix,
-    params.maxChars,
-    params.maxBytes,
-  ).trim();
-  const separator = params.prefix.trim() ? (params.separator ?? "\n\n") : "";
-  const availableChars = params.maxChars - separator.length - suffix.length;
-  const availableBytes =
+};
+
+type RenderedPreviewSource = {
+  text: string;
+  sourceText: string;
+};
+
+function fitsPreviewWireBudget(text: string, maxChars: number, maxBytes: number): boolean {
+  return text.length <= maxChars && Buffer.byteLength(text, "utf8") <= maxBytes;
+}
+
+function renderPreviewSourcePrefixWithinLimits(params: {
+  sourceText: string;
+  maxChars: number;
+  maxBytes: number;
+}): RenderedPreviewSource {
+  const sourceText = params.sourceText.trimEnd();
+  if (sourceText.length === 0 || params.maxChars <= 0 || params.maxBytes <= 0) {
+    return { text: "", sourceText: "" };
+  }
+
+  const render = (sourcePrefix: string): string =>
+    escapeLiteralThinkTags(toWeComMarkdownV2(sourcePrefix, null).trimEnd());
+  const fullText = render(sourceText);
+  if (fitsPreviewWireBudget(fullText, params.maxChars, params.maxBytes)) {
+    return { text: fullText, sourceText };
+  }
+
+  // Find a source prefix that fits after Markdown normalization and literal
+  // thinking-tag escaping. The returned source prefix is the same input used
+  // to render the visible text, so delivery bookkeeping cannot over-claim.
+  const maxSourceChars = Math.min(sourceText.length, params.maxChars);
+  const boundaries = [0];
+  for (let offset = 0; offset < maxSourceChars; ) {
+    const codePoint = sourceText.codePointAt(offset) ?? 0;
+    offset += codePoint > 0xffff ? 2 : 1;
+    boundaries.push(offset);
+  }
+
+  let low = 0;
+  let high = boundaries.length - 1;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const candidate = render(sourceText.slice(0, boundaries[middle]));
+    if (fitsPreviewWireBudget(candidate, params.maxChars, params.maxBytes)) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  let visibleSourceText = sourceText.slice(0, boundaries[low]).trimEnd();
+  let visibleText = render(visibleSourceText);
+  while (
+    visibleSourceText &&
+    !fitsPreviewWireBudget(visibleText, params.maxChars, params.maxBytes)
+  ) {
+    visibleSourceText = visibleSourceText.slice(0, -1).trimEnd();
+    visibleText = render(visibleSourceText);
+  }
+  return { text: visibleText, sourceText: visibleText ? visibleSourceText : "" };
+}
+
+function composePreviewSuffixWithinLimits(params: PreviewSuffixParams): {
+  text: string;
+  visiblePrefix: string;
+  prefixMaxChars: number;
+  prefixMaxBytes: number;
+} {
+  const suffixPreview = renderPreviewSourcePrefixWithinLimits({
+    sourceText: params.suffix,
+    maxChars: params.maxChars,
+    maxBytes: params.maxBytes,
+  });
+  const suffix = suffixPreview.text;
+  const separator = params.prefix.trim() && suffix ? (params.separator ?? "\n\n") : "";
+  const prefixMaxChars = params.maxChars - separator.length - suffix.length;
+  const prefixMaxBytes =
     params.maxBytes - Buffer.byteLength(`${separator}${suffix}`, "utf8");
-  const prefix =
-    availableChars > 0 && availableBytes > 0
-      ? previewWeComMarkdownV2(params.prefix, availableChars, availableBytes).trimEnd()
-      : "";
-  return prefix ? `${prefix}${separator}${suffix}` : suffix;
+  const prefixPreview = renderPreviewSourcePrefixWithinLimits({
+    sourceText: params.prefix,
+    maxChars: prefixMaxChars,
+    maxBytes: prefixMaxBytes,
+  });
+  return {
+    text: prefixPreview.text ? `${prefixPreview.text}${separator}${suffix}` : suffix,
+    visiblePrefix: prefixPreview.sourceText,
+    prefixMaxChars,
+    prefixMaxBytes,
+  };
+}
+
+function appendPreviewSuffixWithinLimits(params: PreviewSuffixParams): string {
+  return composePreviewSuffixWithinLimits(params).text;
 }
 
 function appendFailureNoticeToProgress(progress: string, notice: string): string {
@@ -655,31 +730,51 @@ function formatElapsedDuration(elapsedMs: number): string {
 }
 
 function formatElapsedStatus(elapsedMs: number): string {
-  return `【任务处理中，已用时 ${formatElapsedDuration(elapsedMs)}】`;
+  return `${LONG_TASK_STATUS_PREFIX}${formatElapsedDuration(elapsedMs)}】`;
 }
 
 function appendFinalCompletionMarker(text: string): string {
   const trimmed = text.trimEnd();
-  if (!trimmed || trimmed.endsWith(FINAL_COMPLETION_MARKER)) {
+  if (!trimmed) {
+    return FINAL_COMPLETION_MARKER;
+  }
+  if (trimmed.endsWith(FINAL_COMPLETION_MARKER)) {
     return trimmed;
   }
   return `${trimmed}\n\n${FINAL_COMPLETION_MARKER}`;
-}
-
-function withOptionalCompletionMarker(chunks: string[], enabled: boolean): string[] {
-  if (!enabled || chunks.length === 0) {
-    return chunks;
-  }
-  const out = [...chunks];
-  const lastIndex = out.length - 1;
-  out[lastIndex] = appendFinalCompletionMarker(out[lastIndex] ?? "");
-  return out;
 }
 
 function escapeLiteralThinkTags(text: string): string {
   return text.replace(THINK_TAG_RE, (tag) =>
     tag.startsWith("</") ? "&lt;/think&gt;" : "&lt;think&gt;",
   );
+}
+
+function chunkWeComMarkdownWireV2(
+  markdown: string,
+  maxChars: number,
+  maxBytes: number,
+  appendCompletionMarker = false,
+): string[] {
+  const wireText = escapeLiteralThinkTags(toWeComMarkdownV2(markdown, null));
+  if (!appendCompletionMarker) {
+    return chunkFormattedWeComMarkdownV2(wireText, maxChars, maxBytes);
+  }
+
+  const markerSuffix = `\n\n${FINAL_COMPLETION_MARKER}`;
+  const trimmedWireText = wireText.trimEnd();
+  const bodyWireText = trimmedWireText.endsWith(FINAL_COMPLETION_MARKER)
+    ? trimmedWireText.slice(0, -FINAL_COMPLETION_MARKER.length).trimEnd()
+    : wireText;
+  const chunks = chunkFormattedWeComMarkdownV2(
+    bodyWireText,
+    maxChars - markerSuffix.length,
+    maxBytes - Buffer.byteLength(markerSuffix, "utf8"),
+  );
+  const out = [...chunks];
+  const lastIndex = out.length - 1;
+  out[lastIndex] = appendFinalCompletionMarker(out[lastIndex] ?? "");
+  return out;
 }
 
 function collectMarkdownCodeRanges(text: string): Array<{ start: number; end: number }> {
@@ -808,17 +903,31 @@ function trimToUtf8Bytes(value: string, maxBytes: number): string {
   return out;
 }
 
-function renderThinkContent(text: string, maxBytes = THINKING_BLOCK_MAX_BYTES): string {
+function renderThinkContent(
+  text: string,
+  maxBytes = THINKING_BLOCK_MAX_BYTES,
+  maxChars = THINKING_BLOCK_MAX_CHARS,
+): string {
   return stripDanglingThinkMarkup(
     trimToUtf8Bytes(
-      escapeThinkBlockText(text || "progress").slice(0, THINKING_BLOCK_MAX_CHARS),
+      escapeThinkBlockText(text || "progress").slice(
+        0,
+        Math.min(THINKING_BLOCK_MAX_CHARS, Math.max(0, maxChars)),
+      ),
       Math.min(THINKING_BLOCK_MAX_BYTES, maxBytes),
     ).trim(),
   );
 }
 
-function renderInlineThinkBlock(text: string, maxBytes = THINKING_BLOCK_MAX_BYTES): string {
-  const escaped = renderThinkContent(text, maxBytes);
+function renderInlineThinkBlock(
+  text: string,
+  maxBytes = THINKING_BLOCK_MAX_BYTES,
+  maxChars = THINKING_BLOCK_MAX_CHARS,
+): string {
+  if (!text.trim()) {
+    return "";
+  }
+  const escaped = renderThinkContent(text, maxBytes, maxChars);
   return escaped ? `<think>${escaped}</think>` : "";
 }
 
@@ -835,15 +944,6 @@ function resolveThinkingAwareBodyLimits(thinkingText: string): {
     maxChars: Math.max(100, WECOM_STREAM_MAX_CHARS - prefix.length),
     maxBytes: Math.max(512, WECOM_STREAM_MAX_BYTES - Buffer.byteLength(prefix, "utf8")),
   };
-}
-
-function composeProgressStreamTextWithThinking(params: {
-  thinkingText: string;
-  bodyText: string;
-}): string {
-  const safeBodyText = escapeLiteralThinkTags(params.bodyText);
-  const thinkingBlock = renderInlineThinkBlock(params.thinkingText);
-  return thinkingBlock ? `${thinkingBlock}\n${safeBodyText}` : safeBodyText;
 }
 
 // Global registry to track active keepalives by account/conversation scope.
@@ -889,10 +989,14 @@ export function createBotWsReplyHandle(params: {
   let previewStatusInterval: ReturnType<typeof setInterval> | undefined;
   let previewStatusInFlight = false;
   let previewInFlightCount = 0;
+  type PreviewDeliveryMetadata = {
+    bodySourceText?: string;
+    showsVisibleBody?: boolean;
+  };
   type PendingPreview = {
     text: string;
-    bodySourceText?: string;
-    progressOnly?: boolean;
+    bodySourceText?: PreviewDeliveryMetadata["bodySourceText"];
+    showsVisibleBody?: PreviewDeliveryMetadata["showsVisibleBody"];
     deadline: number;
     retryCount: number;
   };
@@ -935,11 +1039,15 @@ export function createBotWsReplyHandle(params: {
     timeoutMs?: number,
   ): Promise<T> => withReplySendTimeout(promise, operation, timeoutMs, sendLogContext);
 
-  const stopPlaceholderKeepalive = () => {
+  const pausePlaceholderHeartbeat = () => {
     if (placeholderKeepalive) {
       clearTimeout(placeholderKeepalive);
       placeholderKeepalive = undefined;
     }
+  };
+
+  const stopPlaceholderKeepalive = () => {
+    pausePlaceholderHeartbeat();
 
     // Remove from registry
     const keepalives = activeKeepalivesByScope.get(replyPeerKey);
@@ -990,13 +1098,23 @@ export function createBotWsReplyHandle(params: {
   const sendPlaceholder = () => {
     if (runtimeRetired || !placeholderStarted || streamSettled || placeholderInFlight || isEvent)
       return;
-    // The preview lane owns the bubble once it has rendered anything; a late
-    // heartbeat must never overwrite real content with the clock.
-    if (lastPreviewText) {
+    const elapsedMs = Date.now() - handleStartedAt;
+    // Before the long-task gate, real process text owns the bubble. Once the
+    // gate is reached, reasoning/preamble-only turns still need the same timed
+    // status; body previews use their dedicated frozen-status lane.
+    if (lastPreviewText && (elapsedMs < LONG_TASK_STATUS_AFTER_MS || previewFrozen)) {
+      return;
+    }
+    if (
+      streamId !== undefined &&
+      (previewInFlightCount > 0 ||
+        pendingPreviewFlushInFlight ||
+        Boolean(pendingPreview) ||
+        hasPendingReplyAck(params.client, params.frame))
+    ) {
       return;
     }
     placeholderInFlight = true;
-    const elapsedMs = Date.now() - handleStartedAt;
     // A turn that produces nothing (all tool work, and OpenClaw's reasoning
     // stream is off by default) has no other feedback: repeating one static
     // line taught the user nothing, so show the clock instead.
@@ -1011,6 +1129,13 @@ export function createBotWsReplyHandle(params: {
           console.warn(
             `[wecom-preview] placeholder-timeout account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
           );
+          if (Date.now() - handleStartedAt >= LONG_TASK_STATUS_AFTER_MS) {
+            streamAckUnreliable = true;
+            stopPlaceholderKeepalive();
+            maybeSendPreviewExpiredNotice(true);
+            return;
+          }
+          scheduleHeartbeat(PLACEHOLDER_RETRY_MS);
           return;
         }
         if (!isDeadStreamError(error)) {
@@ -1024,6 +1149,12 @@ export function createBotWsReplyHandle(params: {
             streamAckUnreliable = true;
             params.onFail?.(error);
           }
+          if (Date.now() - handleStartedAt >= LONG_TASK_STATUS_AFTER_MS) {
+            stopPlaceholderKeepalive();
+            maybeSendPreviewExpiredNotice(true);
+            return;
+          }
+          scheduleHeartbeat(PLACEHOLDER_RETRY_MS);
           return;
         }
         // The bubble is unrepaintable, but the turn is still running. Settling
@@ -1100,6 +1231,7 @@ export function createBotWsReplyHandle(params: {
   let lastDeliveredBodySourceText = "";
   let lastPreviewUpdateAt = 0;
   let lastPreviewStatusAt = 0;
+  let longTaskStatusStarted = false;
   let previewExpiredNoticeInFlight = false;
   let previewExpiredNoticeCancelled = false;
   let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1270,12 +1402,10 @@ export function createBotWsReplyHandle(params: {
       }
     };
     throwIfObsolete();
-    const markdownChunks = withOptionalCompletionMarker(
-      chunkWeComMarkdownV2(
-        textToSend,
-        options.maxChars ?? WECOM_STREAM_MAX_CHARS,
-        options.maxBytes ?? WECOM_STREAM_MAX_BYTES,
-      ).map(escapeLiteralThinkTags),
+    const markdownChunks = chunkWeComMarkdownWireV2(
+      textToSend,
+      options.maxChars ?? WECOM_STREAM_MAX_CHARS,
+      options.maxBytes ?? WECOM_STREAM_MAX_BYTES,
       options.appendCompletionMarker === true,
     );
     const progress = options.progress;
@@ -1556,9 +1686,6 @@ export function createBotWsReplyHandle(params: {
   // The elapsed value is snapshotted on first use: this text IS the retry
   // identity, and a drifting timestamp would reset the tracked chunk progress
   // and re-push chunks the user already received.
-  // The elapsed value is snapshotted on first use: this text IS the retry
-  // identity, and a drifting timestamp would reset the tracked chunk progress
-  // and re-push chunks the user already received.
   let failureContextElapsedMs: number | undefined;
   const withFailureContext = (errorText: string): string => {
     failureContextElapsedMs ??= Date.now() - handleStartedAt;
@@ -1600,14 +1727,20 @@ export function createBotWsReplyHandle(params: {
   // room that frame has left. The answer keeps the full 12 000-byte budget; the
   // reasoning shrinks, or drops out entirely, if there is nothing spare.
   const prependThinkingWithinFrameBudget = (bodyText: string): string => {
+    const availableChars =
+      WECOM_STREAM_FINAL_MAX_CHARS - bodyText.length - THINK_BLOCK_WRAPPER_CHARS;
     const availableBytes =
       WECOM_STREAM_MAX_BYTES -
       Buffer.byteLength(bodyText, "utf8") -
       THINK_BLOCK_WRAPPER_BYTES;
-    if (availableBytes <= 0) {
+    if (availableChars <= 0 || availableBytes <= 0) {
       return bodyText;
     }
-    const thinkingBlock = renderInlineThinkBlock(accumulatedThinkingText, availableBytes);
+    const thinkingBlock = renderInlineThinkBlock(
+      accumulatedThinkingText,
+      availableBytes,
+      availableChars,
+    );
     return thinkingBlock ? `${thinkingBlock}\n${bodyText}` : bodyText;
   };
 
@@ -1620,12 +1753,10 @@ export function createBotWsReplyHandle(params: {
       isError: boolean;
     },
   ): Promise<boolean | "retry-scheduled"> => {
-    const markdownChunks = withOptionalCompletionMarker(
-      chunkWeComMarkdownV2(
-        finalText,
-        WECOM_STREAM_FINAL_MAX_CHARS,
-        WECOM_STREAM_MAX_BYTES,
-      ).map(escapeLiteralThinkTags),
+    const markdownChunks = chunkWeComMarkdownWireV2(
+      finalText,
+      WECOM_STREAM_FINAL_MAX_CHARS,
+      WECOM_STREAM_MAX_BYTES,
       options.appendCompletionMarker,
     );
     const finalStreamId = resolveStreamId();
@@ -1867,78 +1998,63 @@ export function createBotWsReplyHandle(params: {
     }
   };
 
-  const renderPreviewText = (text: string, now = Date.now()): string => {
-    if (!text) {
-      return "";
-    }
+  const prependThinkingToPreviewWire = (bodyText: string): string => {
+    const thinkingBlock = renderInlineThinkBlock(accumulatedThinkingText);
+    return thinkingBlock ? `${thinkingBlock}\n${bodyText}` : bodyText;
+  };
+
+  const renderPreviewFrame = (
+    sourceText: string,
+    now = Date.now(),
+  ): { text: string; bodySourceText?: string } => {
     const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
     const elapsedMs = now - handleStartedAt;
-    if (!previewFrozen && (elapsedMs >= BLOCK_PREVIEW_MAX_MS || text.length >= BLOCK_PREVIEW_MAX_CHARS)) {
+    if (
+      sourceText &&
+      !previewFrozen &&
+      (elapsedMs >= BLOCK_PREVIEW_MAX_MS || sourceText.length >= BLOCK_PREVIEW_MAX_CHARS)
+    ) {
       previewFrozen = true;
-      previewFrozenSourceText = text.slice(0, BLOCK_PREVIEW_MAX_CHARS);
-      previewFrozenText = previewWeComMarkdownV2(
-        previewFrozenSourceText,
-        thinkingLimits.maxChars,
-        thinkingLimits.maxBytes,
-      );
+      previewFrozenSourceText = sourceText.slice(0, BLOCK_PREVIEW_MAX_CHARS);
       // Self-healing: start the status refresh interval at freeze time
       // instead of waiting for the first frozen preview send to succeed —
       // a skipped/failed first send would otherwise leave the counter dead.
       startPreviewStatusInterval();
     }
+
+    const sourceLimit = previewFrozen
+      ? (previewFrozenSourceText || sourceText.slice(0, BLOCK_PREVIEW_MAX_CHARS))
+      : sourceText;
+    let bodyPreview: RenderedPreviewSource;
     if (previewFrozen) {
-      const frozen =
-        previewFrozenText ||
-        previewWeComMarkdownV2(
-          text.slice(0, BLOCK_PREVIEW_MAX_CHARS),
-          thinkingLimits.maxChars,
-          thinkingLimits.maxBytes,
-        );
-      return appendPreviewSuffixWithinLimits({
-        prefix: frozen,
-        suffix: formatElapsedStatus(elapsedMs),
+      if (elapsedMs >= LONG_TASK_STATUS_AFTER_MS) {
+        const composed = composePreviewSuffixWithinLimits({
+          prefix: sourceLimit,
+          suffix: formatElapsedStatus(elapsedMs),
+          maxChars: thinkingLimits.maxChars,
+          maxBytes: thinkingLimits.maxBytes,
+        });
+        bodyPreview = { text: composed.text, sourceText: composed.visiblePrefix };
+      } else {
+        bodyPreview = renderPreviewSourcePrefixWithinLimits({
+          sourceText: sourceLimit,
+          maxChars: thinkingLimits.maxChars,
+          maxBytes: thinkingLimits.maxBytes,
+        });
+      }
+      previewFrozenText ||= bodyPreview.text;
+    } else {
+      bodyPreview = renderPreviewSourcePrefixWithinLimits({
+        sourceText: sourceLimit,
         maxChars: thinkingLimits.maxChars,
         maxBytes: thinkingLimits.maxBytes,
       });
     }
-    return previewWeComMarkdownV2(text, thinkingLimits.maxChars, thinkingLimits.maxBytes);
-  };
 
-  const resolveVisibleBodySourceText = (sourceText: string, now = Date.now()): string => {
-    if (!sourceText) {
-      return "";
-    }
-    const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
-    const statusText = previewFrozen ? formatElapsedStatus(now - handleStartedAt) : "";
-    const bodyLimits = statusText
-      ? {
-          maxChars: Math.max(100, thinkingLimits.maxChars - statusText.length - 2),
-          maxBytes: Math.max(
-            512,
-            thinkingLimits.maxBytes - Buffer.byteLength(`\n\n${statusText}`, "utf8"),
-          ),
-        }
-      : thinkingLimits;
-    const sourceLimit = previewFrozen
-      ? (previewFrozenSourceText || sourceText.slice(0, BLOCK_PREVIEW_MAX_CHARS))
-      : sourceText;
-    const visibleBodyText = previewWeComMarkdownV2(
-      sourceLimit,
-      bodyLimits.maxChars,
-      bodyLimits.maxBytes,
-    );
-    if (!visibleBodyText) {
-      return "";
-    }
-    if (sourceLimit.startsWith(visibleBodyText)) {
-      return visibleBodyText;
-    }
-    const visibleChunks = chunkWeComMarkdownV2(
-      sourceLimit,
-      bodyLimits.maxChars,
-      bodyLimits.maxBytes,
-    );
-    return visibleChunks.length <= 1 && visibleChunks[0] === visibleBodyText ? sourceLimit : "";
+    return {
+      text: prependThinkingToPreviewWire(bodyPreview.text),
+      bodySourceText: sourceText ? bodyPreview.sourceText : undefined,
+    };
   };
 
   const stopPreviewExpiredNoticeTimer = (): void => {
@@ -1948,9 +2064,15 @@ export function createBotWsReplyHandle(params: {
     }
   };
 
+  const disarmPreviewExpiredNotice = (): void => {
+    stopPreviewExpiredNoticeTimer();
+    previewExpiredNoticeStarted = false;
+    previewExpiredNoticeAllowUnfrozen = false;
+  };
+
   const cancelPreviewExpiredNotice = (): void => {
     previewExpiredNoticeCancelled = true;
-    stopPreviewExpiredNoticeTimer();
+    disarmPreviewExpiredNotice();
   };
 
   // An external message just reached this peer, so push the recurring notice
@@ -1972,7 +2094,7 @@ export function createBotWsReplyHandle(params: {
   // errcode 846608 once the WeCom stream window closes at ~6 min). Without
   // it the bubble goes silent forever while the task is still running. The
   // first push is held until the task has been processing for at least
-  // PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS, then repeats once per minute until
+  // PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS, then repeats on the shared status cadence until
   // final settlement or supersede. Recursive timeouts avoid overlapping
   // sends when a push itself is slow.
   const schedulePreviewExpiredNotice = (delayMs: number, allowUnfrozen: boolean): void => {
@@ -2010,6 +2132,8 @@ export function createBotWsReplyHandle(params: {
     ) {
       return;
     }
+    previewExpiredNoticeStarted = true;
+    previewExpiredNoticeAllowUnfrozen = allowUnfrozen;
     const taskElapsedMs = Date.now() - handleStartedAt;
     if (taskElapsedMs < PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS) {
       if (!previewExpiredNoticeTimer) {
@@ -2052,14 +2176,16 @@ export function createBotWsReplyHandle(params: {
       })
       .finally(() => {
         previewExpiredNoticeInFlight = false;
-        schedulePreviewExpiredNotice(PREVIEW_EXPIRED_NOTICE_REPEAT_MS, allowUnfrozen);
+        if (previewExpiredNoticeStarted) {
+          schedulePreviewExpiredNotice(PREVIEW_EXPIRED_NOTICE_REPEAT_MS, allowUnfrozen);
+        }
       });
   };
 
   const recordDeliveredBodySource = (
-    options?: { bodySourceText?: string; progressOnly?: boolean },
+    options?: PreviewDeliveryMetadata,
   ): void => {
-    if (options?.progressOnly) {
+    if (options?.bodySourceText === undefined) {
       return;
     }
     lastDeliveredBodySourceText = options?.bodySourceText ?? "";
@@ -2073,50 +2199,60 @@ export function createBotWsReplyHandle(params: {
   // started" made supersede silently discard the run's real final answer.
   // Body-carrying callers always pass a bodySourceText STRING — possibly ""
   // when the markdown adapter transformed the body beyond source mapping — so
-  // presence (not truthiness) is the visibility signal; only the pure
-  // reasoning snapshot passes undefined.
+  // presence (not truthiness) is normally the visibility signal. A transient
+  // full-frame progress update may explicitly clear the current body bookmark
+  // without counting as visible answer text.
   const previewShowsVisibleBody = (
-    options?: { bodySourceText?: string; progressOnly?: boolean },
-  ): boolean => Boolean(options && (options.bodySourceText !== undefined || options.progressOnly));
+    options?: PreviewDeliveryMetadata,
+  ): boolean =>
+    options?.showsVisibleBody ??
+    Boolean(options && options.bodySourceText !== undefined);
 
   const recordDeliveredPreview = (
     previewText: string,
     now: number,
-    options?: { bodySourceText?: string; progressOnly?: boolean },
+    options?: PreviewDeliveryMetadata,
   ): void => {
     if (streamSettled || supersededByNewInbound) {
       return;
     }
-    stopPlaceholderKeepalive();
     if (!streamUpdateUnreliable) {
       // The lane just proved it can still paint, so the deferred background
       // notice armed by an earlier missing ACK is no longer warranted. A
       // retired lane keeps its notice: nothing will ever confirm it again.
-      stopPreviewExpiredNoticeTimer();
+      disarmPreviewExpiredNotice();
     }
     if (previewShowsVisibleBody(options)) {
       visibleReplyStarted = true;
     }
     lastPreviewText = previewText;
     lastPreviewUpdateAt = now;
+    if (previewText.includes(LONG_TASK_STATUS_PREFIX)) {
+      longTaskStatusStarted = true;
+    }
     recordDeliveredBodySource(options);
     if (previewFrozen) {
       stopPreviewFreezeTimeout();
       lastPreviewStatusAt = now;
       startPreviewStatusInterval();
+    } else {
+      scheduleHeartbeat();
     }
   };
 
   const sendPreviewUpdate = async (
     previewText: string,
     now: number,
-    options?: { bodySourceText?: string; fromPendingSlot?: boolean; progressOnly?: boolean },
+    options?: PreviewDeliveryMetadata & { fromPendingSlot?: boolean },
   ): Promise<boolean> => {
     if (streamSettled || isEvent || supersededByNewInbound || streamUpdateUnreliable) {
       return false;
     }
     const previewStreamId = resolveStreamId();
     const directAttempt = options?.fromPendingSlot !== true;
+    if (directAttempt) {
+      pausePlaceholderHeartbeat();
+    }
     if (
       directAttempt &&
       (placeholderInFlight ||
@@ -2124,7 +2260,6 @@ export function createBotWsReplyHandle(params: {
         pendingPreviewFlushInFlight ||
         hasPendingReplyAck(params.client, params.frame))
     ) {
-      stopPlaceholderKeepalive();
       queuePendingPreview(previewText, options);
       console.info(
         `[wecom-preview] update-delayed-pending account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId}`,
@@ -2188,7 +2323,7 @@ export function createBotWsReplyHandle(params: {
         stopPreviewStatusInterval();
         // allowUnfrozen: reasoning-only bubbles (and pre-freeze deaths) never
         // freeze the preview, yet their tasks equally deserve the deferred
-        // background notice — the 9-minute gate itself filters short tasks.
+        // background notice — the long-task gate itself filters short tasks.
         maybeSendPreviewExpiredNotice(true);
         return false;
       }
@@ -2242,7 +2377,7 @@ export function createBotWsReplyHandle(params: {
 
   function queuePendingPreview(
     previewText: string,
-    options?: { bodySourceText?: string; progressOnly?: boolean },
+    options?: PreviewDeliveryMetadata,
   ): void {
     if (
       !previewText ||
@@ -2256,7 +2391,7 @@ export function createBotWsReplyHandle(params: {
     pendingPreview = {
       text: previewText,
       bodySourceText: options?.bodySourceText,
-      progressOnly: options?.progressOnly,
+      showsVisibleBody: options?.showsVisibleBody,
       deadline: pendingPreview?.deadline ?? Date.now() + WECOM_PENDING_ACK_GRACE_MS,
       retryCount: pendingPreview?.retryCount ?? 0,
     };
@@ -2318,7 +2453,7 @@ export function createBotWsReplyHandle(params: {
     try {
       const delivered = await sendPreviewUpdate(preview.text, Date.now(), {
         bodySourceText: preview.bodySourceText,
-        progressOnly: preview.progressOnly,
+        showsVisibleBody: preview.showsVisibleBody,
         fromPendingSlot: true,
       });
       if (
@@ -2340,16 +2475,6 @@ export function createBotWsReplyHandle(params: {
       schedulePendingPreviewPoll();
     }
   }
-
-  const renderPreviewStreamText = (bodyText: string): string => {
-    if (!accumulatedThinkingText) {
-      return escapeLiteralThinkTags(bodyText);
-    }
-    return composeProgressStreamTextWithThinking({
-      thinkingText: accumulatedThinkingText,
-      bodyText,
-    });
-  };
 
   // Hard lifetime cap for the frozen status refresh. Checked BEFORE all
   // other guards so a stuck interval is always stopped, and latched so a
@@ -2385,21 +2510,16 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     const now = Date.now();
-    if (now - lastPreviewStatusAt < BLOCK_PREVIEW_STATUS_UPDATE_MS) {
+    if (longTaskStatusStarted && now - lastPreviewStatusAt < BLOCK_PREVIEW_STATUS_UPDATE_MS) {
       return;
     }
-    const previewText = renderPreviewStreamText(renderPreviewText(accumulatedText || previewFrozenText, now));
-    if (!previewText || previewText === lastPreviewText) {
+    const preview = renderPreviewFrame(accumulatedText || previewFrozenSourceText, now);
+    if (!preview.text || preview.text === lastPreviewText) {
       return;
     }
     previewStatusInFlight = true;
     try {
-      await sendPreviewUpdate(previewText, now, {
-        bodySourceText: resolveVisibleBodySourceText(
-          accumulatedText || previewFrozenSourceText,
-          now,
-        ),
-      });
+      await sendPreviewUpdate(preview.text, now, { bodySourceText: preview.bodySourceText });
     } finally {
       previewStatusInFlight = false;
     }
@@ -2409,9 +2529,20 @@ export function createBotWsReplyHandle(params: {
     if (previewStatusInterval || streamSettled || !previewFrozen || previewWatchdogExpired) {
       return;
     }
+    const untilLongTaskStatusMs = LONG_TASK_STATUS_AFTER_MS - (Date.now() - handleStartedAt);
+    if (untilLongTaskStatusMs > 0) {
+      previewStatusInterval = setTimeout(() => {
+        previewStatusInterval = undefined;
+        void sendFrozenPreviewStatus();
+        startPreviewStatusInterval();
+      }, untilLongTaskStatusMs);
+      previewStatusInterval.unref?.();
+      return;
+    }
     previewStatusInterval = setInterval(() => {
       void sendFrozenPreviewStatus();
     }, BLOCK_PREVIEW_STATUS_UPDATE_MS);
+    previewStatusInterval.unref?.();
   };
 
   const freezePreviewByTimeout = async (): Promise<void> => {
@@ -2419,13 +2550,11 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     const now = Date.now();
-    const previewText = renderPreviewStreamText(renderPreviewText(accumulatedText, now));
-    if (!previewFrozen || !previewText || previewText === lastPreviewText) {
+    const preview = renderPreviewFrame(accumulatedText, now);
+    if (!previewFrozen || !preview.text || preview.text === lastPreviewText) {
       return;
     }
-    await sendPreviewUpdate(previewText, now, {
-      bodySourceText: resolveVisibleBodySourceText(accumulatedText, now),
-    });
+    await sendPreviewUpdate(preview.text, now, { bodySourceText: preview.bodySourceText });
   };
 
   const schedulePreviewFreezeTimeout = (now = Date.now()): void => {
@@ -2461,6 +2590,9 @@ export function createBotWsReplyHandle(params: {
       if (previewWatchdogExpired) {
         return false;
       }
+      if (!longTaskStatusStarted && now - handleStartedAt >= LONG_TASK_STATUS_AFTER_MS) {
+        return true;
+      }
       return now - lastPreviewStatusAt >= BLOCK_PREVIEW_STATUS_UPDATE_MS;
     }
     if (!lastPreviewText) {
@@ -2487,16 +2619,11 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     const now = Date.now();
-    const bodyPreviewText = accumulatedText ? renderPreviewText(accumulatedText, now) : "";
-    const previewText = renderPreviewStreamText(bodyPreviewText);
-    if (!params?.force && !shouldSendThinkingPreview(previewText, now)) {
+    const preview = renderPreviewFrame(accumulatedText, now);
+    if (!params?.force && !shouldSendThinkingPreview(preview.text, now)) {
       return;
     }
-    await sendPreviewUpdate(previewText, now, {
-      bodySourceText: accumulatedText
-        ? resolveVisibleBodySourceText(accumulatedText, now)
-        : undefined,
-    });
+    await sendPreviewUpdate(preview.text, now, { bodySourceText: preview.bodySourceText });
   };
 
   const deliverBlockPreview = async (text: string): Promise<void> => {
@@ -2507,12 +2634,12 @@ export function createBotWsReplyHandle(params: {
     if (!shouldSendPreview(text, now)) {
       return;
     }
-    const previewText = renderPreviewStreamText(renderPreviewText(text, now));
-    if (!previewText || previewText === lastPreviewText) {
+    const preview = renderPreviewFrame(text, now);
+    if (!preview.text || preview.text === lastPreviewText) {
       return;
     }
-    const delivered = await sendPreviewUpdate(previewText, now, {
-      bodySourceText: resolveVisibleBodySourceText(text, now),
+    const delivered = await sendPreviewUpdate(preview.text, now, {
+      bodySourceText: preview.bodySourceText,
     });
     if (delivered && !previewFrozen) {
       schedulePreviewFreezeTimeout(now);
@@ -2560,26 +2687,38 @@ export function createBotWsReplyHandle(params: {
   // the whole download. Claiming the peer (and retiring an older activation's
   // pending retry) stays in activate, which only runs once this inbound owns
   // the conversation.
-  // Self-rescheduling so the cadence can slow down as the turn ages. The only
-  // stop conditions are the ones that mean nobody is waiting on this bubble any
-  // more: settled, retired, a dead stream, or the hour-long watchdog.
-  const scheduleHeartbeat = (): void => {
-    if (streamSettled || runtimeRetired || streamUpdateUnreliable || lastPreviewText) {
+  // A successful initial placeholder is enough to acknowledge an ordinary
+  // turn. The next routine update is scheduled directly at the long-task gate;
+  // only a failed placeholder uses the short retry delay.
+  const scheduleHeartbeat = (retryDelayMs?: number): void => {
+    if (streamSettled || runtimeRetired || streamUpdateUnreliable) {
       return;
     }
     const elapsedMs = Date.now() - handleStartedAt;
     if (elapsedMs >= PREVIEW_WATCHDOG_MAX_MS) {
       return;
     }
+    if (placeholderKeepalive) {
+      if (retryDelayMs === undefined) {
+        return;
+      }
+      clearTimeout(placeholderKeepalive);
+      placeholderKeepalive = undefined;
+    }
+    const delayMs =
+      retryDelayMs ??
+      (elapsedMs >= LONG_TASK_STATUS_AFTER_MS
+        ? BLOCK_PREVIEW_STATUS_UPDATE_MS
+        : LONG_TASK_STATUS_AFTER_MS - elapsedMs);
     placeholderKeepalive = setTimeout(
       () => {
         placeholderKeepalive = undefined;
         sendPlaceholder();
-        scheduleHeartbeat();
+        if (!previewFrozen) {
+          scheduleHeartbeat();
+        }
       },
-      elapsedMs >= LONG_TASK_STATUS_AFTER_MS
-        ? BLOCK_PREVIEW_STATUS_UPDATE_MS
-        : PLACEHOLDER_KEEPALIVE_MS,
+      delayMs,
     );
     placeholderKeepalive.unref?.();
   };
@@ -2696,24 +2835,53 @@ export function createBotWsReplyHandle(params: {
         return;
       }
 
+      if (payload.channelData?.openclawProgressKind === "preamble") {
+        const preambleText = payload.text?.trim() ?? "";
+        if (!preambleText || isEvent || supersededByNewInbound || streamSettled) {
+          return;
+        }
+        const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
+        const progress = composePreviewSuffixWithinLimits({
+          prefix: accumulatedText,
+          suffix: preambleText,
+          separator: "\n",
+          maxChars: thinkingLimits.maxChars,
+          maxBytes: thinkingLimits.maxBytes,
+        });
+        const progressPreviewText = prependThinkingToPreviewWire(progress.text);
+        if (!progressPreviewText || progressPreviewText === lastPreviewText) {
+          return;
+        }
+        // Preamble is visible process feedback, not answer text. Rendering it
+        // through the preview lane keeps it out of accumulatedText and final.
+        await sendPreviewUpdate(progressPreviewText, Date.now(), {
+          bodySourceText: progress.visiblePrefix,
+          showsVisibleBody: Boolean(progress.visiblePrefix),
+        });
+        return;
+      }
+
       if (payload.channelData?.openclawProgressKind === "fast-mode-auto") {
         const fastText = payload.text?.trim() ?? "";
         if (!fastText || isEvent || supersededByNewInbound || streamSettled) {
           return;
         }
         const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
-        const progressBodyText = appendPreviewSuffixWithinLimits({
-          prefix: escapeLiteralThinkTags(accumulatedText),
+        const progress = composePreviewSuffixWithinLimits({
+          prefix: accumulatedText,
           suffix: fastText,
           separator: "\n",
           maxChars: thinkingLimits.maxChars,
           maxBytes: thinkingLimits.maxBytes,
         });
-        const progressPreviewText = renderPreviewStreamText(progressBodyText);
+        const progressPreviewText = prependThinkingToPreviewWire(progress.text);
         if (!progressPreviewText || progressPreviewText === lastPreviewText) {
           return;
         }
-        await sendPreviewUpdate(progressPreviewText, Date.now(), { progressOnly: true });
+        await sendPreviewUpdate(progressPreviewText, Date.now(), {
+          bodySourceText: progress.visiblePrefix,
+          showsVisibleBody: Boolean(progress.visiblePrefix),
+        });
         return;
       }
 
@@ -3005,7 +3173,7 @@ export function createBotWsReplyHandle(params: {
               client: params.client,
               frame: params.frame,
               streamId: resolveStreamId(),
-              content: renderPreviewStreamText(previewWeComMarkdownV2(finalText)),
+              content: renderPreviewFrame(finalText).text,
             }),
             "direct block stream",
           );

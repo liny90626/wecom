@@ -139,7 +139,10 @@ describe("dispatchRuntimeReply", () => {
 
     expect(deliver).toHaveBeenNthCalledWith(
       1,
-      { text: "正在读取仓库配置" },
+      {
+        text: "正在读取仓库配置",
+        channelData: { openclawProgressKind: "preamble" },
+      },
       { kind: "block" },
     );
     expect(deliver).toHaveBeenNthCalledWith(
@@ -182,7 +185,10 @@ describe("dispatchRuntimeReply", () => {
 
     expect(deliver).toHaveBeenNthCalledWith(
       2,
-      { text: "正在准备上下文\n正在读取仓库" },
+      {
+        text: "正在准备上下文\n正在读取仓库",
+        channelData: { openclawProgressKind: "preamble" },
+      },
       { kind: "block" },
     );
   });
@@ -232,9 +238,115 @@ describe("dispatchRuntimeReply", () => {
     });
 
     expect(deliver.mock.calls).toEqual([
-      [{ text: "正在读取" }, { kind: "block" }],
-      [{ text: "正在读取仓库配置\n正在验证依赖" }, { kind: "block" }],
+      [
+        { text: "正在读取", channelData: { openclawProgressKind: "preamble" } },
+        { kind: "block" },
+      ],
+      [
+        {
+          text: "正在读取仓库配置\n正在验证依赖",
+          channelData: { openclawProgressKind: "preamble" },
+        },
+        { kind: "block" },
+      ],
       [{ text: "验证完成" }, { kind: "final" }],
+    ]);
+  });
+
+  it.each([
+    ["keyed", "commentary-replaced"],
+    ["anonymous", undefined],
+  ])("treats each %s OpenClaw preamble value as the current item snapshot", async (_label, itemId) => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onItemEvent({
+        itemId,
+        kind: "preamble",
+        progressText: "正在检查仓库中的全部配置文件",
+      });
+      await params.replyOptions.onItemEvent({
+        itemId,
+        kind: "preamble",
+        progressText: "配置检查完成",
+      });
+      await params.dispatcherOptions.deliver({ text: "最终答案" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-preamble-replaced" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    expect(deliver).toHaveBeenNthCalledWith(
+      2,
+      {
+        text: "配置检查完成",
+        channelData: { openclawProgressKind: "preamble" },
+      },
+      { kind: "block" },
+    );
+  });
+
+  it("coalesces ten thousand preamble items without rebuilding every pending snapshot", async () => {
+    let releaseFirst!: () => void;
+    const firstDelivery = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let burstElapsedMs = Number.POSITIVE_INFINITY;
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      params.replyOptions.onItemEvent({
+        itemId: "item-0",
+        kind: "preamble",
+        progressText: "步骤0",
+      });
+      const startedAt = performance.now();
+      for (let index = 1; index < 10_000; index += 1) {
+        params.replyOptions.onItemEvent({
+          itemId: `item-${index}`,
+          kind: "preamble",
+          progressText: `步骤${index}`,
+        });
+      }
+      burstElapsedMs = performance.now() - startedAt;
+      releaseFirst();
+      await params.dispatcherOptions.deliver({ text: "批量检查完成" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi
+      .fn()
+      .mockImplementationOnce(() => firstDelivery)
+      .mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-preamble-burst" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    expect(burstElapsedMs).toBeLessThan(1_000);
+    expect(deliver).toHaveBeenCalledTimes(3);
+    expect(String(deliver.mock.calls[1]?.[0]?.text)).toContain("步骤9999");
+    expect(deliver.mock.calls[2]).toEqual([
+      { text: "批量检查完成" },
+      { kind: "final" },
     ]);
   });
 

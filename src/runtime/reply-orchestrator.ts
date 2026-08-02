@@ -92,7 +92,7 @@ export async function dispatchRuntimeReply(params: {
   let progressTail = Promise.resolve();
   let progressSealPromise: Promise<void> | undefined;
   let pendingReasoningSlot: { payload: ReplyPayload } | undefined;
-  let pendingPreambleSlot: { payload: ReplyPayload } | undefined;
+  let pendingPreambleSlot: { payload?: ReplyPayload } | undefined;
   const anonymousPreambleItem = Symbol("anonymous-preamble");
   const preambleTextByItem = new Map<string | typeof anonymousPreambleItem, string>();
   const preambleItemOrder: Array<string | typeof anonymousPreambleItem> = [];
@@ -131,7 +131,7 @@ export async function dispatchRuntimeReply(params: {
   };
 
   const appendProgress = (
-    resolvePayload: () => ReplyPayload,
+    resolvePayload: () => ReplyPayload | undefined,
     errorKind: "block" | "tool",
     onDelivered?: () => void,
   ): void => {
@@ -144,7 +144,11 @@ export async function dispatchRuntimeReply(params: {
         return;
       }
       try {
-        await dispatchReplyPayload({ replyHandle, payload: resolvePayload(), kind: "block" });
+        const payload = resolvePayload();
+        if (!payload) {
+          return;
+        }
+        await dispatchReplyPayload({ replyHandle, payload, kind: "block" });
         onDelivered?.();
       } catch (error) {
         recordProgressDeliveryError(error, errorKind);
@@ -162,6 +166,7 @@ export async function dispatchRuntimeReply(params: {
     if (!progressAccepting || abortSignal?.aborted) {
       return;
     }
+    freezePendingPreamble();
     if (pendingReasoningSlot) {
       pendingReasoningSlot.payload = payload;
       return;
@@ -178,9 +183,32 @@ export async function dispatchRuntimeReply(params: {
 
   const enqueueProgress = (payload: ReplyPayload, errorKind: "block" | "tool"): void => {
     pendingReasoningSlot = undefined;
-    pendingPreambleSlot = undefined;
+    freezePendingPreamble();
     appendProgress(() => payload, errorKind);
   };
+
+  const resolvePreamblePayload = (): ReplyPayload | undefined => {
+    const snapshot = preambleItemOrder
+      .map((id) => preambleTextByItem.get(id) ?? "")
+      .filter(Boolean)
+      .join("\n");
+    if (!snapshot || snapshot === lastPreambleSnapshot) {
+      return undefined;
+    }
+    lastPreambleSnapshot = snapshot;
+    return {
+      text: snapshot,
+      channelData: { openclawProgressKind: "preamble" },
+    };
+  };
+
+  function freezePendingPreamble(): void {
+    if (!pendingPreambleSlot) {
+      return;
+    }
+    pendingPreambleSlot.payload ??= resolvePreamblePayload();
+    pendingPreambleSlot = undefined;
+  }
 
   const enqueuePreamble = (payload: { itemId?: string; progressText?: string }): void => {
     const text = payload.progressText?.trim() ?? "";
@@ -191,38 +219,24 @@ export async function dispatchRuntimeReply(params: {
     if (!preambleTextByItem.has(itemId)) {
       preambleItemOrder.push(itemId);
     }
-    const previousText = preambleTextByItem.get(itemId) ?? "";
-    if (!previousText || text.startsWith(previousText)) {
-      preambleTextByItem.set(itemId, text);
-    } else if (!previousText.startsWith(text)) {
-      preambleTextByItem.set(itemId, `${previousText}\n${text}`);
-    }
-    const snapshot = preambleItemOrder
-      .map((id) => preambleTextByItem.get(id) ?? "")
-      .filter(Boolean)
-      .join("\n");
-    if (!snapshot || snapshot === lastPreambleSnapshot) {
+    // OpenClaw has already accumulated/replaced commentary deltas per item;
+    // progressText is the authoritative current snapshot, not another delta.
+    if (preambleTextByItem.get(itemId) === text) {
       return;
     }
-    lastPreambleSnapshot = snapshot;
+    preambleTextByItem.set(itemId, text);
+    pendingReasoningSlot = undefined;
     if (pendingPreambleSlot) {
-      pendingPreambleSlot.payload = { text: snapshot };
       return;
     }
-    const slot = { payload: { text: snapshot } };
+    const slot: { payload?: ReplyPayload } = {};
     pendingPreambleSlot = slot;
-    appendProgress(
-      () => {
-        if (pendingPreambleSlot === slot) {
-          pendingPreambleSlot = undefined;
-        }
-        return slot.payload;
-      },
-      "block",
-      () => {
-        visibleBodySeen = true;
-      },
-    );
+    appendProgress(() => {
+      if (pendingPreambleSlot === slot) {
+        pendingPreambleSlot = undefined;
+      }
+      return slot.payload ?? resolvePreamblePayload();
+    }, "block");
   };
 
   const dropPendingProgress = (): void => {

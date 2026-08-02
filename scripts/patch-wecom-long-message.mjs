@@ -52,6 +52,7 @@ function status() {
     !markdown.includes("tableToPlainText") &&
     markdown.includes("return stitched.join(\"\\n\");") &&
     markdown.includes("export function chunkWeComMarkdownV2(") &&
+    markdown.includes("export function chunkFormattedWeComMarkdownV2(") &&
     markdown.includes("export function previewWeComMarkdownV2(") &&
     markdown.includes("segmentMarkerV2") &&
     markdown.includes("【第${index}/${total}段】") &&
@@ -98,12 +99,15 @@ function status() {
       reply.includes("isObsolete: () => !isCurrentReplyActivation()")
     );
   const replyReady =
-    reply.includes("chunkWeComMarkdownV2") &&
-    reply.includes("previewWeComMarkdownV2") &&
+    reply.includes("chunkWeComMarkdownWireV2") &&
+    reply.includes("chunkFormattedWeComMarkdownV2") &&
+    reply.includes("const wireText = escapeLiteralThinkTags(toWeComMarkdownV2(markdown, null))") &&
+    reply.includes("renderPreviewSourcePrefixWithinLimits") &&
+    reply.includes("fitsPreviewWireBudget") &&
     reply.includes("const B2_PEER_FINAL_DEDUP_TTL_MS = 120_000") &&
     reply.includes("const BLOCK_PREVIEW_MAX_MS = 300_000") &&
     reply.includes("const BLOCK_PREVIEW_MAX_CHARS = 3_000") &&
-    reply.includes("withOptionalCompletionMarker") &&
+    reply.includes("appendFinalCompletionMarker") &&
     reply.includes("finalAppendCompletionMarker") &&
     reply.includes("dedupeLongFinalText(finalText, { previewFrozen })") &&
     reply.includes("function findRepeatedHeadingTail(") &&
@@ -129,7 +133,9 @@ function status() {
     tests.includes("deduplicates repeated structured tails that restart from the same report heading") &&
     tests.includes("does not deduplicate repeated markdown table blocks") &&
     tests.includes("does not show chunk markers in thinking previews before the final text is complete") &&
-    tests.includes("keeps enough body room when thinking preview is long");
+    tests.includes("keeps enough body room when thinking preview is long") &&
+    tests.includes("keeps escaped literal think tags within the wire budget on preview and final routes") &&
+    tests.includes("keeps reasoning on an error final within the final stream wire budget");
   const outboundReady =
     outbound.includes("chunkWeComMarkdownV2") &&
     outbound.includes("Sending Bot WS active message chunk") &&

@@ -41,6 +41,14 @@ export function chunkWeComMarkdownV2(
   maxBytes = 12000,
 ): string[] {
   const formatted = toWeComMarkdownV2(markdown, null);
+  return chunkFormattedWeComMarkdownV2(formatted, maxChars, maxBytes);
+}
+
+export function chunkFormattedWeComMarkdownV2(
+  formatted: string,
+  maxChars = 3500,
+  maxBytes = 12000,
+): string[] {
   const firstPassChunks = splitLongMarkdownCoreV2(formatted, maxChars, maxBytes);
   if (firstPassChunks.length <= 1) return firstPassChunks;
 
@@ -72,6 +80,14 @@ export function previewWeComMarkdownV2(
   maxBytes = 12000,
 ): string {
   const formatted = toWeComMarkdownV2(markdown, null);
+  return previewFormattedWeComMarkdownV2(formatted, maxChars, maxBytes);
+}
+
+export function previewFormattedWeComMarkdownV2(
+  formatted: string,
+  maxChars = 3500,
+  maxBytes = 12000,
+): string {
   return splitLongMarkdownCoreV2(formatted, maxChars, maxBytes)[0] ?? "";
 }
 

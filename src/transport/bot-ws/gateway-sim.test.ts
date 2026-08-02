@@ -156,27 +156,49 @@ describe("WeCom gateway simulation", () => {
     expect(revisions.at(-1)).toContain("正文进度");
   });
 
-  it("does not let the placeholder keepalive steal the ACK slot from queued progress", async () => {
+  it("does not let a placeholder retry steal the ACK slot from queued progress", async () => {
     // The req_id has a single serial ACK slot, so queueing a progress snapshot
-    // must retire the keepalive: another placeholder frame would take that slot
-    // and push the snapshot toward the grace deadline that retires the whole
-    // progress lane.
-    const sim = new WecomGatewaySim({ ackLatencyMs: 2_600 });
+    // must pause placeholder retries until the real snapshot has cleared it.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 4_000, dropAckOnSend: [1] });
     const handle = startTurn(sim);
-    await tick(100);
-    const delivery = handle.deliver({ text: "第一段思考", isReasoning: true }, { kind: "block" });
-    // The placeholder ACK is still outstanding, so this snapshot is queued and
-    // the 3 s keepalive fires while it waits.
     await tick(4_000);
+    const delivery = handle.deliver({ text: "第一段思考", isReasoning: true }, { kind: "block" });
+    // The initial placeholder times out at 5 s and schedules a retry for 8 s;
+    // the queued progress owns the ACK slot across that retry boundary.
+    await tick(7_000);
     await delivery;
-    // Let the queued snapshot take the slot and be acknowledged.
-    await tick(3_000);
 
     const placeholderFrames = sim.sentFrames.filter((frame) =>
       frame.content.includes("正在思考中"),
     );
     expect(placeholderFrames).toHaveLength(1);
     expect(sim.streamBubble("req-sim")?.content).toContain("第一段思考");
+  });
+
+  it("does not let the eight-minute heartbeat steal an ACK from in-flight progress", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 2_600 });
+    const handle = startTurn(sim);
+    await tick(8 * 60_000 - 1_000);
+
+    const delivery = handle.deliver(
+      { text: "跨过八分钟门槛的真实进度", isReasoning: true },
+      { kind: "block" },
+    );
+    await tick(4_000);
+    await delivery;
+
+    const placeholderFrames = sim.sentFrames.filter((frame) =>
+      frame.content.includes("正在思考中"),
+    );
+    expect(placeholderFrames).toHaveLength(1);
+    expect(sim.sentFrames).toHaveLength(2);
+    expect(sim.streamBubble("req-sim")?.content).toContain("跨过八分钟门槛的真实进度");
+
+    await tick(15_000);
+    expect(sim.sentFrames).toHaveLength(3);
+    expect(sim.sentFrames.at(-1)?.content).toBe(
+      "【长任务处理中，请勿打断，已用时8m16s】",
+    );
   });
 
   it("still retires the lane and falls back to background notices on a dead stream", async () => {
@@ -192,12 +214,12 @@ describe("WeCom gateway simulation", () => {
     await deliverAndTick(handle, { text: "长任务进度", isReasoning: true }, { kind: "block" }, 500);
 
     expect(sim.streamBubble("req-sim")?.content).toContain("正在思考中");
-    // The 9-minute gate filters short tasks before the first background push.
+    // The shared 8-minute gate filters short tasks before the first background push.
     expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
-    await tick(9 * 60_000);
+    await tick(8 * 60_000);
     const pushes = sim.chat.filter((entry) => entry.kind === "push");
     expect(pushes.length).toBeGreaterThanOrEqual(1);
-    expect(pushes[0]?.content).toContain("【任务处理中，已用时 ");
+    expect(pushes[0]?.content).toBe("【长任务处理中，请勿打断，已用时8m00s】");
   });
 
   it("keeps the reasoning visible when the turn ends in an error", async () => {
@@ -262,10 +284,10 @@ describe("WeCom gateway simulation", () => {
     await deliverAndTick(handle, { text: "长任务进度", isReasoning: true }, { kind: "block" }, 500);
 
     expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
-    await tick(9 * 60_000);
+    await tick(8 * 60_000);
     const pushes = sim.chat.filter((entry) => entry.kind === "push");
     expect(pushes.length).toBeGreaterThanOrEqual(1);
-    expect(pushes[0]?.content).toContain("【任务处理中，已用时 ");
+    expect(pushes[0]?.content).toBe("【长任务处理中，请勿打断，已用时8m00s】");
   });
 
   it("does not arm background notices after a single recovered ACK hiccup", async () => {
@@ -275,6 +297,7 @@ describe("WeCom gateway simulation", () => {
     await deliverAndTick(handle, { text: "第一步", isReasoning: true }, { kind: "block" }, 200);
     await tick(6_000);
     await deliverAndTick(handle, { text: "第二步", isReasoning: true }, { kind: "block" }, 4_000);
+    handle.markExternalActivity?.();
 
     await tick(10 * 60_000);
     expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
@@ -295,10 +318,13 @@ describe("WeCom gateway simulation", () => {
     await deliverAndTick(handle, { text: "第一段进度\n第二段进度" }, { kind: "block" }, 2_000);
     await deliverAndTick(handle, { text: "第一段进度\n第二段进度\n第三段进度" }, { kind: "block" }, 2_000);
 
-    await tick(9 * 60_000);
-    const notice = sim.chat.filter((entry) => entry.kind === "push").at(-1)?.content ?? "";
+    await tick(8 * 60_000);
+    const notice =
+      sim.chat.find(
+        (entry) => entry.kind === "push" && entry.content.includes("第三段进度"),
+      )?.content ?? "";
     expect(notice).toContain("第三段进度");
-    expect(notice).toContain("【任务处理中，已用时 ");
+    expect(notice).toContain("【长任务处理中，请勿打断，已用时8m00s】");
 
     await deliverAndTick(
       handle,
@@ -326,66 +352,149 @@ describe("WeCom gateway simulation", () => {
     await tick(100);
     expect(sim.streamBubble("req-sim")?.content).toContain("正在思考中");
 
-    // Still nothing from OpenClaw, but the user must not be staring at a static
-    // bubble: the elapsed time has to keep moving.
-    await tick(3 * 60_000);
-    const atThreeMinutes = sim.streamBubble("req-sim")?.content ?? "";
-    expect(atThreeMinutes).toContain("【任务处理中，已用时 ");
+    // A healthy placeholder ACK is sufficient feedback before the shared
+    // long-task gate; no static keepalive frames should be emitted meanwhile.
+    await tick(8 * 60_000 - 101);
+    expect(sim.sentFrames).toHaveLength(1);
+    expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
 
-    await tick(2 * 60_000);
-    expect(sim.streamBubble("req-sim")?.content).not.toBe(atThreeMinutes);
-
-    // Past the ~6-minute stream window the bubble is unrepaintable, so the
-    // deferred background push has to take over at the 9-minute gate.
-    await tick(5 * 60_000);
+    // At eight minutes the ~6-minute stream is no longer repaintable, so the
+    // background lane takes over with the same long-task status.
+    await tick(100);
     const pushes = sim.chat.filter((entry) => entry.kind === "push");
-    expect(pushes.length).toBeGreaterThanOrEqual(1);
-    expect(pushes[0]?.content).toContain("【任务处理中，已用时 ");
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]?.content).toBe("【长任务处理中，请勿打断，已用时8m00s】");
   });
 
-  it("limits silent long-task status refreshes to one per minute", async () => {
+  it("waits eight minutes before showing silent-task status and then refreshes every 15 seconds", async () => {
     const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
     startTurn(sim);
-    await tick(89_000);
+    await tick(100);
 
-    const isLongTaskStatus = (content: string) =>
-      content.includes("【任务处理中，已用时 ") || content.includes("当前长任务用时");
-    const statusFrames = sim.sentFrames.filter((frame) => isLongTaskStatus(frame.content));
-    expect(statusFrames).toHaveLength(1);
-    expect(statusFrames[0]?.content).toBe("【任务处理中，已用时 30s】");
+    expect(sim.sentFrames).toHaveLength(1);
+    expect(sim.streamBubble("req-sim")?.content).toContain("正在思考中");
 
-    await tick(1_000);
-    const nextStatusFrames = sim.sentFrames.filter((frame) => isLongTaskStatus(frame.content));
-    expect(nextStatusFrames).toHaveLength(2);
-    expect(nextStatusFrames[1]?.content).toBe("【任务处理中，已用时 1m30s】");
+    await tick(8 * 60_000 - 101);
+    expect(sim.sentFrames).toHaveLength(1);
+
+    await tick(1);
+    expect(sim.sentFrames).toHaveLength(2);
+    expect(sim.sentFrames.at(-1)?.content).toBe(
+      "【长任务处理中，请勿打断，已用时8m00s】",
+    );
+
+    await tick(14_999);
+    expect(sim.sentFrames).toHaveLength(2);
+    await tick(1);
+    expect(sim.sentFrames).toHaveLength(3);
+    expect(sim.sentFrames.at(-1)?.content).toBe(
+      "【长任务处理中，请勿打断，已用时8m15s】",
+    );
   });
 
-  it("limits frozen-preview status refreshes to one per minute", async () => {
+  it("moves a silent task to the 15-second push cadence when its long-task heartbeat loses ACK", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, dropAckOnSend: [2, 3, 4] });
+    startTurn(sim);
+    await tick(100);
+    await tick(8 * 60_000 - 100);
+
+    expect(sim.sentFrames).toHaveLength(2);
+    expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
+
+    await tick(5_000);
+    const statusPushes = () => sim.chat.filter((entry) => entry.kind === "push");
+    expect(statusPushes()).toHaveLength(1);
+    expect(statusPushes()[0]?.content).toBe(
+      "【长任务处理中，请勿打断，已用时8m05s】",
+    );
+
+    await tick(14_999);
+    expect(statusPushes()).toHaveLength(1);
+    await tick(1);
+    expect(statusPushes()).toHaveLength(2);
+    expect(statusPushes()[1]?.content).toBe(
+      "【长任务处理中，请勿打断，已用时8m20s】",
+    );
+    expect(sim.sentFrames).toHaveLength(2);
+  });
+
+  it("does not label a fast large preview as a long task before eight minutes", async () => {
     const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
     const handle = startTurn(sim);
     await tick(100);
     await deliverAndTick(handle, { text: "真实过程。".repeat(700) }, { kind: "block" }, 500);
-    const afterPreview = sim.sentFrames.length;
 
-    await tick(59_000);
-    expect(sim.sentFrames).toHaveLength(afterPreview);
+    expect(sim.streamBubble("req-sim")?.content).toContain("真实过程。");
+    expect(sim.streamBubble("req-sim")?.content).not.toContain("长任务处理中");
 
+    await tick(8 * 60_000 - 601);
+    expect(sim.streamBubble("req-sim")?.content).not.toContain("长任务处理中");
+
+    await tick(100);
+    expect(sim.streamBubble("req-sim")?.content).toContain(
+      "【长任务处理中，请勿打断，已用时8m00s】",
+    );
+    const frameCountAtEightMinutes = sim.sentFrames.length;
+
+    await tick(15_000);
+    expect(sim.sentFrames).toHaveLength(frameCountAtEightMinutes + 1);
+    expect(sim.sentFrames.at(-1)?.content).toContain(
+      "【长任务处理中，请勿打断，已用时8m15s】",
+    );
+  });
+
+  it("shows frozen-preview status at the absolute eight-minute gate after a late preview", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(100);
+    await tick(8 * 60_000 - 1_200);
+    await deliverAndTick(handle, { text: "临近门槛的正文。".repeat(700) }, { kind: "block" }, 100);
+
+    expect(sim.streamBubble("req-sim")?.content).not.toContain("长任务处理中");
     await tick(1_000);
-    expect(sim.sentFrames).toHaveLength(afterPreview + 1);
-    expect(sim.sentFrames.at(-1)?.content).toContain("真实过程。");
-    expect(sim.sentFrames.at(-1)?.content).toContain("【任务处理中，已用时 1m00s】");
+    await tick(60);
+
+    expect(sim.streamBubble("req-sim")?.content).toContain(
+      "【长任务处理中，请勿打断，已用时8m00s】",
+    );
+  });
+
+  it("takes over an expired silent stream at eight minutes with the same 15-second cadence", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 6 * 60_000 });
+    startTurn(sim);
+    await tick(8 * 60_000 - 1);
+    expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
+
+    await tick(100);
+    const statusPushes = () => sim.chat.filter((entry) => entry.kind === "push");
+    expect(statusPushes()).toHaveLength(1);
+    expect(statusPushes()[0]?.content).toBe(
+      "【长任务处理中，请勿打断，已用时8m00s】",
+    );
+
+    await tick(15_000);
+    expect(statusPushes()).toHaveLength(2);
+    expect(statusPushes()[1]?.content).toBe(
+      "【长任务处理中，请勿打断，已用时8m15s】",
+    );
   });
 
   it("keeps a silent long task's clock running after an external message", async () => {
     const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
     const handle = startTurn(sim);
-    await tick(2 * 60_000);
+    await tick(8 * 60_000 + 100);
     const beforeExternal = sim.streamBubble("req-sim")?.content ?? "";
-    expect(beforeExternal).toContain("【任务处理中，已用时 ");
+    expect(beforeExternal).toBe("【长任务处理中，请勿打断，已用时8m00s】");
 
     handle.markExternalActivity?.();
-    await tick(2 * 60_000);
-    expect(sim.streamBubble("req-sim")?.content).not.toBe(beforeExternal);
+    const framesBeforeExternal = sim.sentFrames.length;
+    await tick(14_999);
+    expect(sim.sentFrames).toHaveLength(framesBeforeExternal);
+    await tick(1);
+    expect(sim.sentFrames).toHaveLength(framesBeforeExternal + 1);
+    expect(sim.sentFrames.at(-1)?.content).toBe(
+      "【长任务处理中，请勿打断，已用时8m15s】",
+    );
   });
 
   it("never lets the heartbeat overwrite real progress", async () => {
@@ -411,18 +520,20 @@ describe("WeCom gateway simulation", () => {
     const handle = startTurn(sim);
     await tick(100);
     await deliverAndTick(handle, { text: "长任务进度", isReasoning: true }, { kind: "block" }, 500);
-    await tick(9 * 60_000);
+    await tick(8 * 60_000);
     const beforeExternal = sim.chat.filter((entry) => entry.kind === "push").length;
-    expect(beforeExternal).toBeGreaterThanOrEqual(1);
+    expect(beforeExternal).toBe(1);
 
     handle.markExternalActivity?.();
     // The external message just reached the user, so nothing right away...
-    await tick(30_000);
+    await tick(14_999);
     expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(beforeExternal);
     // ...but the cadence must come back.
-    await tick(2 * 60_000);
-    expect(sim.chat.filter((entry) => entry.kind === "push").length).toBeGreaterThan(
-      beforeExternal,
+    await tick(1);
+    const pushes = sim.chat.filter((entry) => entry.kind === "push");
+    expect(pushes).toHaveLength(beforeExternal + 1);
+    expect(pushes.at(-1)?.content).toBe(
+      "【长任务处理中，请勿打断，已用时8m15s】",
     );
   });
 
@@ -432,14 +543,22 @@ describe("WeCom gateway simulation", () => {
     await tick(100);
     // Over the freeze threshold, so the bubble switches to status refreshes.
     await deliverAndTick(handle, { text: "进度。".repeat(1_200) }, { kind: "block" }, 500);
-    await tick(20_000);
+    await tick(8 * 60_000);
     const beforeExternal = sim.sentFrames.length;
+    expect(sim.sentFrames.at(-1)?.content).toContain(
+      "【长任务处理中，请勿打断，已用时8m00s】",
+    );
 
     handle.markExternalActivity?.();
     // The existing status interval keeps its phase; after external activity it
     // skips the next tick and paints on the following one.
-    await tick(101_000);
+    await tick(15_000);
+    expect(sim.sentFrames).toHaveLength(beforeExternal);
+    await tick(15_000);
     expect(sim.sentFrames.length).toBeGreaterThan(beforeExternal);
+    expect(sim.sentFrames.at(-1)?.content).toContain(
+      "【长任务处理中，请勿打断，已用时8m30s】",
+    );
   });
 
   it("gives a failed long task context instead of one bare provider line", async () => {

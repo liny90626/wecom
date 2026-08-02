@@ -1,16 +1,16 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-08-02（`2.7.260-4` 发布线）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-08-02（`2.7.260-4` 已发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 当前发布候选：**`2.7.260-4`**，计划发布标签 `released/2.7.260-4`。包元数据将在最终 `npm pack` 后写回本段；源码实现提交为 `9c6fba3`。本候选统一修复 preamble 快照、8 分钟/15 秒长任务状态、最终 wire 预算和全帧覆盖后的正文书签，详见第 2i 节。
+- 当前正式版本：**`2.7.260-4`**，发布标签 `released/2.7.260-4`，包 `yanhaidao-wecom-2.7.260-4.tgz`（217,630 bytes；139 文件；npm shasum `8f6c9fd537c2b0ac8341179bcd1a70f415dd1cc3`；SHA-256 `2f115027e0d84adb22611c26bedbaf76edf630188ee19e124b021a68de8fa270`）。源码实现提交为 `9c6fba3`。本版统一修复 preamble 快照、8 分钟/15 秒长任务状态、最终 wire 预算和全帧覆盖后的正文书签，详见第 2i 节。
 - `2.7.260-3` 是**已撤回的历史候选**：本地与 `fork` 上的 tag、对应 tarball 均已删除，历史提交保留且不重写；由 `2.7.260-4` 替代。上一有效正式版本为 `2.7.260-2`，发布标签 `released/2.7.260-2`。
 - v149 修复「文件+文字互相丢一半」「长任务产出被后台提示丢弃」「一次主动推送永久熄灭长任务反馈」，见第 2c 节；v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
 - 生产环境与本轮验证环境均为 OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**。`peerDependencies` 仍为 `^2026.6.11`（上游已收窄到 `^2026.7.0`，我们刻意不跟，见第 2f 节），但本轮没有执行或声称 2026.6.11 验证。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；从 `origin` **拉取/合并**是允许且必要的（见第 2f 节），禁止的只有推送；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
-- `2.7.260-4` 源码候选验证：OpenClaw 2026.7.1 下 44 文件 / **541 测试全绿**，wire/bookmark/长任务核心 4 文件 / **264 测试全绿**；build/typecheck/dist/B1/B2/B3/diff-check 全绿。最终版本提交后必须在最终 HEAD 重跑同一组门禁并记录 tarball 元数据。
+- `2.7.260-4` 发布验证：OpenClaw 2026.7.1 下 44 文件 / **541 测试全绿**，wire/bookmark/长任务核心 4 文件 / **264 测试全绿**；build/typecheck/dist/B1/B2/B3/diff-check 全绿。最终 HEAD 已重跑同一组门禁；tarball 的版本、入口、文件数、npm shasum 与 SHA-256 均已直接核验。
 - `reply.test.ts` 与 `gateway-sim.test.ts` 头部都有 `vi.setConfig({ testTimeout: 30_000 })`：这两套 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s。不要改回全局 timeout。
 - 涉及释放等待的 dispatcher 用例必须用 `vi.useFakeTimers()` 并在 `finally` 里 `vi.useRealTimers()`，否则污染后续用例（已发生过一次超时）。
 

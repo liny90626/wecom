@@ -4,7 +4,7 @@
 
 ## 本 fork 最近 5 个维护版本
 
-- [`v2.7.260-4`](./v2.7.260-4.md)（发布候选；计划标签 `released/2.7.260-4`）：恢复并正确合并 OpenClaw preamble；长任务状态统一为绝对 8 分钟首次出现、随后每 15 秒刷新；最终 wire 在 Markdown 规范化、literal think 转义、thinking block 与 completion marker 全部落定后再执行字符/字节分段，且正文书签只推进到当前整帧真实可见的 source prefix。
+- [`v2.7.260-4`](./v2.7.260-4.md)（发布标签 `released/2.7.260-4`）：恢复并正确合并 OpenClaw preamble；长任务状态统一为绝对 8 分钟首次出现、随后每 15 秒刷新；最终 wire 在 Markdown 规范化、literal think 转义、thinking block 与 completion marker 全部落定后再执行字符/字节分段，且正文书签只推进到当前整帧真实可见的 source prefix。
 - [`v2.7.260-3`](./v2.7.260-3.md)（**已撤回的历史候选；tag 与包均已删除，由 v4 替代**）：曾恢复 OpenClaw commentary/preamble，并尝试调整长任务节奏；其历史提交保留，但不再是可发布版本。
 - [`v2.7.260-2`](./v2.7.260-2.md)（发布标签 `released/2.7.260-2`）：修复上一轮已完成时 reply operation 在结果分诊前释放所触发的 TOCTOU，不再把已接收的新消息误报为「本次回复投递中断」；同时让 tracked `replyHandle.fail()` 已处理的同一 Bot WS 错误止于 runtime 边界，不再被 frame 边界重复记录。接收判据改用 `onAgentRunStart` / `onTurnAdopted`，未接收的 flagless zero 仍只保留既有一次有界重试且不 drain。
 - [`v2.7.260-1`](./v2.7.260-1.md)（发布标签 `released/2.7.260-1`）：长任务反馈改为**时间驱动**——OpenClaw 默认不流式推理，纯工具回合零产出，此前三条反馈通道会同时静默到失败为止；同时堵住一处会**静默销毁完整答案**的取消逻辑（未送达的 final 重试不再被下一条消息销毁）。并合并上游 `YanHaidao/wecom`，版本基线随之推进到 `2.7.260`，构建号按规则从 1 重新计数。

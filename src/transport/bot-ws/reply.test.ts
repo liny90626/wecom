@@ -518,14 +518,14 @@ describe("createBotWsReplyHandle", () => {
     // The preview never became writable, so this progress has not been seen at
     // all — it travels out with the status instead of being dropped.
     expect(String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content)).toBe(
-      "正在读取材料\n\n正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时9m00s",
+      "正在读取材料\n\n【任务处理中，已用时 9m00s】",
     );
     await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
     // Already delivered above, so the repeat carries the status only.
     expect(String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content)).toBe(
-      "正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时10m00s",
+      "【任务处理中，已用时 10m00s】",
     );
   });
 
@@ -1252,15 +1252,15 @@ describe("createBotWsReplyHandle", () => {
     const firstPreview = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
     expect(firstPreview).toContain("预览内容。");
     expect(firstPreview).not.toContain("END-FROZEN");
-    expect(firstPreview).toContain("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时1s");
+    expect(firstPreview).toContain("【任务处理中，已用时 1s】");
 
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
     const secondPreview = String(mockClient.replyStream.mock.calls[1]?.[2] ?? "");
     expect(secondPreview).toContain("预览内容。");
-    expect(secondPreview).toContain("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时15s");
+    expect(secondPreview).toContain("【任务处理中，已用时 1m00s】");
     expect(secondPreview).not.toContain("END-FROZEN");
   });
 
@@ -1284,16 +1284,16 @@ describe("createBotWsReplyHandle", () => {
 
     const statusContents = () =>
       mockClient.replyStream.mock.calls.map((call) => String(call[2] ?? ""));
-    expect(statusContents().at(-1)).toContain("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时1m05s");
+    expect(statusContents().at(-1)).toContain("【任务处理中，已用时 1m05s】");
     expect(statusContents().at(-1)).not.toContain("当前用时0s");
 
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
-    expect(statusContents().at(-1)).toContain("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时1m20s");
+    expect(statusContents().at(-1)).toContain("【任务处理中，已用时 2m05s】");
 
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
-    expect(statusContents().at(-1)).toContain("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时1m35s");
+    expect(statusContents().at(-1)).toContain("【任务处理中，已用时 3m05s】");
   });
 
   it("freezes short block previews by elapsed time and keeps the original text visible", async () => {
@@ -1324,18 +1324,18 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenLastCalledWith(
       expect.objectContaining({ headers: { req_id: "req-preview-time-freeze" } }),
       expect.any(String),
-      "正在查询数据源\n\n正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时5m00s",
+      "正在查询数据源\n\n【任务处理中，已用时 5m00s】",
       false,
     );
 
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(3);
     expect(mockClient.replyStream).toHaveBeenLastCalledWith(
       expect.objectContaining({ headers: { req_id: "req-preview-time-freeze" } }),
       expect.any(String),
-      "正在查询数据源\n\n正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时5m15s",
+      "正在查询数据源\n\n【任务处理中，已用时 6m00s】",
       false,
     );
   });
@@ -1354,7 +1354,7 @@ describe("createBotWsReplyHandle", () => {
     const longBlock = "预览内容。".repeat(620);
 
     await handle.deliver({ text: longBlock, isReasoning: false }, { kind: "block" });
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
 
@@ -2363,7 +2363,7 @@ describe("createBotWsReplyHandle", () => {
     });
 
     await handle.deliver({ text: "预览内容。".repeat(620), isReasoning: false }, { kind: "block" });
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     await handle.deliver({ text: "预览之后继续处理", isReasoning: false }, { kind: "block" });
     await handle.deliver({ text: "最终正文", isReasoning: false }, { kind: "final" });
@@ -2404,7 +2404,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "正在执行压测", isReasoning: false }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(300_000);
     await flushPromises();
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     await handle.deliver({ text: "压测结果完成", isReasoning: false }, { kind: "final" });
 
@@ -2415,7 +2415,7 @@ describe("createBotWsReplyHandle", () => {
     // The final landed well before the 9-minute mark, so the deferred
     // background notice must be skipped instead of promising a follow-up.
     expect(
-      pushedContents.some((content) => content.includes("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时")),
+      pushedContents.some((content) => content.includes("【任务处理中，已用时 ")),
     ).toBe(false);
     const finalPush = pushedContents.find((content) => content.includes("压测结果完成"));
     expect(finalPush).toBeDefined();
@@ -2428,7 +2428,7 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
     expect(
       mockClient.sendMessage.mock.calls.some((call) =>
-        String((call[1] as any).markdown.content).includes("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时"),
+        String((call[1] as any).markdown.content).includes("【任务处理中，已用时 "),
       ),
     ).toBe(false);
   });
@@ -2457,20 +2457,20 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "长任务预览", isReasoning: false }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(300_000);
     await flushPromises();
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
 
-    // Channel already dead at ~5m15s, but no notice before the 9-minute mark.
+    // Channel is dead at ~6m, but no notice before the 9-minute mark.
     expect(
       mockClient.sendMessage.mock.calls.some((call) =>
-        String((call[1] as any).markdown.content).includes("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时"),
+        String((call[1] as any).markdown.content).includes("【任务处理中，已用时 "),
       ),
     ).toBe(false);
 
-    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
     await flushPromises();
     const noticePushes = mockClient.sendMessage.mock.calls.filter((call) =>
-      String((call[1] as any).markdown.content).includes("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时"),
+      String((call[1] as any).markdown.content).includes("【任务处理中，已用时 "),
     );
     expect(noticePushes).toHaveLength(1);
 
@@ -2479,7 +2479,7 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
     expect(
       mockClient.sendMessage.mock.calls.filter((call) =>
-        String((call[1] as any).markdown.content).includes("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时"),
+        String((call[1] as any).markdown.content).includes("【任务处理中，已用时 "),
       ),
     ).toHaveLength(6);
   });
@@ -2508,25 +2508,25 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "长任务预览", isReasoning: false }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(300_000);
     await flushPromises();
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     await vi.advanceTimersByTimeAsync(3 * 60_000 + 45_000);
     await flushPromises();
 
     const backgroundPushes = () =>
       mockClient.sendMessage.mock.calls.filter((call) =>
-        String((call[1] as any).markdown.content).includes("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时"),
+        String((call[1] as any).markdown.content).includes("【任务处理中，已用时 "),
       );
     expect(backgroundPushes()).toHaveLength(1);
     expect(String((backgroundPushes()[0]?.[1] as any).markdown.content)).toBe(
-      "正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时9m00s",
+      "【任务处理中，已用时 9m00s】",
     );
 
     await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     expect(backgroundPushes()).toHaveLength(2);
     expect(String((backgroundPushes()[1]?.[1] as any).markdown.content)).toBe(
-      "正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时10m00s",
+      "【任务处理中，已用时 10m00s】",
     );
 
     await handle.deliver({ text: "最终结果", isReasoning: false }, { kind: "final" });
@@ -2564,7 +2564,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "长任务预览", isReasoning: false }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(300_000);
     await flushPromises();
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     await vi.advanceTimersByTimeAsync(3 * 60_000 + 45_000);
     await flushPromises();
@@ -2574,7 +2574,7 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
     expect(String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content)).toBe(
-      "正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时10m00s",
+      "【任务处理中，已用时 10m00s】",
     );
     expect(onFail).not.toHaveBeenCalled();
   });
@@ -2610,7 +2610,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "长任务预览", isReasoning: false }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(300_000);
     await flushPromises();
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     await vi.advanceTimersByTimeAsync(3 * 60_000 + 45_000);
     await flushPromises();
@@ -2659,7 +2659,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "长任务预览", isReasoning: false }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(300_000);
     await flushPromises();
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
 
     handle.supersedeByNewInbound?.({
@@ -2673,7 +2673,7 @@ describe("createBotWsReplyHandle", () => {
 
     expect(
       mockClient.sendMessage.mock.calls.some((call) =>
-        String((call[1] as any).markdown.content).includes("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时"),
+        String((call[1] as any).markdown.content).includes("【任务处理中，已用时 "),
       ),
     ).toBe(false);
   });
@@ -3824,7 +3824,7 @@ describe("createBotWsReplyHandle", () => {
 
     // Freeze by size, then let the 15s status refresh die terminally.
     await handle.deliver({ text: "预览内容。".repeat(620), isReasoning: false }, { kind: "block" });
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     const replyStreamCalls = mockClient.replyStream.mock.calls.length;
 
@@ -4168,14 +4168,14 @@ describe("createBotWsReplyHandle", () => {
     });
 
     await handle.deliver({ text: "预览内容。".repeat(620), isReasoning: false }, { kind: "block" });
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(120_000);
     await flushPromises();
     const callsBeforeCap = mockClient.replyStream.mock.calls.length;
     expect(callsBeforeCap).toBeGreaterThan(2);
 
-    // Jump wall time to the lifetime cap without executing every 15s refresh.
+    // Jump wall time to the lifetime cap without executing every 60s refresh.
     vi.setSystemTime(Date.now() + 3_600_000);
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     const callsAtCap = mockClient.replyStream.mock.calls.length;
     expect(callsAtCap).toBe(callsBeforeCap);
@@ -4357,7 +4357,7 @@ describe("createBotWsReplyHandle", () => {
     });
 
     await handle.deliver({ text: "预览内容。".repeat(620) }, { kind: "block" });
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
     await handle.fail(
       new Error(
@@ -4491,7 +4491,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: "预览内容。".repeat(620), isReasoning: false }, { kind: "block" });
     expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
 
     // Without the self-healing interval start, the skipped freezing send
@@ -4499,7 +4499,7 @@ describe("createBotWsReplyHandle", () => {
     expect(nonBlockingClient.replyStreamNonBlocking.mock.calls.length).toBeGreaterThanOrEqual(2);
     const lastCall = nonBlockingClient.replyStreamNonBlocking.mock.calls.at(-1);
     expect(String(lastCall?.[2])).toContain("预览内容");
-    expect(String(lastCall?.[2])).toContain("正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。 当前长任务用时");
+    expect(String(lastCall?.[2])).toContain("【任务处理中，已用时 ");
   });
 
   it("sends a merge notice when superseded and later pushes the old final without updating the old stream", async () => {

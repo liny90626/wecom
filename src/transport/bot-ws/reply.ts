@@ -31,7 +31,7 @@ const WECOM_STREAM_MAX_BYTES = 12_000;
 const BLOCK_PREVIEW_MAX_MS = 300_000;
 const BLOCK_PREVIEW_MAX_CHARS = 3_000;
 const BLOCK_PREVIEW_MIN_UPDATE_MS = 1_500;
-const BLOCK_PREVIEW_STATUS_UPDATE_MS = 15_000;
+const BLOCK_PREVIEW_STATUS_UPDATE_MS = 60_000;
 const THINKING_PREVIEW_MIN_UPDATE_MS = 3_000;
 const WECOM_REPLY_SEND_TIMEOUT_MS = 8_000;
 const WECOM_PENDING_ACK_GRACE_MS = 5_500;
@@ -49,11 +49,6 @@ const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
 // genuinely long tasks: hold it until the task has been running 9 minutes.
 const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = 9 * 60_000;
 const PREVIEW_EXPIRED_NOTICE_REPEAT_MS = 60_000;
-// Shown while a long task is still running, both as the frozen bubble's status
-// suffix and as the deferred background push. Interrupting a running turn is
-// what forces a session handoff, so the wording asks the user to hold on.
-const LONG_TASK_FOCUS_NOTICE_TEXT =
-  "正在专注任务中，请耐心等待尽量不要打断我，若10分钟我未发出任何消息再发消息来咨询，万分感谢。";
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
 const REPLY_MODEL_TIMEOUT_NOTICE_TEXT = "⚠️ 模型响应超时，本次任务未完成，请稍后重试。";
 const REPLY_PREPARE_TIMEOUT_NOTICE_TEXT =
@@ -660,7 +655,7 @@ function formatElapsedDuration(elapsedMs: number): string {
 }
 
 function formatElapsedStatus(elapsedMs: number): string {
-  return `${LONG_TASK_FOCUS_NOTICE_TEXT} 当前长任务用时${formatElapsedDuration(elapsedMs)}`;
+  return `【任务处理中，已用时 ${formatElapsedDuration(elapsedMs)}】`;
 }
 
 function appendFinalCompletionMarker(text: string): string {

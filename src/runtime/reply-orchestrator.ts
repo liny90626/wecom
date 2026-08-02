@@ -92,6 +92,11 @@ export async function dispatchRuntimeReply(params: {
   let progressTail = Promise.resolve();
   let progressSealPromise: Promise<void> | undefined;
   let pendingReasoningSlot: { payload: ReplyPayload } | undefined;
+  let pendingPreambleSlot: { payload: ReplyPayload } | undefined;
+  const anonymousPreambleItem = Symbol("anonymous-preamble");
+  const preambleTextByItem = new Map<string | typeof anonymousPreambleItem, string>();
+  const preambleItemOrder: Array<string | typeof anonymousPreambleItem> = [];
+  let lastPreambleSnapshot = "";
 
   const updateFastProgressState = (payload: ReplyPayload): boolean => {
     const text = payload.text?.trim() ?? "";
@@ -128,6 +133,7 @@ export async function dispatchRuntimeReply(params: {
   const appendProgress = (
     resolvePayload: () => ReplyPayload,
     errorKind: "block" | "tool",
+    onDelivered?: () => void,
   ): void => {
     if (!progressAccepting || abortSignal?.aborted) {
       return;
@@ -139,6 +145,7 @@ export async function dispatchRuntimeReply(params: {
       }
       try {
         await dispatchReplyPayload({ replyHandle, payload: resolvePayload(), kind: "block" });
+        onDelivered?.();
       } catch (error) {
         recordProgressDeliveryError(error, errorKind);
       }
@@ -171,13 +178,58 @@ export async function dispatchRuntimeReply(params: {
 
   const enqueueProgress = (payload: ReplyPayload, errorKind: "block" | "tool"): void => {
     pendingReasoningSlot = undefined;
+    pendingPreambleSlot = undefined;
     appendProgress(() => payload, errorKind);
+  };
+
+  const enqueuePreamble = (payload: { itemId?: string; progressText?: string }): void => {
+    const text = payload.progressText?.trim() ?? "";
+    if (!progressAccepting || abortSignal?.aborted || !text) {
+      return;
+    }
+    const itemId = payload.itemId?.trim() || anonymousPreambleItem;
+    if (!preambleTextByItem.has(itemId)) {
+      preambleItemOrder.push(itemId);
+    }
+    const previousText = preambleTextByItem.get(itemId) ?? "";
+    if (!previousText || text.startsWith(previousText)) {
+      preambleTextByItem.set(itemId, text);
+    } else if (!previousText.startsWith(text)) {
+      preambleTextByItem.set(itemId, `${previousText}\n${text}`);
+    }
+    const snapshot = preambleItemOrder
+      .map((id) => preambleTextByItem.get(id) ?? "")
+      .filter(Boolean)
+      .join("\n");
+    if (!snapshot || snapshot === lastPreambleSnapshot) {
+      return;
+    }
+    lastPreambleSnapshot = snapshot;
+    if (pendingPreambleSlot) {
+      pendingPreambleSlot.payload = { text: snapshot };
+      return;
+    }
+    const slot = { payload: { text: snapshot } };
+    pendingPreambleSlot = slot;
+    appendProgress(
+      () => {
+        if (pendingPreambleSlot === slot) {
+          pendingPreambleSlot = undefined;
+        }
+        return slot.payload;
+      },
+      "block",
+      () => {
+        visibleBodySeen = true;
+      },
+    );
   };
 
   const dropPendingProgress = (): void => {
     progressAccepting = false;
     progressCancelled = true;
     pendingReasoningSlot = undefined;
+    pendingPreambleSlot = undefined;
   };
 
   const sealProgress = async (): Promise<void> => {
@@ -263,7 +315,9 @@ export async function dispatchRuntimeReply(params: {
   const botWsReplyOptions: CompatibleReplyOptions | undefined = isBotWsReply
     ? {
         disableBlockStreaming: false,
+        suppressDefaultToolProgressMessages: true,
         allowProgressCallbacksWhenSourceDeliverySuppressed: true,
+        commentaryProgressEnabled: true,
         abortSignal,
         // 6.11 exposes run-start evidence; 7.1 adds turn adoption so a turn
         // steered into an existing run is covered as well.
@@ -286,6 +340,13 @@ export async function dispatchRuntimeReply(params: {
             { text: "", isReasoning: true, channelData: { reasoningEnd: true } },
             "block",
           );
+        },
+        onItemEvent: (payload) => {
+          if (payload.kind !== "preamble") {
+            return;
+          }
+          runActivityObserved = true;
+          enqueuePreamble(payload);
         },
         onToolResult: (payload) => {
           runActivityObserved = true;

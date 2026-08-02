@@ -51,10 +51,13 @@ describe("dispatchRuntimeReply", () => {
         replyOptions: expect.objectContaining({
           disableBlockStreaming: false,
           allowProgressCallbacksWhenSourceDeliverySuppressed: true,
+          suppressDefaultToolProgressMessages: true,
+          commentaryProgressEnabled: true,
           onAgentRunStart: expect.any(Function),
           onTurnAdopted: expect.any(Function),
           onReasoningStream: expect.any(Function),
           onReasoningEnd: expect.any(Function),
+          onItemEvent: expect.any(Function),
           onToolResult: expect.any(Function),
         }),
       }),
@@ -101,6 +104,138 @@ describe("dispatchRuntimeReply", () => {
       { text: "", isReasoning: true, channelData: { reasoningEnd: true } },
       { kind: "block" },
     );
+  });
+
+  it("forwards OpenClaw preamble progress to bot-ws reply handles", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onItemEvent({
+        itemId: "commentary-1",
+        kind: "preamble",
+        progressText: "正在读取仓库配置",
+      });
+      await params.replyOptions.onItemEvent({
+        itemId: "tool-1",
+        kind: "command_execution",
+        progressText: "internal tool status",
+      });
+      await params.dispatcherOptions.deliver({ text: "配置检查完成" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-preamble" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    expect(deliver).toHaveBeenNthCalledWith(
+      1,
+      { text: "正在读取仓库配置" },
+      { kind: "block" },
+    );
+    expect(deliver).toHaveBeenNthCalledWith(
+      2,
+      { text: "配置检查完成" },
+      { kind: "final" },
+    );
+    expect(deliver).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves preamble order when OpenClaw omits an item id", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onItemEvent({
+        kind: "preamble",
+        progressText: "正在准备上下文",
+      });
+      await params.replyOptions.onItemEvent({
+        itemId: "commentary-2",
+        kind: "preamble",
+        progressText: "正在读取仓库",
+      });
+      await params.dispatcherOptions.deliver({ text: "读取完成" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-preamble-anonymous" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    expect(deliver).toHaveBeenNthCalledWith(
+      2,
+      { text: "正在准备上下文\n正在读取仓库" },
+      { kind: "block" },
+    );
+  });
+
+  it("coalesces cumulative preamble snapshots without letting final overtake them", async () => {
+    let releaseFirst!: () => void;
+    const firstDelivery = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      params.replyOptions.onItemEvent({
+        itemId: "commentary-1",
+        kind: "preamble",
+        progressText: "正在读取",
+      });
+      params.replyOptions.onItemEvent({
+        itemId: "commentary-1",
+        kind: "preamble",
+        progressText: "正在读取仓库配置",
+      });
+      params.replyOptions.onItemEvent({
+        itemId: "commentary-2",
+        kind: "preamble",
+        progressText: "正在验证依赖",
+      });
+      releaseFirst();
+      await params.dispatcherOptions.deliver({ text: "验证完成" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi
+      .fn()
+      .mockImplementationOnce(() => firstDelivery)
+      .mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-preamble-coalescing" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    expect(deliver.mock.calls).toEqual([
+      [{ text: "正在读取" }, { kind: "block" }],
+      [{ text: "正在读取仓库配置\n正在验证依赖" }, { kind: "block" }],
+      [{ text: "验证完成" }, { kind: "final" }],
+    ]);
   });
 
   it("does not let a blocked reasoning delivery trip the OpenClaw idle watchdog", async () => {

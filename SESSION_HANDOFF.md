@@ -1,16 +1,16 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-08-02（`2.7.260-3` 已发布）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-08-02（`2.7.260-4` 发布线）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 已发布正式版本：**`2.7.260-3`**，发布标签 `released/2.7.260-3`，包 `yanhaidao-wecom-2.7.260-3.tgz`（216,611 bytes；139 文件；npm shasum `df992d2c56cbc854bd72b9839900cbe3853881e2`；SHA-256 `039fd648cc6767cc0154955e4c8e44cd31e4b70a68809c231c75a95dd9071122`）。本版恢复 OpenClaw commentary/preamble 真实过程文字，并把长任务辅助状态从 15 秒降频到 60 秒、缩短为 `【任务处理中，已用时 X】`，详见第 2h 节；只改两处生产文件及三份回归测试，没有增加重试、熔断或额外看门狗。
-- 上一版：`2.7.260-2`，发布标签 `released/2.7.260-2`；该版修复完成态释放竞态与同一 Bot WS 错误重复记录，详见第 2g 节。
+- 当前发布候选：**`2.7.260-4`**，计划发布标签 `released/2.7.260-4`。包元数据将在最终 `npm pack` 后写回本段；源码实现提交为 `9c6fba3`。本候选统一修复 preamble 快照、8 分钟/15 秒长任务状态、最终 wire 预算和全帧覆盖后的正文书签，详见第 2i 节。
+- `2.7.260-3` 是**已撤回的历史候选**：本地与 `fork` 上的 tag、对应 tarball 均已删除，历史提交保留且不重写；由 `2.7.260-4` 替代。上一有效正式版本为 `2.7.260-2`，发布标签 `released/2.7.260-2`。
 - v149 修复「文件+文字互相丢一半」「长任务产出被后台提示丢弃」「一次主动推送永久熄灭长任务反馈」，见第 2c 节；v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
-- 生产环境：OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**，`peerDependencies` 仍为 `^2026.6.11`（**上游已收窄到 `^2026.7.0`，我们刻意不跟**，见第 2f 节），**代码必须继续双版本兼容**（v147 用到的 `abortAgentHarnessRun` 已核实 6.11/7.1 均导出且同为同步 boolean 契约）。
+- 生产环境与本轮验证环境均为 OpenClaw **2026.7.1**；仓库 devDependency 同为 **2026.7.1**。`peerDependencies` 仍为 `^2026.6.11`（上游已收窄到 `^2026.7.0`，我们刻意不跟，见第 2f 节），但本轮没有执行或声称 2026.6.11 验证。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；从 `origin` **拉取/合并**是允许且必要的（见第 2f 节），禁止的只有推送；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
-- `2.7.260-3` 发布验证：OpenClaw 2026.7.1 下 44 文件 / **517 测试全绿**，build/typecheck/dist/B1/B2/B3/diff-check 全绿；真实 OpenClaw 2026.6.11 包下全项目类型检查及聚焦 3 文件 / **232 测试全绿**。6.11/7.1 真实 dispatcher 契约探针均成功转发 preamble 并正常产生 final；旧实现已分别复现缺失回调与 15 秒高频刷新。
+- `2.7.260-4` 源码候选验证：OpenClaw 2026.7.1 下 44 文件 / **541 测试全绿**，wire/bookmark/长任务核心 4 文件 / **264 测试全绿**；build/typecheck/dist/B1/B2/B3/diff-check 全绿。最终版本提交后必须在最终 HEAD 重跑同一组门禁并记录 tarball 元数据。
 - `reply.test.ts` 与 `gateway-sim.test.ts` 头部都有 `vi.setConfig({ testTimeout: 30_000 })`：这两套 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s。不要改回全局 timeout。
 - 涉及释放等待的 dispatcher 用例必须用 `vi.useFakeTimers()` 并在 `finally` 里 `vi.useRealTimers()`，否则污染后续用例（已发生过一次超时）。
 
@@ -140,7 +140,9 @@ OpenClaw 6.11/7.1 的 `finishReplyOperationBusyDispatch` 和 inbound dedupe 都�
 
 修复只收口满足全部条件的异常：Bot WS；tracked `replyHandle.fail()` 已成功返回；catch 到的仍是**同一个错误对象**。未经过 fail、fail 尚未完成、不同错误对象、以及非 Bot WS 异常都继续上抛。这样保留一次用户提示和一次 operational issue，同时不吞掉真正的 frame/runtime 崩溃。
 
-## 2h. `2.7.260-3`：真实过程文字恢复与辅助提示降频
+## 2h. `2.7.260-3`：已撤回的历史候选
+
+> 本节仅保留历史背景。`released/2.7.260-3` 与对应 tarball 已撤回；当前行为以第 2i 节的 `2.7.260-4` 为准。
 
 ### ① OpenClaw 有过程文字，但企微只显示插件提示
 
@@ -156,6 +158,40 @@ OpenClaw 6.11/7.1 的 `finishReplyOperationBusyDispatch` 和 inbound dedupe 都�
 ### ② 长任务辅助状态过于频繁且文案太长
 
 冻结预览与静默任务状态过去每 15 秒刷新一次。旧版网关模拟中，冻结气泡在 59 秒内从 1 帧增长到 5 帧，且每帧都携带很长的「请勿打断」文案。现在共用的刷新间隔改为 60 秒，状态缩短为 `【任务处理中，已用时 1m30s】`。满 30 秒的首次状态、入站后 3 秒占位确认、真实过程一到立即让位、9 分钟后台兜底和最终正文投递均保持原契约。
+
+## 2i. `2.7.260-4`：瞬态过程、长任务节奏与最终 wire 同源
+
+### ① 长任务状态统一到绝对 8 分钟
+
+- 首次状态严格以回合开始时间计算，在绝对 **8 分钟**出现，文案为 `【长任务处理中，请勿打断，已用时8m00s】`；随后每 **15 秒**刷新。
+- 静默任务、冻结正文预览、死流或持续丢 ACK 后的主动推送共享门槛和 cadence；成功 placeholder 只发一次，只有失败保留 3 秒短重试。
+- pending preview、in-flight ACK 和真实进度拥有单一 ACK 槽优先权，状态帧不会抢槽。
+- 单独跟踪“长任务状态是否已显示”，因此 `7m59s` 才送达的冻结预览不会把首状态推迟到 `8m15s`。
+- 8 分钟状态帧持续丢 ACK 时，确认不可信后切既有 active-push cadence；后续 preview 恢复会完整解除后台 armed 状态，外部活动不能重新制造双路状态。
+
+### ② preamble 是当前快照，不是增量正文
+
+- `dispatchRuntimeReply` 只接收 `onItemEvent(kind="preamble")`，并标记 `channelData.openclawProgressKind="preamble"`。
+- 同一 item 的 `progressText` 原位替换，不把缩短快照追加到旧值；不同 item 按首次出现顺序组合，无 `itemId` 使用匿名 item。
+- 慢 ACK 时只保留最新待发槽，并在出队时懒构造完整快照；10,000 item 性能回归避免 O(n²) 式重复拼接。
+- preamble 不进入 `accumulatedText` 或 final；preamble-only 不算已显示真实正文，因此不得抑制 superseded 回合的真实 final。
+
+### ③ 预算必须针对最终 wire，书签必须来自同一候选
+
+P1 红测稳定复现：400 个 literal `` `<think>` `` 先按 Markdown 文本截到近 3500 字符，再转义成 `&lt;think&gt;` 后，最终实际发送达到 **5551 字符**。普通预览、normal final 和 active push 都存在相同的“先分段、后扩张”根因。
+
+现在统一先完成 Markdown 规范化、literal think 转义、真实 thinking block 和 completion marker，再按最终企微 wire 执行字符/UTF-8 字节分段。预览 helper 同时返回生成该 wire 的实际 source prefix，调用方不再从转义前文本反推书签。
+
+独立红测进一步证明并修复了这些同源缺陷：
+
+- 大 preamble 或 Fast 状态整帧覆盖正文后，旧书签过长会使 846608 fallback 永久漏掉被覆盖片段。
+- preamble-only / Fast-only 曾错误设置“正文已可见”，导致新消息接管后真实 final 被静默丢弃。
+- error final 的 thinking 前缀曾按 3500 而非 final 的 2000 字符预算，`finish=true` 帧可越界。
+- completion marker 可能位于分段编号之前、正文自带 marker 时重复，或 reasoning-only 收口成为空帧。
+
+### ④ 当前验证边界
+
+仅在生产同版本 OpenClaw **2026.7.1** 验证：全量 44 文件 / 541 测试，核心 4 文件 / 264 测试，以及 typecheck、build、dist、B1/B2/B3、diff-check 均通过。未做 2026.6.11 切换测试，未做真机企业微信网关验证，未执行 `npm publish`。
 
 ## 3. OpenClaw / 企微 SDK 核心机制速查（源码级已验证）
 
@@ -217,6 +253,9 @@ OpenClaw 6.11/7.1 的 `finishReplyOperationBusyDispatch` 和 inbound dedupe 都�
 29. **不得再用“返回后的 active run 是否存在”判定本次 flagless-zero 是否被接收**：它存在释放竞态，只可写日志；接收事实必须来自 `onAgentRunStart` / `onTurnAdopted`。未接收的 flagless 重试不得调用 drain，因为它也可能是 dedupe。
 30. **不要让已成功经过 tracked `replyHandle.fail()` 的同一个 Bot WS 错误再次逃到 frame 边界**，否则 operational issue 会重复；但收口必须同时校验 transport、fail 已完成和错误对象同一性，不能吞不同或未处理异常。
 31. **不要把 preamble 改回合成文案或同步投递**：真实文字必须来自 OpenClaw `onItemEvent`，只转发 `kind=preamble`；继续使用 detached progress lane，并让 final 经短屏障排在已接收的过程文字之后。
+32. **不要在最终 wire 落定前做字符预算**：Markdown 规范化、literal think 转义、真实 thinking block、completion marker 都可能改变长度；预览、normal final 与 active push 必须继续复用 wire-aware 分段原语。
+33. **全帧瞬态状态必须携带它实际保留的正文 source prefix**：preamble/Fast 可清空或缩短当前气泡正文，书签必须同步回退；但仅有瞬态状态时不得设置 `visibleReplyStarted`。
+34. **8 分钟是回合开始后的绝对门槛，15 秒是门槛后的统一 cadence**：不要用最近一次冻结预览时间推迟首状态；长任务状态 ACK 持续不可信时必须切 active push；确认 preview 恢复时必须同时解除后台 timer 和 armed 状态。
 
 ## 6. 已知边界与待办观察
 
@@ -231,11 +270,11 @@ OpenClaw 6.11/7.1 的 `finishReplyOperationBusyDispatch` 和 inbound dedupe 都�
 - 被接管且「已可见」的旧 final 仍按 B3 丢弃，这是 B3 设计语义，不是 bug。
 - ambiguous 补发存在有界重复风险（仅未确认分片、≤3 次）——刻意取舍。
 - 若一轮内一次预览都没成功过且流在 120 秒内就死，占位保活会 `settleStream()` 并连带取消后台通知；此时答案仍以主动推送到达。窄场景，未处理。
-- **真机（企微网关）验证仍未做**：`2.7.260-3` 发布后需重点观察 commentary/preamble 是否按 OpenClaw 原顺序显示、慢回执下是否只合并待投递快照，以及 60 秒辅助状态节拍。
+- **真机（企微网关）验证仍未做**：`2.7.260-4` 发布后需重点观察 preamble item 顺序与快照替换、8 分钟首次状态、15 秒刷新、持续 ACK 丢失后的主动推送切换，以及 final fallback 是否仅发送当前气泡未覆盖的正文。
 - 发布 tarball 不入 git（*.tgz 未跟踪），以 changelog 打包记录的 shasum 为准。
 
 ## 7. 版本脉络备忘
 
-`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增 `error-final` 诊断日志、长任务提示词改为请勿打断 → `v149` 文件/文字双向跨回合并入、长任务产出随后台提示一起送达、外部活动不再熄灭长任务反馈 → **`2.7.260-1`（原 v150）** 长任务反馈改为时间驱动、零产出回合不再全程静默；未送达的 final 重试不再被下一条消息销毁；合并上游并把版本基线推进到 2.7.260、构建号重新从 1 计数 → **`2.7.260-2`** 用接收回调消除完成态释放的 TOCTOU，并让同一个已处理 Bot WS 错误只记录一次 → **`2.7.260-3`** 恢复 OpenClaw preamble 真实过程文字，并将长任务辅助状态降到每分钟一次。
+`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增长任务诊断 → `v149` 文件/文字双向并入与后台产出书签 → **`2.7.260-1`（原 v150）** 时间驱动长任务反馈与 final 重试保全 → **`2.7.260-2`** 完成态接收 TOCTOU 与重复错误记录修复 → **`2.7.260-3`（已撤回）** preamble 候选 → **`2.7.260-4`** preamble 快照、8 分钟/15 秒节奏、最终 wire 预算与可见正文书签统一。
 
 **版本号规则**：`<上游基线>-<构建号>`。构建号在**同一基线内**单调递增；**上游基线一变就从 1 重新计数**——`2.5.110` 基线走到 `2.5.110-149`，合并上游 `2.7.260` 后重新从 `2.7.260-1` 开始。tag 为 `released/<完整版本号>`，简报为 `changelog/v<完整版本号>.md`。

@@ -4,13 +4,13 @@
 
 ## 1. 当前状态
 
-- 当前正式版本：**`2.7.260-5`**，发布标签 `released/2.7.260-5`；正式 tarball 元数据在打包后回填。本版把 OpenClaw 结构化生命周期接入企微可见过程，为动态回调 `req_id` 建立 owner 认领，根治相邻回合气泡覆盖与迟到 ACK 丢消息，并补齐 Unicode 安全裁剪及瞬态/正文独立书签，详见第 2j 节。
+- 当前正式版本：**`2.7.260-5`**，发布标签 `released/2.7.260-5`，包 `yanhaidao-wecom-2.7.260-5.tgz`（222,286 bytes；解包 1,032,325 bytes；139 文件；npm shasum `35763609bd4e0c9d1d952c7add0392c86e5a9509`；SHA-256 `0a64c20fa0cd2b1c3bbc0dd30b1926d8839105f7bc6ee1194e750595bd2b8c92`）。实现、测试、版本与首版发布文档提交为 `6cb7982`。本版把 OpenClaw 结构化生命周期接入企微可见过程，为动态回调 `req_id` 建立 owner 认领，根治相邻回合气泡覆盖与迟到 ACK 丢消息，并补齐 Unicode 安全裁剪及瞬态/正文独立书签，详见第 2j 节。
 - `2.7.260-3` 是**已撤回的历史候选**：本地与 `fork` 上的 tag、对应 tarball 均已删除，历史提交保留且不重写；由 `2.7.260-4` 替代。上一有效正式版本为 `2.7.260-2`，发布标签 `released/2.7.260-2`。
 - v149 修复「文件+文字互相丢一半」「长任务产出被后台提示丢弃」「一次主动推送永久熄灭长任务反馈」，见第 2c 节；v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
 - 当前及后续自测统一固定为 OpenClaw **2026.7.1-2**，仓库 devDependency 使用精确版本；不再运行其他版本或双版本矩阵。`peerDependencies` 仍保留 `^2026.6.11` 安装兼容范围（见第 2f 节），只表示安装兼容声明。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；从 `origin` **拉取/合并**是允许且必要的（见第 2f 节），禁止的只有推送；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
-- `2.7.260-5` 发布验证：只用 OpenClaw 2026.7.1-2，全量 45 文件 / **592 测试全绿**，核心 6 文件 / **368 测试全绿**；build/typecheck/dist/B1/B2/B3/diff-check 全绿。正式打包后仍需直接核验 tarball 的版本、入口、文件数、npm shasum/integrity 与 SHA-256。
+- `2.7.260-5` 发布验证：只用 OpenClaw 2026.7.1-2，全量 45 文件 / **592 测试全绿**，核心 6 文件 / **368 测试全绿**；build/typecheck/dist/B1/B2/B3/diff-check 全绿。tarball 的版本、`package/dist/index.js` 入口、文件数、包/解包大小、npm shasum/integrity 与 SHA-256 均已直接核验。
 - `reply.test.ts` 与 `gateway-sim.test.ts` 头部都有 `vi.setConfig({ testTimeout: 30_000 })`：这两套 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s。不要改回全局 timeout。
 - 涉及释放等待的 dispatcher 用例必须用 `vi.useFakeTimers()` 并在 `finally` 里 `vi.useRealTimers()`，否则污染后续用例（已发生过一次超时）。
 

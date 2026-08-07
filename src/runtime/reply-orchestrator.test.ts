@@ -775,6 +775,72 @@ describe("dispatchRuntimeReply", () => {
     ]);
   });
 
+  it("deduplicates identical preamble text across items while preserving later updates", async () => {
+    const run = async (
+      sessionKey: string,
+      events: Array<{ itemId: string; progressText: string }>,
+    ) => {
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+        for (const event of events) {
+          await params.replyOptions.onItemEvent({ kind: "preamble", ...event });
+        }
+        await params.dispatcherOptions.deliver({ text: "任务已终止" }, { kind: "final" });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      });
+      const deliver = vi.fn().mockResolvedValue(undefined);
+
+      await dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: sessionKey } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+        } as any,
+      });
+
+      return deliver.mock.calls;
+    };
+
+    await expect(
+      run("session-preamble-cross-item-dedup", [
+        { itemId: "commentary-1", progressText: "正在评估终止风险" },
+        { itemId: "commentary-2", progressText: "正在评估终止风险" },
+      ]),
+    ).resolves.toEqual([
+      [
+        { text: "正在评估终止风险", channelData: { openclawProgressKind: "preamble" } },
+        { kind: "block" },
+      ],
+      [{ text: "任务已终止" }, { kind: "final" }],
+    ]);
+
+    await expect(
+      run("session-preamble-cross-item-update", [
+        { itemId: "commentary-1", progressText: "正在评估终止风险" },
+        { itemId: "commentary-2", progressText: "正在评估终止风险" },
+        { itemId: "commentary-2", progressText: "终止风险评估完成" },
+      ]),
+    ).resolves.toEqual([
+      [
+        { text: "正在评估终止风险", channelData: { openclawProgressKind: "preamble" } },
+        { kind: "block" },
+      ],
+      [
+        {
+          text: "正在评估终止风险\n终止风险评估完成",
+          channelData: { openclawProgressKind: "preamble" },
+        },
+        { kind: "block" },
+      ],
+      [{ text: "任务已终止" }, { kind: "final" }],
+    ]);
+  });
+
   it.each([
     ["keyed", "commentary-replaced"],
     ["anonymous", undefined],

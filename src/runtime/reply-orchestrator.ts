@@ -347,10 +347,17 @@ export async function dispatchRuntimeReply(params: {
   };
 
   const resolvePreamblePayload = (): ReplyPayload | undefined => {
-    const snapshot = preambleItemOrder
-      .map((id) => preambleTextByItem.get(id) ?? "")
-      .filter(Boolean)
-      .join("\n");
+    const visibleTexts: string[] = [];
+    const seenTexts = new Set<string>();
+    for (const itemId of preambleItemOrder) {
+      const text = preambleTextByItem.get(itemId) ?? "";
+      if (!text || seenTexts.has(text)) {
+        continue;
+      }
+      seenTexts.add(text);
+      visibleTexts.push(text);
+    }
+    const snapshot = visibleTexts.join("\n");
     if (!snapshot || snapshot === lastPreambleSnapshot) {
       return undefined;
     }

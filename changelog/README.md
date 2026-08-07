@@ -1,9 +1,10 @@
 # WeCom Changelog Index
 
-本目录记录 OpenClaw WeCom 插件的版本变更。默认先看本 fork 最近 6 个维护版本；原仓库历史版本保留在后续列表中，便于回溯。
+本目录记录 OpenClaw WeCom 插件的版本变更。默认先看本 fork 的近期维护版本；原仓库历史版本保留在后续列表中，便于回溯。
 
-## 本 fork 最近 6 个维护版本
+## 本 fork 维护版本
 
+- [`v2.7.260-6`](./v2.7.260-6.md)（发布标签 `released/2.7.260-6`）：修复不同 OpenClaw commentary item 携带完全相同 preamble 时过程气泡重复整句的问题；展示层按完整文本精确去重，保留首个 item 顺序及后续分化更新，不转入思考块，也不改变成功 final 清理瞬态过程的语义。
 - [`v2.7.260-5`](./v2.7.260-5.md)（发布标签 `released/2.7.260-5`）：把 OpenClaw item/tool/command/plan/approval/patch/compaction 生命周期净化为可见过程；为动态回调 `req_id` 建立 owner 认领，冲突、重投、缺失 ID、容量耗尽或待 ACK 时 fail closed 到主动推送，根治文件+文字相邻回合覆盖与迟到 ACK 丢消息；同时补齐 Unicode 安全裁剪和瞬态/正文独立书签。
 - [`v2.7.260-4`](./v2.7.260-4.md)（发布标签 `released/2.7.260-4`）：恢复并正确合并 OpenClaw preamble；长任务状态统一为绝对 8 分钟首次出现、随后每 15 秒刷新；最终 wire 在 Markdown 规范化、literal think 转义、thinking block 与 completion marker 全部落定后再执行字符/字节分段，且正文书签只推进到当前整帧真实可见的 source prefix。
 - [`v2.7.260-3`](./v2.7.260-3.md)（**已撤回的历史候选；tag 与包均已删除，由 v4 替代**）：曾恢复 OpenClaw commentary/preamble，并尝试调整长任务节奏；其历史提交保留，但不再是可发布版本。

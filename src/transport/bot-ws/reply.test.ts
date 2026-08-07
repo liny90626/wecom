@@ -4698,6 +4698,60 @@ describe("createBotWsReplyHandle", () => {
     },
   );
 
+  it("deduplicates exact repeated lines in the composed transient progress bubble", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-transient-line-dedup" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const finding =
+      "目前已确认直接故障是上下文溢出，但这只是表象：昨天运行了约 20 分钟后才失败。";
+
+    await handle.deliver(
+      {
+        text: `我按三层排查任务配置、运行记录和发布门禁。\n${finding}\n${finding}`,
+        channelData: { openclawProgressKind: "preamble" },
+      },
+      { kind: "block" },
+    );
+    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toBe(
+      `我按三层排查任务配置、运行记录和发布门禁。\n${finding}`,
+    );
+
+    await handle.deliver(
+      {
+        text: "🧰 Tool Call\n🛠 Exec\n🧰 Tool Call\n🛠 Exec",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+    );
+    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toBe(
+      `我按三层排查任务配置、运行记录和发布门禁。\n${finding}\n\n🧰 Tool Call\n🛠 Exec`,
+    );
+
+    await handle.deliver(
+      {
+        text: `我按三层排查任务配置、运行记录和发布门禁。\n${finding}\n整改方案已生成。`,
+        channelData: { openclawProgressKind: "preamble" },
+      },
+      { kind: "block" },
+    );
+    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toContain(
+      "整改方案已生成。",
+    );
+
+    await handle.deliver({ text: "最终答复" }, { kind: "final" });
+    const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalText).toContain("最终答复");
+    expect(finalText).not.toContain(finding);
+    expect(finalText).not.toContain("Tool Call");
+  });
+
   it("keeps OpenClaw progress visible when a req-id collision forces active push", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

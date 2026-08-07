@@ -165,6 +165,26 @@ function appendPreviewSuffixWithinLimits(params: PreviewSuffixParams): string {
   return composePreviewSuffixWithinLimits(params).text;
 }
 
+function composeTransientProgressSnapshot(texts: Iterable<string>): string {
+  const seenLines = new Set<string>();
+  const sections: string[] = [];
+  for (const text of texts) {
+    const uniqueLines: string[] = [];
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || seenLines.has(line)) {
+        continue;
+      }
+      seenLines.add(line);
+      uniqueLines.push(line);
+    }
+    if (uniqueLines.length > 0) {
+      sections.push(uniqueLines.join("\n"));
+    }
+  }
+  return sections.join("\n\n");
+}
+
 function appendFailureNoticeToProgress(progress: string, notice: string): string {
   const trimmedProgress = progress.trimEnd();
   const lastLineStart = trimmedProgress.lastIndexOf("\n") + 1;
@@ -998,7 +1018,9 @@ export function createBotWsReplyHandle(params: {
   let deferredMediaUrls: string[] = [];
   const rememberTransientProgress = (kind: string, text: string): string => {
     transientProgressTextByKind.set(kind, text);
-    latestTransientProgressText = [...transientProgressTextByKind.values()].join("\n\n");
+    latestTransientProgressText = composeTransientProgressSnapshot(
+      transientProgressTextByKind.values(),
+    );
     return latestTransientProgressText;
   };
   const resolveStreamId = () => {

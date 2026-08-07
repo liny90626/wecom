@@ -1,11 +1,27 @@
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
 import { resolveActiveEmbeddedRunSessionId } from "openclaw/plugin-sdk/agent-harness";
+import {
+  buildChannelProgressDraftLineForEntry,
+  formatChannelProgressDraftText,
+  mergeChannelProgressDraftLine,
+  type ChannelProgressDraftLine,
+} from "openclaw/plugin-sdk/channel-streaming";
 import { hasVisibleReplyBody } from "../shared/reply-visibility.js";
 import type { ReplyHandle, ReplyPayload } from "../types/index.js";
 import type { PreparedSession } from "./session-manager.js";
 
 type DispatchReply = PluginRuntime["channel"]["reply"]["dispatchReplyWithBufferedBlockDispatcher"];
 type ReplyOptions = NonNullable<Parameters<DispatchReply>[0]["replyOptions"]>;
+type StructuredProgressKind = "api" | "command" | "patch" | "search" | "tool";
+type StructuredProgressEvent = {
+  itemId?: string;
+  toolCallId?: string;
+  kind?: string;
+  name?: string;
+  phase?: string;
+  status?: string;
+  exitCode?: number | null;
+};
 type CompatibleReplyOptions = ReplyOptions & {
   // Added in 2026.7.1. Older cores ignore the extra runtime option.
   onTurnAdopted?: () => void | Promise<void>;
@@ -15,6 +31,144 @@ type CompatibleReplyOptions = ReplyOptions & {
 // but the detached lane still needs ordering at turn close. Keep the barrier
 // short so a broken ACK cannot hold the actual reply indefinitely.
 const DETACHED_PROGRESS_DRAIN_GRACE_MS = 500;
+const STRUCTURED_PROGRESS_MAX_LINES = 4;
+const STRUCTURED_PROGRESS_ENTRY = {
+  streaming: {
+    progress: {
+      commandText: "status",
+      label: false,
+      maxLineChars: 160,
+      maxLines: STRUCTURED_PROGRESS_MAX_LINES,
+    },
+  },
+};
+const SAFE_PROGRESS_TOOL_NAMES = new Set([
+  "approval",
+  "compaction",
+  "exec",
+  "plan",
+  "tool_call",
+]);
+
+function normalizeStructuredProgressKind(kind?: string): StructuredProgressKind | undefined {
+  const normalized = kind?.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  switch (normalized) {
+    case "api":
+      return "api";
+    case "command":
+    case "commandexecution":
+    case "exec":
+    case "shell":
+      return "command";
+    case "filechange":
+    case "patch":
+      return "patch";
+    case "search":
+    case "websearch":
+      return "search";
+    case "dynamictoolcall":
+    case "mcptoolcall":
+    case "tool":
+    case "toolcall":
+      return "tool";
+    default:
+      return undefined;
+  }
+}
+
+function normalizeStructuredProgressStatus(
+  status?: string,
+  phase?: string,
+  exitCode?: number | null,
+): string | undefined {
+  if (typeof exitCode === "number" && exitCode !== 0) {
+    return "failed";
+  }
+  const normalizedStatus = status?.trim().toLowerCase().replace(/[^a-z]+/g, "");
+  switch (normalizedStatus) {
+    case "blocked":
+    case "declined":
+    case "denied":
+      return "blocked";
+    case "cancelled":
+    case "canceled":
+      return "cancelled";
+    case "completed":
+    case "accepted":
+    case "approved":
+    case "granted":
+    case "resolved":
+    case "success":
+    case "succeeded":
+      return "completed";
+    case "error":
+    case "failed":
+      return "failed";
+    case "inprogress":
+    case "running":
+      return "running";
+    case "pending":
+    case "queued":
+      return "pending";
+    case "expired":
+      return "cancelled";
+    case "unavailable":
+      return "blocked";
+  }
+
+  if (exitCode === 0) {
+    return "completed";
+  }
+
+  const normalizedPhase = phase?.trim().toLowerCase().replace(/[^a-z]+/g, "");
+  if (normalizedPhase === "start" || normalizedPhase === "update") {
+    return "running";
+  }
+  if (normalizedPhase === "end" || normalizedPhase === "result") {
+    return "completed";
+  }
+  if (normalizedPhase === "error") {
+    return "failed";
+  }
+  return undefined;
+}
+
+function resolveStructuredProgressToolName(
+  kind: StructuredProgressKind,
+  name?: string,
+): string {
+  if (kind === "command") {
+    return "exec";
+  }
+  if (kind === "patch") {
+    return "apply_patch";
+  }
+  if (kind === "search") {
+    return "web_search";
+  }
+  const normalizedName = name?.trim().toLowerCase();
+  if (normalizedName && SAFE_PROGRESS_TOOL_NAMES.has(normalizedName)) {
+    return normalizedName;
+  }
+  return kind === "api" ? "api" : "tool_call";
+}
+
+function buildSafeStructuredProgressInput(payload: StructuredProgressEvent) {
+  const itemKind = normalizeStructuredProgressKind(payload.kind);
+  if (!itemKind) {
+    return undefined;
+  }
+  return {
+    event: "item" as const,
+    // OpenClaw can emit both a generic tool item and a specialized item for
+    // one call. A shared id keeps those lifecycle views on one visible line.
+    itemId: payload.toolCallId?.trim() || payload.itemId?.trim() || undefined,
+    toolCallId: payload.toolCallId,
+    itemKind,
+    name: resolveStructuredProgressToolName(itemKind, payload.name),
+    status: normalizeStructuredProgressStatus(payload.status, payload.phase, payload.exitCode),
+  };
+}
 
 // Two different outcomes, two different truths: the busy notice is only for an
 // inbound OpenClaw provably refused (dispatch admission released it), while an
@@ -93,10 +247,13 @@ export async function dispatchRuntimeReply(params: {
   let progressSealPromise: Promise<void> | undefined;
   let pendingReasoningSlot: { payload: ReplyPayload } | undefined;
   let pendingPreambleSlot: { payload?: ReplyPayload } | undefined;
+  let pendingStructuredProgressSlot: { payload?: ReplyPayload } | undefined;
   const anonymousPreambleItem = Symbol("anonymous-preamble");
   const preambleTextByItem = new Map<string | typeof anonymousPreambleItem, string>();
   const preambleItemOrder: Array<string | typeof anonymousPreambleItem> = [];
   let lastPreambleSnapshot = "";
+  let structuredProgressLines: ChannelProgressDraftLine[] = [];
+  let lastStructuredProgressSnapshot = "";
 
   const updateFastProgressState = (payload: ReplyPayload): boolean => {
     const text = payload.text?.trim() ?? "";
@@ -167,6 +324,7 @@ export async function dispatchRuntimeReply(params: {
       return;
     }
     freezePendingPreamble();
+    freezePendingStructuredProgress();
     if (pendingReasoningSlot) {
       pendingReasoningSlot.payload = payload;
       return;
@@ -184,6 +342,7 @@ export async function dispatchRuntimeReply(params: {
   const enqueueProgress = (payload: ReplyPayload, errorKind: "block" | "tool"): void => {
     pendingReasoningSlot = undefined;
     freezePendingPreamble();
+    freezePendingStructuredProgress();
     appendProgress(() => payload, errorKind);
   };
 
@@ -210,10 +369,79 @@ export async function dispatchRuntimeReply(params: {
     pendingPreambleSlot = undefined;
   }
 
-  const enqueuePreamble = (payload: { itemId?: string; progressText?: string }): void => {
+  const resolveStructuredProgressPayload = (): ReplyPayload | undefined => {
+    const snapshot = formatChannelProgressDraftText({
+      entry: STRUCTURED_PROGRESS_ENTRY,
+      lines: structuredProgressLines,
+      seed: sessionKey,
+    });
+    if (!snapshot || snapshot === lastStructuredProgressSnapshot) {
+      return undefined;
+    }
+    lastStructuredProgressSnapshot = snapshot;
+    return {
+      text: snapshot,
+      channelData: { openclawProgressKind: "structured-item" },
+    };
+  };
+
+  function freezePendingStructuredProgress(): void {
+    if (!pendingStructuredProgressSlot) {
+      return;
+    }
+    pendingStructuredProgressSlot.payload ??= resolveStructuredProgressPayload();
+    pendingStructuredProgressSlot = undefined;
+  }
+
+  const enqueueStructuredProgress = (payload: StructuredProgressEvent): boolean => {
+    if (!progressAccepting || abortSignal?.aborted) {
+      return false;
+    }
+    const input = buildSafeStructuredProgressInput(payload);
+    if (!input) {
+      return false;
+    }
+    const line = buildChannelProgressDraftLineForEntry(
+      STRUCTURED_PROGRESS_ENTRY,
+      input,
+      { markdown: false, detailMode: "explain", commandText: "status" },
+    );
+    if (!line) {
+      return false;
+    }
+    const nextLines = mergeChannelProgressDraftLine(structuredProgressLines, line, {
+      maxLines: STRUCTURED_PROGRESS_MAX_LINES,
+    });
+    if (nextLines === structuredProgressLines) {
+      return true;
+    }
+    structuredProgressLines = nextLines;
+    pendingReasoningSlot = undefined;
+    freezePendingPreamble();
+    if (pendingStructuredProgressSlot) {
+      return true;
+    }
+    const slot: { payload?: ReplyPayload } = {};
+    pendingStructuredProgressSlot = slot;
+    appendProgress(() => {
+      if (pendingStructuredProgressSlot === slot) {
+        pendingStructuredProgressSlot = undefined;
+      }
+      return slot.payload ?? resolveStructuredProgressPayload();
+    }, "block");
+    return true;
+  };
+
+  const observeStructuredProgress = (payload: StructuredProgressEvent): void => {
+    if (enqueueStructuredProgress(payload)) {
+      runActivityObserved = true;
+    }
+  };
+
+  const enqueuePreamble = (payload: { itemId?: string; progressText?: string }): boolean => {
     const text = payload.progressText?.trim() ?? "";
     if (!progressAccepting || abortSignal?.aborted || !text) {
-      return;
+      return false;
     }
     const itemId = payload.itemId?.trim() || anonymousPreambleItem;
     if (!preambleTextByItem.has(itemId)) {
@@ -222,12 +450,13 @@ export async function dispatchRuntimeReply(params: {
     // OpenClaw has already accumulated/replaced commentary deltas per item;
     // progressText is the authoritative current snapshot, not another delta.
     if (preambleTextByItem.get(itemId) === text) {
-      return;
+      return true;
     }
     preambleTextByItem.set(itemId, text);
     pendingReasoningSlot = undefined;
+    freezePendingStructuredProgress();
     if (pendingPreambleSlot) {
-      return;
+      return true;
     }
     const slot: { payload?: ReplyPayload } = {};
     pendingPreambleSlot = slot;
@@ -237,6 +466,7 @@ export async function dispatchRuntimeReply(params: {
       }
       return slot.payload ?? resolvePreamblePayload();
     }, "block");
+    return true;
   };
 
   const dropPendingProgress = (): void => {
@@ -244,6 +474,7 @@ export async function dispatchRuntimeReply(params: {
     progressCancelled = true;
     pendingReasoningSlot = undefined;
     pendingPreambleSlot = undefined;
+    pendingStructuredProgressSlot = undefined;
   };
 
   const sealProgress = async (): Promise<void> => {
@@ -356,20 +587,75 @@ export async function dispatchRuntimeReply(params: {
           );
         },
         onItemEvent: (payload) => {
-          if (payload.kind !== "preamble") {
+          if (payload.kind === "preamble") {
+            if (enqueuePreamble(payload)) {
+              runActivityObserved = true;
+            }
             return;
           }
-          runActivityObserved = true;
-          enqueuePreamble(payload);
+          observeStructuredProgress(payload);
+        },
+        allowToolLifecycleWhenProgressHidden: true,
+        onToolStart: (payload) => {
+          observeStructuredProgress({ ...payload, kind: "tool" });
+        },
+        onCommandOutput: (payload) => {
+          observeStructuredProgress({ ...payload, kind: "command" });
+        },
+        onPlanUpdate: (payload) => {
+          observeStructuredProgress({
+            itemId: "openclaw-plan",
+            kind: "tool",
+            name: "plan",
+            phase: payload.phase,
+          });
+        },
+        onApprovalEvent: (payload) => {
+          observeStructuredProgress({
+            itemId:
+              payload.toolCallId?.trim() ||
+              payload.approvalId?.trim() ||
+              "openclaw-approval",
+            toolCallId: payload.toolCallId,
+            kind: "tool",
+            name: "approval",
+            phase: payload.phase,
+            status: payload.status,
+          });
+        },
+        onPatchSummary: (payload) => {
+          observeStructuredProgress({
+            itemId: payload.itemId,
+            toolCallId: payload.toolCallId,
+            kind: "patch",
+            name: "apply_patch",
+            phase: payload.phase,
+          });
+        },
+        onCompactionStart: () => {
+          observeStructuredProgress({
+            itemId: "openclaw-compaction",
+            kind: "tool",
+            name: "compaction",
+            phase: "start",
+          });
+        },
+        onCompactionEnd: () => {
+          observeStructuredProgress({
+            itemId: "openclaw-compaction",
+            kind: "tool",
+            name: "compaction",
+            phase: "end",
+          });
         },
         onToolResult: (payload) => {
-          runActivityObserved = true;
           if (
             progressAccepting &&
             !abortSignal?.aborted &&
             isFastProgress(payload) &&
             updateFastProgressState(payload)
           ) {
+            runActivityObserved = true;
             enqueueProgress(payload, "tool");
           }
         },

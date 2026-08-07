@@ -45,6 +45,7 @@ vi.mock("@wecom/aibot-node-sdk", () => ({
 
 import { BotWsSdkAdapter } from "./sdk-adapter.js";
 import { getBotWsPushHandle, unregisterBotWsPushHandle } from "../../app/index.js";
+import { WecomGatewaySim } from "../../test-utils/wecom-gateway-sim.js";
 
 const waitForAsyncCallbacks = async () => {
   await Promise.resolve();
@@ -174,6 +175,359 @@ describe("BotWsSdkAdapter", () => {
     vi.useRealTimers();
   });
 
+  it("routes a frame without req_id through active push", async () => {
+    vi.useFakeTimers();
+    let replyHandle: any;
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (_event, handle) => {
+        replyHandle = handle;
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { warn: vi.fn() };
+    const adapter = new BotWsSdkAdapter(runtime as any, log as any);
+
+    adapter.start();
+    try {
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: {},
+        body: {
+          msgid: "msg-missing-req-id",
+          msgtype: "text",
+          chattype: "single",
+          from: { userid: "user-missing-req-id" },
+          text: { content: "hello" },
+        },
+      });
+      await Promise.resolve();
+
+      expect(replyHandle).toBeDefined();
+      expect(
+        log.warn.mock.calls.some(([message]) =>
+          String(message).includes("reason=missing-req-id"),
+        ),
+      ).toBe(true);
+      replyHandle.activate?.();
+      sdkMockState.client?.replyStream.mockClear();
+      sdkMockState.client?.sendMessage.mockClear();
+      await replyHandle.deliver({ text: "missing req_id final" }, { kind: "final" });
+      expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
+      expect(sdkMockState.client?.sendMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      adapter.stop();
+    }
+  });
+
+  it("keeps an unexpired req_id claim after more than 1,024 newer req_ids", async () => {
+    vi.useFakeTimers();
+    const replyHandles: any[] = [];
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (_event, replyHandle) => {
+        replyHandles.push(replyHandle);
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { warn: vi.fn() };
+    const adapter = new BotWsSdkAdapter(runtime as any, log as any);
+    const emitTextFrame = (reqId: string, messageId: string) => {
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: reqId },
+        body: {
+          msgid: messageId,
+          msgtype: "text",
+          chattype: "single",
+          from: { userid: "user-claim-capacity" },
+          text: { content: messageId },
+        },
+      });
+    };
+
+    adapter.start();
+    try {
+      emitTextFrame("req-protected", "msg-protected-first");
+      for (let index = 0; index < 1_024; index += 1) {
+        emitTextFrame(`req-filler-${index}`, `msg-filler-${index}`);
+      }
+      emitTextFrame("req-protected", "msg-protected-successor");
+      await Promise.resolve();
+
+      expect(runtime.handleEvent).toHaveBeenCalledTimes(1_026);
+      expect(
+        log.warn.mock.calls.some(([message]) => String(message).includes("reason=claim-capacity")),
+      ).toBe(true);
+      expect(
+        log.warn.mock.calls.some(([message]) => String(message).includes("reason=req-id-collision")),
+      ).toBe(true);
+      const originalHandle = replyHandles[0];
+      const overflowHandle = replyHandles.at(-2);
+      const successorHandle = replyHandles.at(-1);
+      expect(originalHandle).toBeDefined();
+      expect(overflowHandle).toBeDefined();
+      expect(successorHandle).toBeDefined();
+      sdkMockState.client?.replyStream.mockClear();
+      sdkMockState.client?.sendMessage.mockClear();
+
+      overflowHandle.activate?.();
+      await overflowHandle.deliver({ text: "overflow final" }, { kind: "final" });
+      expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
+      expect(sdkMockState.client?.sendMessage).toHaveBeenCalledTimes(1);
+
+      sdkMockState.client?.replyStream.mockClear();
+      sdkMockState.client?.sendMessage.mockClear();
+      successorHandle.activate?.();
+      await successorHandle.deliver({ text: "successor final" }, { kind: "final" });
+      expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
+      expect(sdkMockState.client?.sendMessage).toHaveBeenCalledTimes(1);
+
+      emitTextFrame("req-protected", "msg-protected-successor");
+      await Promise.resolve();
+      const successorRedeliveryHandle = replyHandles.at(-1);
+      sdkMockState.client?.replyStream.mockClear();
+      sdkMockState.client?.sendMessage.mockClear();
+      successorRedeliveryHandle.activate?.();
+      await successorRedeliveryHandle.deliver(
+        { text: "successor redelivery final" },
+        { kind: "final" },
+      );
+      expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
+      expect(sdkMockState.client?.sendMessage).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(8 * 60_000 + 1);
+      emitTextFrame("req-protected", "msg-protected-after-expiry");
+      await Promise.resolve();
+      const afterExpiryHandle = replyHandles.at(-1);
+      sdkMockState.client?.replyStream.mockClear();
+      sdkMockState.client?.sendMessage.mockClear();
+      afterExpiryHandle.activate?.();
+      await vi.advanceTimersByTimeAsync(0);
+      await afterExpiryHandle.deliver({ text: "after expiry final" }, { kind: "final" });
+      expect(sdkMockState.client?.replyStream).toHaveBeenCalledTimes(2);
+      expect(sdkMockState.client?.sendMessage).not.toHaveBeenCalled();
+
+      sdkMockState.client?.replyStream.mockClear();
+      sdkMockState.client?.sendMessage.mockClear();
+      await originalHandle.deliver({ text: "original owner late final" }, { kind: "final" });
+      expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
+      expect(sdkMockState.client?.sendMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      adapter.stop();
+    }
+  });
+
+  it("gives only the first handle callback ownership on exact message redelivery", async () => {
+    vi.useFakeTimers();
+    const replyHandles: any[] = [];
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (_event, replyHandle) => {
+        replyHandles.push(replyHandle);
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { warn: vi.fn() };
+    const adapter = new BotWsSdkAdapter(runtime as any, log as any);
+    const frame = {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-exact-redelivery" },
+      body: {
+        msgid: "msg-exact-redelivery",
+        msgtype: "text",
+        chattype: "single",
+        from: { userid: "user-redelivery" },
+        text: { content: "same message" },
+      },
+    };
+
+    adapter.start();
+    try {
+      sdkMockState.client?.emit("message", frame);
+      sdkMockState.client?.emit("message", frame);
+      await Promise.resolve();
+
+      expect(replyHandles).toHaveLength(2);
+      expect(
+        log.warn.mock.calls.some(([message]) => String(message).includes("reason=req-id-collision")),
+      ).toBe(true);
+      const [originalHandle, redeliveryHandle] = replyHandles;
+
+      originalHandle.activate?.();
+      await vi.advanceTimersByTimeAsync(0);
+      sdkMockState.client?.replyStream.mockClear();
+      sdkMockState.client?.sendMessage.mockClear();
+      await originalHandle.deliver({ text: "identical final" }, { kind: "final" });
+      expect(sdkMockState.client?.replyStream).toHaveBeenCalledTimes(1);
+      expect(sdkMockState.client?.sendMessage).not.toHaveBeenCalled();
+
+      sdkMockState.client?.replyStream.mockClear();
+      sdkMockState.client?.sendMessage.mockClear();
+      redeliveryHandle.activate?.();
+      await redeliveryHandle.deliver({ text: "identical final" }, { kind: "final" });
+      expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
+      expect(sdkMockState.client?.sendMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      adapter.stop();
+    }
+  });
+
+  it("does not reuse an expired req_id while an SDK ACK is still pending", async () => {
+    vi.useFakeTimers();
+    const replyHandles: any[] = [];
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (_event, replyHandle) => {
+        replyHandles.push(replyHandle);
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { warn: vi.fn() };
+    const adapter = new BotWsSdkAdapter(runtime as any, log as any);
+    const emitFrame = (messageId: string) => {
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-pending-at-expiry" },
+        body: {
+          msgid: messageId,
+          msgtype: "text",
+          chattype: "single",
+          from: { userid: "user-pending-at-expiry" },
+          text: { content: messageId },
+        },
+      });
+    };
+
+    adapter.start();
+    try {
+      emitFrame("msg-before-expiry");
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(8 * 60_000 + 1);
+      (sdkMockState.client as any).hasPendingReplyAck = vi.fn(() => true);
+      emitFrame("msg-after-expiry");
+      await Promise.resolve();
+
+      expect(replyHandles).toHaveLength(2);
+      expect(
+        log.warn.mock.calls.some(([message]) =>
+          String(message).includes("reason=req-id-pending-ack"),
+        ),
+      ).toBe(true);
+      const successorHandle = replyHandles[1];
+      sdkMockState.client?.replyStream.mockClear();
+      sdkMockState.client?.sendMessage.mockClear();
+      await successorHandle.deliver({ text: "successor pending-ack final" }, { kind: "final" });
+      expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
+      expect(sdkMockState.client?.sendMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      adapter.stop();
+    }
+  });
+
+  it("keeps a new owner's identical final when the old owner loses claim during ACK wait", async () => {
+    vi.useFakeTimers();
+    const replyHandles: any[] = [];
+    let pendingAck = false;
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (_event, replyHandle) => {
+        replyHandles.push(replyHandle);
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+    const emitFrame = (messageId: string) => {
+      sdkMockState.client?.emit("message", {
+        cmd: "aibot_msg_callback",
+        headers: { req_id: "req-owner-switch-during-wait" },
+        body: {
+          msgid: messageId,
+          msgtype: "text",
+          chattype: "single",
+          from: { userid: "user-owner-switch" },
+          text: { content: messageId },
+        },
+      });
+    };
+
+    adapter.start();
+    try {
+      (sdkMockState.client as any).hasPendingReplyAck = vi.fn(() => pendingAck);
+      emitFrame("msg-old-owner");
+      await Promise.resolve();
+      const oldHandle = replyHandles[0];
+      await vi.advanceTimersByTimeAsync(8 * 60_000 - 50);
+
+      pendingAck = true;
+      const oldFinalPromise = oldHandle.deliver({ text: "identical switched final" }, { kind: "final" });
+      await Promise.resolve();
+      pendingAck = false;
+      await vi.advanceTimersByTimeAsync(51);
+      emitFrame("msg-new-owner");
+      await Promise.resolve();
+      const newHandle = replyHandles[1];
+
+      sdkMockState.client?.replyStream.mockClear();
+      sdkMockState.client?.sendMessage.mockClear();
+      await newHandle.deliver({ text: "identical switched final" }, { kind: "final" });
+      expect(sdkMockState.client?.replyStream).toHaveBeenCalledTimes(1);
+      expect(sdkMockState.client?.sendMessage).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(49);
+      await oldFinalPromise;
+      expect(sdkMockState.client?.replyStream).toHaveBeenCalledTimes(1);
+      expect(sdkMockState.client?.sendMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      adapter.stop();
+    }
+  });
+
   it("leaves normal dispatch settlement to the runtime dispatcher", async () => {
     vi.useFakeTimers();
     const markDispatchSettled = vi.fn();
@@ -270,6 +624,235 @@ describe("BotWsSdkAdapter", () => {
         },
       ],
     });
+  });
+
+  it.each([
+    ["slow ACK", { ackLatencyMs: 1_500 }, false],
+    ["lost placeholder ACK", { ackLatencyMs: 60, dropAckOnSend: [1] }, true],
+  ])(
+    "keeps Agent body cumulative after a file frame merges with following text under %s",
+    async (_label, gatewayOptions, expectsActivePush) => {
+    vi.useFakeTimers();
+    let dispatchSettled = false;
+    const userId = expectsActivePush ? "user-lost-ack" : "user-slow-ack";
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (event, replyHandle) => {
+        const waitForNextAgentUpdate = () =>
+          new Promise<void>((resolve) => setTimeout(resolve, 700));
+        expect(event).toMatchObject({
+          messageId: "msg-text-cumulative",
+          text: "请分析这个文件",
+          dedupeAliases: ["msg-file-cumulative"],
+        });
+        expect(event.attachments).toHaveLength(1);
+        replyHandle.activate?.();
+        await replyHandle.deliver(
+          {
+            text: "正在读取附件",
+            channelData: { openclawProgressKind: "preamble" },
+          },
+          { kind: "block" },
+        );
+        await waitForNextAgentUpdate();
+        await replyHandle.deliver({ text: "第一段正文。" }, { kind: "block" });
+        await waitForNextAgentUpdate();
+        await replyHandle.deliver(
+          {
+            text: "正在继续分析",
+            channelData: { openclawProgressKind: "preamble" },
+          },
+          { kind: "block" },
+        );
+        await waitForNextAgentUpdate();
+        await replyHandle.deliver({ text: "第二段正文。" }, { kind: "block" });
+        await waitForNextAgentUpdate();
+        await replyHandle.deliver({ text: "第三段结论。" }, { kind: "final" });
+        replyHandle.markDispatchSettled?.();
+        dispatchSettled = true;
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+    adapter.start();
+    const client = sdkMockState.client;
+    expect(client).not.toBeNull();
+    // Keep the file placeholder ACK pending when the text and Agent updates
+    // arrive. This exercises the SDK's non-blocking "skipped" path and the
+    // reply handle's single latest-preview slot, not just the happy path.
+    const sim = new WecomGatewaySim(gatewayOptions);
+    client!.replyStream.mockImplementation(sim.replyStream.bind(sim) as any);
+    (client as any).replyStreamNonBlocking = vi.fn(sim.replyStreamNonBlocking.bind(sim));
+    (client as any).hasPendingReplyAck = vi.fn(sim.hasPendingReplyAck.bind(sim));
+    client!.sendMessage.mockImplementation(sim.sendMessage.bind(sim) as any);
+
+    client!.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-file-cumulative" },
+      body: {
+        msgid: "msg-file-cumulative",
+        msgtype: "file",
+        chattype: "single",
+        from: { userid: userId },
+        file: { url: "https://example.com/cumulative.pdf", aeskey: "file-key" },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    client!.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-text-cumulative" },
+      body: {
+        msgid: "msg-text-cumulative",
+        msgtype: "text",
+        chattype: "single",
+        from: { userid: userId },
+        text: { content: "请分析这个文件" },
+      },
+    });
+
+    for (let elapsed = 0; elapsed < 10_000 && !dispatchSettled; elapsed += 100) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(dispatchSettled).toBe(true);
+    expect(runtime.handleEvent).toHaveBeenCalledOnce();
+    if (expectsActivePush) {
+      await vi.advanceTimersByTimeAsync(15_000);
+    }
+
+    const bubble = sim.streamBubble("req-file-cumulative");
+    if (expectsActivePush) {
+      const pushedFinal = sim.chat.findLast((entry) => entry.kind === "push");
+      expect(pushedFinal?.kind).toBe("push");
+      expect(pushedFinal?.content).toContain("第一段正文。");
+      expect(pushedFinal?.content).toContain("第二段正文。");
+      expect(pushedFinal?.content).toContain("第三段结论。");
+      expect(pushedFinal?.content).not.toContain("正在继续分析");
+    } else {
+      expect(bubble?.kind).toBe("stream");
+      if (bubble?.kind !== "stream") {
+        throw new Error("expected the merged turn to use the file frame's stream bubble");
+      }
+      const firstBodyRevision = bubble.history.findIndex((text) => text.includes("第一段正文。"));
+      expect(firstBodyRevision).toBeGreaterThanOrEqual(0);
+      expect(
+        bubble.history.some(
+          (text) => text.includes("第一段正文。") && !text.includes("第三段结论。"),
+        ),
+      ).toBe(true);
+      for (const revision of bubble.history.slice(firstBodyRevision)) {
+        expect(revision).toContain("第一段正文。");
+      }
+      expect(bubble.content).toContain("第一段正文。");
+      expect(bubble.content).toContain("第二段正文。");
+      expect(bubble.content).toContain("第三段结论。");
+      expect(bubble.content).not.toContain("正在继续分析");
+    }
+    expect(sim.streamBubble("req-text-cumulative")).toBeUndefined();
+
+    adapter.stop();
+    },
+  );
+
+  it("keeps Agent body cumulative for one documented mixed text-image frame", async () => {
+    vi.useFakeTimers();
+    let dispatchSettled = false;
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn(async (event, replyHandle) => {
+        expect(event).toMatchObject({
+          messageId: "msg-mixed-cumulative",
+          inboundKind: "mixed",
+          text: "请分析这张图\n[image] https://example.com/mixed.png",
+          attachments: [
+            {
+              name: "image",
+              remoteUrl: "https://example.com/mixed.png",
+              aesKey: "mixed-key",
+            },
+          ],
+        });
+        replyHandle.activate?.();
+        await replyHandle.deliver({ text: "第一段正文。" }, { kind: "block" });
+        await new Promise<void>((resolve) => setTimeout(resolve, 700));
+        await replyHandle.deliver({ text: "第二段正文。" }, { kind: "block" });
+        await new Promise<void>((resolve) => setTimeout(resolve, 700));
+        await replyHandle.deliver({ text: "第三段结论。" }, { kind: "final" });
+        replyHandle.markDispatchSettled?.();
+        dispatchSettled = true;
+      }),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+
+    const adapter = new BotWsSdkAdapter(runtime as any, {} as any);
+    adapter.start();
+    const client = sdkMockState.client;
+    expect(client).not.toBeNull();
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    client!.replyStream.mockImplementation(sim.replyStream.bind(sim) as any);
+    (client as any).replyStreamNonBlocking = vi.fn(sim.replyStreamNonBlocking.bind(sim));
+    (client as any).hasPendingReplyAck = vi.fn(sim.hasPendingReplyAck.bind(sim));
+    client!.sendMessage.mockImplementation(sim.sendMessage.bind(sim) as any);
+
+    client!.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-mixed-cumulative" },
+      body: {
+        msgid: "msg-mixed-cumulative",
+        msgtype: "mixed",
+        chattype: "single",
+        from: { userid: "user-1" },
+        mixed: {
+          msg_item: [
+            { msgtype: "text", text: { content: "请分析这张图" } },
+            {
+              msgtype: "image",
+              image: { url: "https://example.com/mixed.png", aeskey: "mixed-key" },
+            },
+          ],
+        },
+      },
+    });
+
+    for (let elapsed = 0; elapsed < 5_000 && !dispatchSettled; elapsed += 100) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(dispatchSettled).toBe(true);
+    expect(runtime.handleEvent).toHaveBeenCalledOnce();
+
+    const bubble = sim.streamBubble("req-mixed-cumulative");
+    expect(bubble?.kind).toBe("stream");
+    if (bubble?.kind !== "stream") {
+      throw new Error("expected the mixed turn to use its only inbound stream bubble");
+    }
+    const firstBodyRevision = bubble.history.findIndex((text) => text.includes("第一段正文。"));
+    expect(firstBodyRevision).toBeGreaterThanOrEqual(0);
+    for (const revision of bubble.history.slice(firstBodyRevision)) {
+      expect(revision).toContain("第一段正文。");
+    }
+    expect(bubble.content).toContain("第一段正文。");
+    expect(bubble.content).toContain("第二段正文。");
+    expect(bubble.content).toContain("第三段结论。");
+
+    adapter.stop();
   });
 
   it("acknowledges a media frame while its merge window is still open", async () => {
@@ -525,7 +1108,9 @@ describe("BotWsSdkAdapter", () => {
     }
   });
 
-  it("dispatches later text separately after the media merge window expires", async () => {
+  it.each([1_000, 1_001])(
+    "dispatches later text separately at or after the media merge window (%dms)",
+    async (textDelayMs) => {
     vi.useFakeTimers();
     const runtime = {
       account: {
@@ -556,7 +1141,7 @@ describe("BotWsSdkAdapter", () => {
           file: { url: "https://example.com/expired.pdf", aeskey: "expired-key" },
         },
       });
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(textDelayMs);
       expect(runtime.handleEvent).toHaveBeenCalledOnce();
 
       sdkMockState.client?.emit("message", {
@@ -582,7 +1167,8 @@ describe("BotWsSdkAdapter", () => {
       adapter.stop();
       vi.useRealTimers();
     }
-  });
+    },
+  );
 
   it("flushes standalone media and keeps merge windows isolated per peer", async () => {
     vi.useFakeTimers();

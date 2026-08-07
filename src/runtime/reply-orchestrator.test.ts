@@ -113,11 +113,6 @@ describe("dispatchRuntimeReply", () => {
         kind: "preamble",
         progressText: "正在读取仓库配置",
       });
-      await params.replyOptions.onItemEvent({
-        itemId: "tool-1",
-        kind: "command_execution",
-        progressText: "internal tool status",
-      });
       await params.dispatcherOptions.deliver({ text: "配置检查完成" }, { kind: "final" });
       return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
     });
@@ -151,6 +146,533 @@ describe("dispatchRuntimeReply", () => {
       { kind: "final" },
     );
     expect(deliver).toHaveBeenCalledTimes(2);
+  });
+
+  it("forwards structured OpenClaw work-item progress before a long-task failure", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onItemEvent({
+        itemId: "tool:long-step-1",
+        toolCallId: "long-step-1",
+        kind: "tool",
+        title: "exec cat /private/credentials",
+        name: "internal_customer_secret_api",
+        phase: "start",
+        status: "running",
+        meta: "cat /private/credentials",
+        progressText: "SECRET_COMMAND_OUTPUT",
+      });
+      await params.replyOptions.onItemEvent({
+        itemId: "command:long-step-1",
+        toolCallId: "long-step-1",
+        kind: "command_execution",
+        title: "command cat /private/credentials",
+        name: "bash",
+        phase: "end",
+        status: "failed",
+        summary: "SECRET_COMMAND_OUTPUT",
+        progressText: "SECRET_COMMAND_OUTPUT",
+        meta: "cat /private/credentials",
+      });
+      await params.dispatcherOptions.deliver(
+        { text: "LLM request failed.", isError: true },
+        { kind: "final" },
+      );
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-structured-progress" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    expect(deliver).toHaveBeenNthCalledWith(
+      1,
+      {
+        text: "🧰 Tool Call: running",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+    );
+    expect(deliver).toHaveBeenNthCalledWith(
+      2,
+      {
+        text: "🛠️ Exec: failed",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+    );
+    expect(deliver).toHaveBeenNthCalledWith(
+      3,
+      { text: "LLM request failed.", isError: true },
+      { kind: "final" },
+    );
+    expect(JSON.stringify(deliver.mock.calls)).not.toContain("/private/credentials");
+    expect(JSON.stringify(deliver.mock.calls)).not.toContain("SECRET_COMMAND_OUTPUT");
+    expect(JSON.stringify(deliver.mock.calls)).not.toContain("internal_customer_secret_api");
+  });
+
+  it.each([
+    ["accepted", "🧩 Approval"],
+    ["approved", "🧩 Approval"],
+    ["expired", "Approval: cancelled"],
+    ["unavailable", "Approval: blocked"],
+  ])("normalizes structured progress status %s", async (status, expectedProgress) => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onItemEvent({
+        itemId: `approval-${status}`,
+        kind: "tool",
+        name: "approval",
+        status,
+      });
+      await params.dispatcherOptions.deliver({ text: "done" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: `session-status-${status}` } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    expect(String(deliver.mock.calls[0]?.[0]?.text ?? "")).toContain(expectedProgress);
+    expect(deliver).toHaveBeenLastCalledWith({ text: "done" }, { kind: "final" });
+  });
+
+  it("receives sanitized work-item progress through the real OpenClaw dispatcher", async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const previousTestFast = process.env.OPENCLAW_TEST_FAST;
+    process.env.OPENCLAW_STATE_DIR = "/tmp/wecom-openclaw-progress-dispatcher-test";
+    process.env.OPENCLAW_TEST_FAST = "1";
+    try {
+      const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
+        "openclaw/plugin-sdk/reply-runtime"
+      );
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation((params) =>
+        realDispatch({
+          ...params,
+          replyResolver: async (_ctx, options) => {
+            await options.onItemEvent?.({
+              itemId: "command:real-1",
+              toolCallId: "real-1",
+              kind: "command",
+              title: "command cat /private/runtime-secret",
+              name: "exec",
+              phase: "start",
+              status: "running",
+              meta: "cat /private/runtime-secret",
+              progressText: "REAL_SECRET_OUTPUT",
+            });
+            return { text: "真实 dispatcher 最终答案" };
+          },
+        }),
+      );
+      const deliver = vi.fn().mockResolvedValue(undefined);
+
+      await dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: {
+          ctx: {
+            Body: "执行长任务",
+            RawBody: "执行长任务",
+            CommandBody: "执行长任务",
+            From: "user-real-dispatcher",
+            To: "wecom-bot",
+            SessionKey: "agent:main:wecom:direct:user-real-dispatcher",
+            Provider: "wecom",
+            Surface: "wecom",
+            ChatType: "direct",
+            AccountId: "default",
+            MessageSid: "msg-real-dispatcher",
+          },
+        } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+        } as any,
+      });
+
+      expect(deliver.mock.calls).toEqual([
+        [
+          {
+            text: "🛠️ Exec: running",
+            channelData: { openclawProgressKind: "structured-item" },
+          },
+          { kind: "block" },
+        ],
+        [{ text: "真实 dispatcher 最终答案" }, { kind: "final" }],
+      ]);
+      expect(JSON.stringify(deliver.mock.calls)).not.toContain("/private/runtime-secret");
+      expect(JSON.stringify(deliver.mock.calls)).not.toContain("REAL_SECRET_OUTPUT");
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      if (previousTestFast === undefined) {
+        delete process.env.OPENCLAW_TEST_FAST;
+      } else {
+        process.env.OPENCLAW_TEST_FAST = previousTestFast;
+      }
+    }
+  });
+
+  it("receives sanitized tool lifecycle progress when OpenClaw emits no item event", async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const previousTestFast = process.env.OPENCLAW_TEST_FAST;
+    process.env.OPENCLAW_STATE_DIR = "/tmp/wecom-openclaw-tool-lifecycle-dispatcher-test";
+    process.env.OPENCLAW_TEST_FAST = "1";
+    try {
+      const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
+        "openclaw/plugin-sdk/reply-runtime"
+      );
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation((params) =>
+        realDispatch({
+          ...params,
+          replyResolver: async (_ctx, options) => {
+            await options.onToolStart?.({
+              itemId: "tool:lifecycle-1",
+              toolCallId: "lifecycle-1",
+              name: "exec",
+              phase: "start",
+              args: { command: "cat /private/tool-start-secret" },
+              detailMode: "raw",
+            });
+            await options.onCommandOutput?.({
+              itemId: "command:lifecycle-1",
+              toolCallId: "lifecycle-1",
+              name: "exec",
+              phase: "end",
+              status: "failed",
+              exitCode: 1,
+              output: "TOOL_LIFECYCLE_SECRET_OUTPUT",
+              cwd: "/private/tool-lifecycle-cwd",
+            });
+            return { text: "工具生命周期 dispatcher 最终答案" };
+          },
+        }),
+      );
+      const deliver = vi.fn().mockResolvedValue(undefined);
+
+      await dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: {
+          ctx: {
+            Body: "执行只有 tool lifecycle 的长任务",
+            RawBody: "执行只有 tool lifecycle 的长任务",
+            CommandBody: "执行只有 tool lifecycle 的长任务",
+            From: "user-tool-lifecycle",
+            To: "wecom-bot",
+            SessionKey: "agent:main:wecom:direct:user-tool-lifecycle",
+            Provider: "wecom",
+            Surface: "wecom",
+            ChatType: "direct",
+            AccountId: "default",
+            MessageSid: "msg-tool-lifecycle",
+          },
+        } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+        } as any,
+      });
+
+      expect(deliver.mock.calls).toEqual([
+        [
+          {
+            text: "🛠️ Exec: running",
+            channelData: { openclawProgressKind: "structured-item" },
+          },
+          { kind: "block" },
+        ],
+        [
+          {
+            text: "🛠️ Exec: failed",
+            channelData: { openclawProgressKind: "structured-item" },
+          },
+          { kind: "block" },
+        ],
+        [{ text: "工具生命周期 dispatcher 最终答案" }, { kind: "final" }],
+      ]);
+      expect(JSON.stringify(deliver.mock.calls)).not.toContain("/private/tool-start-secret");
+      expect(JSON.stringify(deliver.mock.calls)).not.toContain("TOOL_LIFECYCLE_SECRET_OUTPUT");
+      expect(JSON.stringify(deliver.mock.calls)).not.toContain("/private/tool-lifecycle-cwd");
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      if (previousTestFast === undefined) {
+        delete process.env.OPENCLAW_TEST_FAST;
+      } else {
+        process.env.OPENCLAW_TEST_FAST = previousTestFast;
+      }
+    }
+  });
+
+  it("receives sanitized plan, approval, patch, and compaction lifecycle progress", async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const previousTestFast = process.env.OPENCLAW_TEST_FAST;
+    process.env.OPENCLAW_STATE_DIR = "/tmp/wecom-openclaw-extended-lifecycle-test";
+    process.env.OPENCLAW_TEST_FAST = "1";
+    try {
+      const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
+        "openclaw/plugin-sdk/reply-runtime"
+      );
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation((params) =>
+        realDispatch({
+          ...params,
+          replyResolver: async (_ctx, options) => {
+            await options.onPlanUpdate?.({
+              phase: "start",
+              title: "SECRET_PLAN_TITLE",
+              explanation: "SECRET_PLAN_EXPLANATION",
+              steps: ["inspect /private/plan-secret"],
+              source: "SECRET_PLAN_SOURCE",
+            });
+            await options.onApprovalEvent?.({
+              phase: "requested",
+              kind: "command",
+              status: "pending",
+              title: "SECRET_APPROVAL_TITLE",
+              approvalId: "approval-private-1",
+              command: "cat /private/approval-secret",
+              host: "private-host",
+              reason: "SECRET_APPROVAL_REASON",
+              message: "SECRET_APPROVAL_MESSAGE",
+            });
+            await options.onPatchSummary?.({
+              itemId: "patch:extended-1",
+              toolCallId: "extended-1",
+              phase: "end",
+              title: "SECRET_PATCH_TITLE",
+              name: "apply_patch",
+              added: ["/private/added-secret"],
+              modified: ["/private/modified-secret"],
+              summary: "SECRET_PATCH_SUMMARY",
+            });
+            await options.onCompactionStart?.();
+            await options.onCompactionEnd?.();
+            return { text: "扩展生命周期 dispatcher 最终答案" };
+          },
+        }),
+      );
+      const deliver = vi.fn().mockResolvedValue(undefined);
+
+      await dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: {
+          ctx: {
+            Body: "执行包含多类生命周期事件的长任务",
+            RawBody: "执行包含多类生命周期事件的长任务",
+            CommandBody: "执行包含多类生命周期事件的长任务",
+            From: "user-extended-lifecycle",
+            To: "wecom-bot",
+            SessionKey: "agent:main:wecom:direct:user-extended-lifecycle",
+            Provider: "wecom",
+            Surface: "wecom",
+            ChatType: "direct",
+            AccountId: "default",
+            MessageSid: "msg-extended-lifecycle",
+          },
+        } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+        } as any,
+      });
+
+      const progressText = deliver.mock.calls
+        .filter((call) => call[1]?.kind === "block")
+        .map((call) => String(call[0]?.text ?? ""))
+        .join("\n");
+      expect(progressText).toContain("Plan: running");
+      expect(progressText).toContain("Approval: pending");
+      expect(progressText).toContain("Apply Patch");
+      expect(progressText).toContain("Compaction");
+      expect(deliver).toHaveBeenLastCalledWith(
+        { text: "扩展生命周期 dispatcher 最终答案" },
+        { kind: "final" },
+      );
+      expect(JSON.stringify(deliver.mock.calls)).not.toContain("SECRET_");
+      expect(JSON.stringify(deliver.mock.calls)).not.toContain("/private/");
+      expect(JSON.stringify(deliver.mock.calls)).not.toContain("private-host");
+      expect(JSON.stringify(deliver.mock.calls)).not.toContain("approval-private-1");
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      if (previousTestFast === undefined) {
+        delete process.env.OPENCLAW_TEST_FAST;
+      } else {
+        process.env.OPENCLAW_TEST_FAST = previousTestFast;
+      }
+    }
+  });
+
+  it.each([
+    [
+      "future-internal",
+      {
+        kind: "future_internal",
+        phase: "start",
+        status: "running",
+        title: "SECRET_FUTURE_TITLE",
+        output: "SECRET_FUTURE_OUTPUT",
+      },
+    ],
+    ["analysis", { kind: "analysis", phase: "start", status: "running" }],
+    ["status", { kind: "status", phase: "update", status: "running" }],
+    ["empty-preamble", { kind: "preamble", progressText: "   " }],
+  ])(
+    "keeps fallback-eligible zero output failing after filtered %s item events",
+    async (caseId, itemEvent) => {
+      const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+      const previousTestFast = process.env.OPENCLAW_TEST_FAST;
+      process.env.OPENCLAW_STATE_DIR = `/tmp/wecom-openclaw-filtered-item-${caseId}`;
+      process.env.OPENCLAW_TEST_FAST = "1";
+      try {
+        const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
+          "openclaw/plugin-sdk/reply-runtime"
+        );
+        const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation((params) =>
+          realDispatch({
+            ...params,
+            replyResolver: async (_ctx, options) => {
+              await options.onAgentRunStart?.(`run-filtered-${caseId}`);
+              await options.onItemEvent?.(itemEvent);
+              return undefined;
+            },
+          }),
+        );
+        const deliver = vi.fn().mockResolvedValue(undefined);
+        const fail = vi.fn().mockResolvedValue(undefined);
+
+        await expect(
+          dispatchRuntimeReply({
+            core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+            cfg: {} as any,
+            session: {
+              ctx: {
+                Body: `执行过滤事件回归 ${caseId}`,
+                RawBody: `执行过滤事件回归 ${caseId}`,
+                CommandBody: `执行过滤事件回归 ${caseId}`,
+                From: `user-filtered-${caseId}`,
+                To: "wecom-bot",
+                SessionKey: `agent:main:wecom:direct:user-filtered-${caseId}`,
+                Provider: "wecom",
+                Surface: "wecom",
+                ChatType: "direct",
+                AccountId: "default",
+                MessageSid: `msg-filtered-${caseId}`,
+              },
+            } as any,
+            replyHandle: {
+              context: {
+                transport: "bot-ws",
+                accountId: "default",
+                raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+              },
+              deliver,
+              fail,
+            } as any,
+          }),
+        ).rejects.toMatchObject({ name: "WeComReplyNoVisibleOutputError" });
+
+        expect(deliver).not.toHaveBeenCalled();
+        expect(fail).toHaveBeenCalledOnce();
+        expect(fail.mock.calls[0]?.[0]).toMatchObject({
+          name: "WeComReplyNoVisibleOutputError",
+        });
+        expect(JSON.stringify(deliver.mock.calls)).not.toContain("SECRET_FUTURE");
+      } finally {
+        if (previousStateDir === undefined) {
+          delete process.env.OPENCLAW_STATE_DIR;
+        } else {
+          process.env.OPENCLAW_STATE_DIR = previousStateDir;
+        }
+        if (previousTestFast === undefined) {
+          delete process.env.OPENCLAW_TEST_FAST;
+        } else {
+          process.env.OPENCLAW_TEST_FAST = previousTestFast;
+        }
+      }
+    },
+  );
+
+  it("keeps fallback-eligible zero output failing after a filtered ordinary tool result", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onAgentRunStart?.("run-filtered-tool-result");
+      await params.replyOptions.onToolResult({
+        text: "SECRET_FILTERED_TOOL_RESULT",
+        channelData: { internalOnly: true },
+      });
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        noVisibleReplyFallbackEligible: true,
+      };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-filtered-tool-result" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).rejects.toMatchObject({ name: "WeComReplyNoVisibleOutputError" });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(fail).toHaveBeenCalledOnce();
+    expect(JSON.stringify(deliver.mock.calls)).not.toContain("SECRET_FILTERED_TOOL_RESULT");
   });
 
   it("preserves preamble order when OpenClaw omits an item id", async () => {

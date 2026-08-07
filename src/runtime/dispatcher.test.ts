@@ -362,6 +362,85 @@ describe("dispatchInboundEvent", () => {
     }
   });
 
+  it("keeps a running message adoptable after transient OpenClaw progress", async () => {
+    let releaseTextRun!: () => void;
+    const textRun = new Promise<{ queuedFinal: boolean; counts: Record<string, number> }>(
+      (resolve) => {
+        releaseTextRun = () =>
+          resolve({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+      },
+    );
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementationOnce(async (params) => {
+        await params.dispatcherOptions.deliver(
+          {
+            text: "🛠️ Exec: running",
+            channelData: { openclawProgressKind: "structured-item" },
+          },
+          { kind: "block" },
+        );
+        return textRun;
+      })
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const store = makeStore();
+    const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const fileMedia = {
+      normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+      saveInboundAttachment: vi.fn(),
+    };
+    const fileEvent = {
+      ...makeEvent("msg-late-file-after-progress", "[file] report.pdf"),
+      inboundKind: "file" as const,
+      attachments: [{ name: "report.pdf", remoteUrl: "https://wecom/report.pdf" }],
+    };
+
+    try {
+      const first = dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: makeEvent("msg-early-text-with-progress", "请把这个文件转成表格"),
+        replyHandle: makeReplyHandle(),
+      });
+      await vi.waitFor(() =>
+        expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1),
+      );
+
+      const second = dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: fileMedia as any,
+        event: fileEvent,
+        replyHandle: makeReplyHandle(),
+      });
+      await second;
+      releaseTextRun();
+      await first;
+
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+      const body = String(
+        dispatchReplyWithBufferedBlockDispatcher.mock.calls[1]?.[0]?.ctx?.Body ?? "",
+      );
+      expect(body).toContain("请把这个文件转成表格");
+      expect(fileMedia.normalizeFirstAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attachments: [expect.objectContaining({ remoteUrl: "https://wecom/report.pdf" })],
+        }),
+      );
+    } finally {
+      releaseTextRun();
+    }
+  });
+
   it("carries the attachment forward even after the file's own turn started replying", async () => {
     // File first, instruction second: a bare file makes the agent answer fast
     // ("what should I do with it?"), so by the time the user finishes typing,

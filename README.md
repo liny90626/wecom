@@ -23,11 +23,11 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-当前已发布版本为 `v2.7.260-4`，发布标签 `released/2.7.260-4`。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`，构建号递增到 4。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留，由本版完整替代。
+当前已发布版本为 `v2.7.260-5`，发布标签 `released/2.7.260-5`。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`，构建号递增到 5。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留。
 
-本轮把长任务反馈统一为回合开始后绝对 8 分钟首次出现、随后每 15 秒刷新，精确文案为 `【长任务处理中，请勿打断，已用时8m00s】`。OpenClaw preamble 仍通过 detached progress lane 瞬态投递，同一 item 使用当前快照替换、不同 item 保序，且不会混入 final。Bot WS 预览、normal final 与 active push 则统一在 Markdown 规范化、literal think 转义、真实 thinking block 和 completion marker 全部落定后执行最终 wire 分段；正文书签只推进到当前整帧真正显示的 source prefix，避免全帧状态覆盖后静默漏正文。完整说明见 [`changelog/v2.7.260-4.md`](./changelog/v2.7.260-4.md)。
+本轮把 OpenClaw 的 item/tool/command/plan/approval/patch/compaction 生命周期净化为企微可见过程，长任务心跳会保留最新真实进度；同时为动态回调 `req_id` 建立 owner 认领，冲突、重投、缺失 ID、容量耗尽或待 ACK 时统一 fail closed 到主动推送，根治文件+文字相邻回合覆盖以及迟到 ACK 永久丢消息。另补齐 Unicode 安全裁剪和瞬态/正文独立书签。完整说明见 [`changelog/v2.7.260-5.md`](./changelog/v2.7.260-5.md)。
 
-开发、测试与生产运行时均为 OpenClaw `2026.7.1`；`peerDependencies` 仍保留既有 `^2026.6.11` 范围，本轮没有修改该安装约束。
+开发与后续自测统一固定为 OpenClaw `2026.7.1-2`，不再运行其他 OpenClaw 版本或双版本矩阵。`peerDependencies` 继续保留既有 `^2026.6.11` 安装兼容范围，只表示安装兼容声明。
 
 - B1：修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
 - B2：优化 Bot WebSocket 长文本回复投递。正文过长时会按企业微信限制分段发送，并对流式预览与最终正文之间的重复片段做去重处理，降低长文本重复和截断风险。
@@ -203,7 +203,14 @@ npx vitest run
 
 ## 📋 本 fork 最近更新
 
-> 以下只展示本 fork 最近 5 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
+> 以下只展示本 fork 最近 6 个维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
+
+#### 📌 v2.7.260-5（2026-08-07，LinKy fork 维护版）
+
+- **[真实任务进度]**：接入 OpenClaw item/tool/command/plan/approval/patch/compaction 生命周期，复用官方 formatter 生成受控状态；不转发命令、参数、路径、搜索词或工具返回值。正文、reasoning、preamble、结构化过程与 Fast 独立记账，心跳保留最新真实过程且过程不混入 final。
+- **[气泡所有权]**：动态回调 `req_id` 以 `messageId + ownerToken` 认领 8 分钟；冲突、重投、缺失 ID、容量耗尽及待 ACK 全部切主动推送。所有权丢失永久锁存并贯穿 progress/final/failure/welcome/ACK 等待，旧 handle 不会再覆盖新气泡。
+- **[文件+文字与迟到 ACK]**：跨层集成覆盖相邻唯一/复用 `req_id`、文件后文字、丢 ACK 接管，以及复用值遇到 6 秒迟到 ACK。原生产实现会覆盖或永久吞掉前一条，候选保留两条可见回复。
+- **[边界加固与验证]**：thinking/冻结预览不再切断 emoji 代理对，瞬态与正文书签分离。只用 OpenClaw 2026.7.1-2：全量 45 文件、592/592；核心 6 文件、368/368；typecheck、build、dist、B1/B2/B3、diff check 全绿。完整说明见 [`changelog/v2.7.260-5.md`](./changelog/v2.7.260-5.md)。
 
 #### 📌 v2.7.260-4（2026-08-02，LinKy fork 维护版）
 

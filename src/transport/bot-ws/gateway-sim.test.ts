@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 import { __resetBotWsReplyTestState, createBotWsReplyHandle } from "./reply.js";
 import { uploadAndSendBotWsMedia } from "./media.js";
+import { dispatchRuntimeReply } from "../../runtime/reply-orchestrator.js";
 import { asWsClient, WecomGatewaySim } from "../../test-utils/wecom-gateway-sim.js";
 import type { ReplyHandle } from "../../types/index.js";
 
@@ -90,6 +91,26 @@ describe("WeCom gateway simulation", () => {
     handle.activate?.();
     return handle;
   };
+
+  it("models a late req_id ACK settling the SDK's newer queue head", async () => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 6_000 });
+    const frame = buildFrame("req-late-ack");
+    const first = sim.replyStream(frame, "stream-late-ack", "第一帧", false).then(
+      () => undefined,
+      (error) => error,
+    );
+    const second = sim.replyStream(frame, "stream-late-ack", "第二帧", false);
+
+    await tick(5_000);
+    await expect(first).resolves.toBeInstanceOf(Error);
+
+    await tick(1_000);
+    await expect(second).resolves.toEqual({ errcode: 0 });
+    expect(sim.streamBubble("req-late-ack")?.content).toBe("第一帧");
+
+    await tick(5_000);
+    expect(sim.streamBubble("req-late-ack")?.content).toBe("第二帧");
+  });
 
   const bubbleRevisions = (sim: WecomGatewaySim): string[] => {
     const bubble = sim.streamBubble("req-sim");
@@ -196,7 +217,8 @@ describe("WeCom gateway simulation", () => {
 
     await tick(15_000);
     expect(sim.sentFrames).toHaveLength(3);
-    expect(sim.sentFrames.at(-1)?.content).toBe(
+    expect(sim.sentFrames.at(-1)?.content).toContain("跨过八分钟门槛的真实进度");
+    expect(sim.sentFrames.at(-1)?.content).toContain(
       "【长任务处理中，请勿打断，已用时8m16s】",
     );
   });
@@ -336,6 +358,147 @@ describe("WeCom gateway simulation", () => {
     expect(finalPush).toContain("最终答案");
     // What the background notice already delivered must not be repeated.
     expect(finalPush).not.toContain("第三段进度");
+  });
+
+  it("carries new structured work progress after the stream window expires", async () => {
+    const sim = new WecomGatewaySim({
+      ackLatencyMs: 60,
+      rejectOnSend: [{ index: 2, errcode: 846608, errmsg: "stream message update expired" }],
+    });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(
+      handle,
+      {
+        text: "• 文件分析: in_progress",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+      500,
+    );
+    await deliverAndTick(
+      handle,
+      {
+        text: "• 文件分析: failed",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+      500,
+    );
+
+    await tick(8 * 60_000);
+    const statusPushes = sim.chat.filter((entry) => entry.kind === "push");
+    expect(statusPushes[0]?.content).toContain("• 文件分析: failed");
+    expect(statusPushes[0]?.content).toContain(
+      "【长任务处理中，请勿打断，已用时8m00s】",
+    );
+
+    await tick(15_000);
+    const repeatedStatusPushes = sim.chat.filter((entry) => entry.kind === "push");
+    expect(repeatedStatusPushes).toHaveLength(2);
+    const nextStatus = repeatedStatusPushes[1]?.content ?? "";
+    expect(nextStatus).not.toContain("• 文件分析: failed");
+
+    await deliverAndTick(handle, { text: "最终答案" }, { kind: "final" }, 3_000);
+    const finalPush = sim.chat.filter((entry) => entry.kind === "push").at(-1)?.content ?? "";
+    expect(finalPush).toContain("最终答案");
+    expect(finalPush).not.toContain("文件分析");
+  });
+
+  it("preserves interleaved structured, preamble, and Fast progress after stream death", async () => {
+    const sim = new WecomGatewaySim({
+      ackLatencyMs: 60,
+      rejectOnSend: [{ index: 2, errcode: 846608, errmsg: "stream message update expired" }],
+    });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(
+      handle,
+      {
+        text: "🛠️ Exec: running",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+      500,
+    );
+    await deliverAndTick(
+      handle,
+      {
+        text: "正在核对依赖",
+        channelData: { openclawProgressKind: "preamble" },
+      },
+      { kind: "block" },
+      500,
+    );
+    await deliverAndTick(
+      handle,
+      {
+        text: "Fast: auto-off(62s>=60s)",
+        channelData: { openclawProgressKind: "fast-mode-auto" },
+      },
+      { kind: "block" },
+      500,
+    );
+
+    await tick(8 * 60_000);
+    const progressPush = sim.chat.find((entry) => entry.kind === "push")?.content ?? "";
+    expect(progressPush).toContain("🛠️ Exec: running");
+    expect(progressPush).toContain("正在核对依赖");
+    expect(progressPush).toContain("Fast: auto-off(62s>=60s)");
+    expect(progressPush).toContain("【长任务处理中，请勿打断");
+  });
+
+  it("keeps body and transient bookmarks independent across a dead stream", async () => {
+    const sim = new WecomGatewaySim({
+      ackLatencyMs: 60,
+      rejectOnSend: [{ index: 4, errcode: 846608, errmsg: "stream message update expired" }],
+    });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "已显示正文。" }, { kind: "block" }, 700);
+    await deliverAndTick(
+      handle,
+      {
+        text: "🛠️ Exec: running",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+      700,
+    );
+    expect(sim.streamBubble("req-sim")?.content).toContain("已显示正文。");
+    expect(sim.streamBubble("req-sim")?.content).toContain("🛠️ Exec: running");
+
+    // This body revision closes the stream. The next structured state can no
+    // longer repaint the bubble and must travel with the background notice.
+    await deliverAndTick(handle, { text: "新增正文。" }, { kind: "block" }, 700);
+    await deliverAndTick(
+      handle,
+      {
+        text: "🛠️ Exec: failed",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+      700,
+    );
+
+    await tick(8 * 60_000);
+    const firstPush = sim.chat.find((entry) => entry.kind === "push");
+    expect(firstPush?.content).toContain("新增正文。");
+    expect(firstPush?.content).not.toContain("已显示正文。");
+    expect(firstPush?.content).toContain("🛠️ Exec: failed");
+    expect(firstPush?.content).toContain("【长任务处理中，请勿打断");
+
+    await tick(15_000);
+    const statusPushes = sim.chat.filter((entry) => entry.kind === "push");
+    expect(statusPushes).toHaveLength(2);
+    expect(statusPushes[1]?.content).not.toContain("新增正文。");
+    expect(statusPushes[1]?.content).not.toContain("🛠️ Exec: failed");
+
+    await deliverAndTick(handle, { text: "最终结论。" }, { kind: "final" }, 3_000);
+    const finalPush = sim.chat.filter((entry) => entry.kind === "push").at(-1)?.content ?? "";
+    expect(finalPush).toContain("最终结论。");
+    expect(finalPush).not.toContain("新增正文。");
+    expect(finalPush).not.toContain("Exec");
   });
 
   it("keeps a zero-output long task alive in the bubble and then on the push", async () => {
@@ -559,6 +722,75 @@ describe("WeCom gateway simulation", () => {
     expect(sim.sentFrames.at(-1)?.content).toContain(
       "【长任务处理中，请勿打断，已用时8m30s】",
     );
+  });
+
+  it("carries sanitized real OpenClaw progress through the gateway before failure", async () => {
+    vi.useRealTimers();
+    vi.stubEnv("OPENCLAW_TEST_FAST", "1");
+    const sim = new WecomGatewaySim({ ackLatencyMs: 10 });
+    const handle = createBotWsReplyHandle({
+      client: asWsClient(sim),
+      frame: buildFrame("req-real-openclaw-progress"),
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
+      "openclaw/plugin-sdk/reply-runtime"
+    );
+
+    await dispatchRuntimeReply({
+      core: {
+        channel: {
+          reply: {
+            dispatchReplyWithBufferedBlockDispatcher: (params: any) =>
+              realDispatch({
+                ...params,
+                replyResolver: async (_ctx, options) => {
+                  await options.onItemEvent?.({
+                    itemId: "command:gateway-real-1",
+                    toolCallId: "gateway-real-1",
+                    kind: "command",
+                    name: "exec",
+                    phase: "start",
+                    status: "running",
+                    title: "cat /private/gateway-secret",
+                    progressText: "GATEWAY_SECRET_OUTPUT",
+                  });
+                  return { text: "LLM request failed.", isError: true };
+                },
+              }),
+          },
+        },
+      } as any,
+      cfg: {} as any,
+      session: {
+        ctx: {
+          Body: "执行长任务",
+          RawBody: "执行长任务",
+          CommandBody: "执行长任务",
+          From: "user-real-gateway",
+          To: "wecom-bot",
+          SessionKey: "agent:main:wecom:direct:user-real-gateway",
+          Provider: "wecom",
+          Surface: "wecom",
+          ChatType: "direct",
+          AccountId: "default",
+          MessageSid: "msg-real-gateway",
+        },
+      } as any,
+      replyHandle: handle,
+    });
+
+    const bubble = sim.streamBubble("req-real-openclaw-progress");
+    const history = bubble?.kind === "stream" ? bubble.history : [];
+    const progressIndex = history.findIndex((text) => text.includes("Exec: running"));
+    const finalIndex = history.findIndex((text) => text.includes("LLM request failed."));
+    const renderedHistory = history.join("\n");
+    expect(progressIndex).toBeGreaterThanOrEqual(0);
+    expect(finalIndex).toBeGreaterThan(progressIndex);
+    expect(renderedHistory).not.toContain("/private/gateway-secret");
+    expect(renderedHistory).not.toContain("GATEWAY_SECRET_OUTPUT");
   });
 
   it("gives a failed long task context instead of one bare provider line", async () => {

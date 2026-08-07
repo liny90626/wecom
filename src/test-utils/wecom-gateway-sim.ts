@@ -67,7 +67,10 @@ export class WecomGatewaySim {
   readonly sentFrames: SimStreamFrame[] = [];
   readonly skipped: SimStreamFrame[] = [];
   private readonly queues = new Map<string, QueueItem[]>();
-  private readonly pendingAcks = new Map<string, { timer: ReturnType<typeof setTimeout> }>();
+  private readonly pendingAcks = new Map<
+    string,
+    { item: QueueItem; timer: ReturnType<typeof setTimeout> }
+  >();
   private sendCount = 0;
   private firstSendAtMs: number | undefined;
 
@@ -162,31 +165,44 @@ export class WecomGatewaySim {
         : undefined);
     const dropped = this.options.dropAckOnSend?.includes(sendIndex) === true;
 
-    const settle = (deliver: boolean): void => {
-      const pending = this.pendingAcks.get(reqId);
-      if (pending) {
-        clearTimeout(pending.timer);
-        this.pendingAcks.delete(reqId);
-      }
-      queue.shift();
+    const handleAck = (deliver: boolean): void => {
+      // The gateway applies the frame that actually produced this ACK. The SDK,
+      // however, correlates only by req_id, so a late ACK can settle the newer
+      // queue head after the older item already timed out.
       if (deliver) {
         this.renderStreamFrame(item.frame);
-        item.resolve({ errcode: 0 });
+      }
+      const pending = this.pendingAcks.get(reqId);
+      if (!pending) {
+        return;
+      }
+      clearTimeout(pending.timer);
+      this.pendingAcks.delete(reqId);
+      queue.shift();
+      if (deliver) {
+        pending.item.resolve({ errcode: 0 });
       } else if (rejection) {
-        item.reject({ errcode: rejection.errcode, errmsg: rejection.errmsg });
-      } else {
-        item.reject(new Error(`Reply ack timeout (${REPLY_ACK_TIMEOUT_MS}ms) for reqId: ${reqId}`));
+        pending.item.reject({ errcode: rejection.errcode, errmsg: rejection.errmsg });
       }
       this.processQueue(reqId);
     };
 
-    const ackTimer = setTimeout(() => settle(false), REPLY_ACK_TIMEOUT_MS);
+    const ackTimer = setTimeout(() => {
+      const pending = this.pendingAcks.get(reqId);
+      if (!pending || pending.item !== item) {
+        return;
+      }
+      this.pendingAcks.delete(reqId);
+      queue.shift();
+      item.reject(new Error(`Reply ack timeout (${REPLY_ACK_TIMEOUT_MS}ms) for reqId: ${reqId}`));
+      this.processQueue(reqId);
+    }, REPLY_ACK_TIMEOUT_MS);
     ackTimer.unref?.();
-    this.pendingAcks.set(reqId, { timer: ackTimer });
+    this.pendingAcks.set(reqId, { item, timer: ackTimer });
     if (dropped) {
       return;
     }
-    const ackDelay = setTimeout(() => settle(!rejection), this.ackLatencyMs);
+    const ackDelay = setTimeout(() => handleAck(!rejection), this.ackLatencyMs);
     ackDelay.unref?.();
   }
 

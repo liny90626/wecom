@@ -23,6 +23,12 @@ import {
 import { createBotWsSessionSnapshot } from "./session.js";
 
 const MEDIA_FIRST_TEXT_MERGE_WINDOW_MS = 1_000;
+const STREAM_REQ_ID_CLAIM_LIMIT = 1_024;
+// WeCom retires callback streams after roughly six minutes. Cover the one-minute
+// session-prepare limit plus scheduling/ACK margin so a live req_id never looks
+// reusable; when the bounded claim table is full, unknown ids fail closed to
+// active push instead of evicting a stream that can still repaint its bubble.
+const STREAM_REQ_ID_CLAIM_TTL_MS = 8 * 60_000;
 
 type MergeCandidateKind = "media" | "text";
 
@@ -32,6 +38,35 @@ type PendingMergeFrame = {
   replyHandle: ReplyHandle;
   timer: ReturnType<typeof setTimeout>;
 };
+
+type StreamReqIdClaim = {
+  messageId: string;
+  ownerToken: string;
+  expiresAt: number;
+};
+
+type ForcedActivePushReason =
+  | "claim-capacity"
+  | "missing-req-id"
+  | "req-id-collision"
+  | "req-id-pending-ack";
+
+function hasPendingCallbackReply(
+  client: AiBot.WSClient,
+  frame: WsFrame<BaseMessage | EventMessage>,
+): boolean {
+  const candidate = client as AiBot.WSClient & {
+    hasPendingReplyAck?: (pendingFrame: WsFrame<BaseMessage | EventMessage>) => boolean;
+  };
+  if (typeof candidate.hasPendingReplyAck !== "function") {
+    return false;
+  }
+  try {
+    return candidate.hasPendingReplyAck(frame);
+  } catch {
+    return true;
+  }
+}
 
 function buildInboundPeerKey(event: UnifiedInboundEvent): string {
   return [
@@ -94,12 +129,75 @@ export class BotWsSdkAdapter {
   private pushHandle?: BotWsPushHandle;
   private readonly ownerId: string;
   private readonly pendingMergeFrames = new Map<string, PendingMergeFrame>();
+  private readonly streamReqIdClaims = new Map<string, StreamReqIdClaim>();
 
   constructor(
     private readonly runtime: WecomAccountRuntime,
     private readonly log: RuntimeLogSink,
   ) {
     this.ownerId = `${this.runtime.account.accountId}:ws:${crypto.randomUUID().slice(0, 8)}`;
+  }
+
+  private resolveForcedActivePushReason(
+    reqId: string,
+    messageId: string,
+    ownerToken: string,
+    callbackReplyPending: boolean,
+  ): ForcedActivePushReason | undefined {
+    const key = reqId.trim();
+    if (!key) {
+      return "missing-req-id";
+    }
+
+    const now = Date.now();
+    const existing = this.streamReqIdClaims.get(key);
+    if (existing && existing.expiresAt > now) {
+      // Preserve the exact original handle, including across a redelivery of
+      // the same message. Two live handles must never share one callback lane.
+      return existing.ownerToken !== ownerToken ? "req-id-collision" : undefined;
+    }
+    if (callbackReplyPending) {
+      return "req-id-pending-ack";
+    }
+    if (existing) {
+      this.streamReqIdClaims.delete(key);
+    }
+
+    if (this.streamReqIdClaims.size >= STREAM_REQ_ID_CLAIM_LIMIT) {
+      for (const [claimedReqId, claim] of this.streamReqIdClaims) {
+        if (claim.expiresAt <= now) {
+          this.streamReqIdClaims.delete(claimedReqId);
+        }
+      }
+      if (this.streamReqIdClaims.size >= STREAM_REQ_ID_CLAIM_LIMIT) {
+        return "claim-capacity";
+      }
+    }
+
+    this.streamReqIdClaims.set(key, {
+      messageId,
+      ownerToken,
+      expiresAt: now + STREAM_REQ_ID_CLAIM_TTL_MS,
+    });
+    return undefined;
+  }
+
+  private isCallbackStreamCurrent(
+    reqId: string,
+    messageId: string,
+    ownerToken: string,
+  ): boolean {
+    const key = reqId.trim();
+    if (!key) {
+      return false;
+    }
+    const claim = this.streamReqIdClaims.get(key);
+    return Boolean(
+      claim &&
+        claim.messageId === messageId &&
+        claim.ownerToken === ownerToken &&
+        claim.expiresAt > Date.now(),
+    );
   }
 
   start(): void {
@@ -356,11 +454,32 @@ export class BotWsSdkAdapter {
         account: botAccount,
         frame,
       });
+      const callbackStreamOwnerToken = crypto.randomUUID();
+      const forcedActivePushReason = this.resolveForcedActivePushReason(
+        frame.headers.req_id ?? "",
+        event.messageId,
+        callbackStreamOwnerToken,
+        hasPendingCallbackReply(client, frame),
+      );
+      const forceActivePush = forcedActivePushReason !== undefined;
+      if (forcedActivePushReason) {
+        this.log.warn?.(
+          `[wecom-ws] callback-stream-disabled account=${event.accountId} reqId=${frame.headers.req_id ?? "n/a"} messageId=${event.messageId} reason=${forcedActivePushReason} route=active-push`,
+        );
+      }
       const replyHandle = createBotWsReplyHandle({
         client,
         frame,
         accountId: this.runtime.account.accountId,
         inboundKind: event.inboundKind,
+        forceActivePush,
+        callbackStreamClaimId: callbackStreamOwnerToken,
+        isCallbackStreamCurrent: () =>
+          this.isCallbackStreamCurrent(
+            frame.headers.req_id ?? "",
+            event.messageId,
+            callbackStreamOwnerToken,
+          ),
         placeholderContent: botAccount.config.streamPlaceholderContent,
         autoSendPlaceholder:
           event.inboundKind === "text" ||
@@ -460,6 +579,7 @@ export class BotWsSdkAdapter {
       clearTimeout(pending.timer);
     }
     this.pendingMergeFrames.clear();
+    this.streamReqIdClaims.clear();
     clearWecomMcpAccountCache(this.runtime.account.accountId);
     if (this.pushHandle) {
       unregisterBotWsPushHandle(this.runtime.account.accountId, this.pushHandle);

@@ -133,6 +133,7 @@ function renderPreviewSourcePrefixWithinLimits(params: {
 function composePreviewSuffixWithinLimits(params: PreviewSuffixParams): {
   text: string;
   visiblePrefix: string;
+  visibleSuffix: string;
   prefixMaxChars: number;
   prefixMaxBytes: number;
 } {
@@ -154,6 +155,7 @@ function composePreviewSuffixWithinLimits(params: PreviewSuffixParams): {
   return {
     text: prefixPreview.text ? `${prefixPreview.text}${separator}${suffix}` : suffix,
     visiblePrefix: prefixPreview.sourceText,
+    visibleSuffix: suffixPreview.sourceText,
     prefixMaxChars,
     prefixMaxBytes,
   };
@@ -903,6 +905,19 @@ function trimToUtf8Bytes(value: string, maxBytes: number): string {
   return out;
 }
 
+function sliceUtf16SafePrefix(value: string, maxCodeUnits: number): string {
+  if (value.length <= maxCodeUnits) {
+    return value;
+  }
+  let end = Math.max(0, maxCodeUnits);
+  const last = value.charCodeAt(end - 1);
+  const next = value.charCodeAt(end);
+  if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
 function renderThinkContent(
   text: string,
   maxBytes = THINKING_BLOCK_MAX_BYTES,
@@ -910,8 +925,8 @@ function renderThinkContent(
 ): string {
   return stripDanglingThinkMarkup(
     trimToUtf8Bytes(
-      escapeThinkBlockText(text || "progress").slice(
-        0,
+      sliceUtf16SafePrefix(
+        escapeThinkBlockText(text || "progress"),
         Math.min(THINKING_BLOCK_MAX_CHARS, Math.max(0, maxChars)),
       ),
       Math.min(THINKING_BLOCK_MAX_BYTES, maxBytes),
@@ -967,6 +982,9 @@ export function createBotWsReplyHandle(params: {
   inboundKind: string;
   placeholderContent?: string;
   autoSendPlaceholder?: boolean;
+  forceActivePush?: boolean;
+  isCallbackStreamCurrent?: () => boolean;
+  callbackStreamClaimId?: string;
   deferActivation?: boolean;
   runtimeOwnerId?: string;
   onDeliver?: () => void;
@@ -975,7 +993,14 @@ export function createBotWsReplyHandle(params: {
   let streamId: string | undefined;
   let accumulatedText = "";
   let accumulatedThinkingText = "";
+  let latestTransientProgressText = "";
+  const transientProgressTextByKind = new Map<string, string>();
   let deferredMediaUrls: string[] = [];
+  const rememberTransientProgress = (kind: string, text: string): string => {
+    transientProgressTextByKind.set(kind, text);
+    latestTransientProgressText = [...transientProgressTextByKind.values()].join("\n\n");
+    return latestTransientProgressText;
+  };
   const resolveStreamId = () => {
     streamId ||= generateReqId("stream");
     return streamId;
@@ -992,11 +1017,13 @@ export function createBotWsReplyHandle(params: {
   type PreviewDeliveryMetadata = {
     bodySourceText?: string;
     showsVisibleBody?: boolean;
+    transientProgressText?: string;
   };
   type PendingPreview = {
     text: string;
     bodySourceText?: PreviewDeliveryMetadata["bodySourceText"];
     showsVisibleBody?: PreviewDeliveryMetadata["showsVisibleBody"];
+    transientProgressText?: PreviewDeliveryMetadata["transientProgressText"];
     deadline: number;
     retryCount: number;
   };
@@ -1022,6 +1049,9 @@ export function createBotWsReplyHandle(params: {
   const peerKeyId = normalizePeerKey(peerId);
   const peerKind: "direct" | "group" = body?.chattype === "group" ? "group" : "direct";
   const reqId = params.frame.headers.req_id || "unknown";
+  const finalDeliveryReqId = params.callbackStreamClaimId
+    ? `${reqId}:${params.callbackStreamClaimId}`
+    : reqId;
   const replyPeerKey = JSON.stringify([params.accountId, peerKind, peerKeyId]);
   const activationId = crypto.randomUUID();
   let activated = false;
@@ -1095,8 +1125,35 @@ export function createBotWsReplyHandle(params: {
     clearPendingPreview();
   };
 
+  const renderLongTaskHeartbeat = (elapsedMs: number): string => {
+    const thinkingBlock = renderInlineThinkBlock(accumulatedThinkingText);
+    const bodyLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
+    const statusSuffix = [latestTransientProgressText, formatElapsedStatus(elapsedMs)]
+      .filter(Boolean)
+      .join("\n\n");
+    const body = composePreviewSuffixWithinLimits({
+      prefix: accumulatedText,
+      suffix: statusSuffix,
+      maxChars: bodyLimits.maxChars,
+      maxBytes: bodyLimits.maxBytes,
+    }).text;
+    return thinkingBlock ? `${thinkingBlock}\n${body}` : body;
+  };
+
   const sendPlaceholder = () => {
-    if (runtimeRetired || !placeholderStarted || streamSettled || placeholderInFlight || isEvent)
+    if (forceActivePushRequired()) {
+      maybeSendPreviewExpiredNotice(true);
+      return;
+    }
+    if (
+      runtimeRetired ||
+      !placeholderStarted ||
+      streamSettled ||
+      placeholderInFlight ||
+      streamUpdateUnreliable ||
+      supersededByNewInbound ||
+      isEvent
+    )
       return;
     const elapsedMs = Date.now() - handleStartedAt;
     // Before the long-task gate, real process text owns the bubble. Once the
@@ -1119,7 +1176,9 @@ export function createBotWsReplyHandle(params: {
     // stream is off by default) has no other feedback: repeating one static
     // line taught the user nothing, so show the clock instead.
     const heartbeatText =
-      elapsedMs >= LONG_TASK_STATUS_AFTER_MS ? formatElapsedStatus(elapsedMs) : placeholderText;
+      elapsedMs >= LONG_TASK_STATUS_AFTER_MS
+        ? renderLongTaskHeartbeat(elapsedMs)
+        : placeholderText;
     withHandleSendTimeout(
       params.client.replyStream(params.frame, resolveStreamId(), heartbeatText, false),
       "stream placeholder",
@@ -1212,14 +1271,44 @@ export function createBotWsReplyHandle(params: {
   let supersededNoticeText = B3_SUPERSEDED_NOTICE_TEXT;
   let supersededAt: number | undefined;
   let visibleReplyStarted = false;
-  let streamUpdateUnreliable = false;
+  // A reused req_id addresses the predecessor's existing bubble and SDK ACK
+  // queue. Once this handle loses its exact claim, latch the callback lane off:
+  // an old handle must never become current again after a successor claims it.
+  let callbackOwnershipLost = params.forceActivePush === true;
+  let callbackOwnershipLossLogged = false;
+  let streamUpdateUnreliable = callbackOwnershipLost;
   // A frame this req_id never got an ACK for. The stream itself stays writable
   // — progress updates keep painting — but the SDK matches ACKs by req_id only,
   // so a late ACK can resolve the NEXT frame's promise. Anything whose delivery
   // must be trusted (final, stream close, supersede notice) therefore leaves
   // this stream for the active-push path.
   let streamAckUnreliable = false;
-  const streamDeliveryUntrusted = (): boolean => streamUpdateUnreliable || streamAckUnreliable;
+  const refreshCallbackStreamOwnership = (): boolean => {
+    if (callbackOwnershipLost) {
+      return false;
+    }
+    if (params.isCallbackStreamCurrent?.() !== false) {
+      return true;
+    }
+    callbackOwnershipLost = true;
+    streamUpdateUnreliable = true;
+    clearPendingPreview();
+    stopPlaceholderKeepalive();
+    stopPreviewFreezeTimeout();
+    stopPreviewStatusInterval();
+    if (!callbackOwnershipLossLogged) {
+      callbackOwnershipLossLogged = true;
+      console.warn(
+        `[wecom-ws] callback-stream-ownership-lost account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} route=active-push`,
+      );
+    }
+    return false;
+  };
+  const forceActivePushRequired = (): boolean => !refreshCallbackStreamOwnership();
+  const streamDeliveryUntrusted = (): boolean => {
+    refreshCallbackStreamOwnership();
+    return streamUpdateUnreliable || streamAckUnreliable;
+  };
   // Start the progress clock with the task, not with the first visible block.
   // Tool/reasoning work can precede that block by several minutes.
   const handleStartedAt = Date.now();
@@ -1229,6 +1318,7 @@ export function createBotWsReplyHandle(params: {
   let previewFrozenText = "";
   let lastPreviewText = "";
   let lastDeliveredBodySourceText = "";
+  let lastDeliveredTransientProgressText = "";
   let lastPreviewUpdateAt = 0;
   let lastPreviewStatusAt = 0;
   let longTaskStatusStarted = false;
@@ -1388,6 +1478,7 @@ export function createBotWsReplyHandle(params: {
         | "stream-remainder"
         | "final-retry"
         | "preview-expired"
+        | "forced-progress"
         | "fail-notice";
       appendCompletionMarker?: boolean;
       progress?: { delivered: number };
@@ -1770,15 +1861,7 @@ export function createBotWsReplyHandle(params: {
       options.isError && accumulatedThinkingText
         ? prependThinkingWithinFrameBudget(firstStreamChunk)
         : firstStreamChunk;
-    const pendingAckCleared = await waitForPendingReplyAckToClear({
-      client: params.client,
-      frame: params.frame,
-      hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
-    });
-    if (runtimeRetired) {
-      return false;
-    }
-    const fallbackText = resolveStreamFallbackText(finalText, options.isError);
+    let fallbackText = resolveStreamFallbackText(finalText, options.isError);
     const fallbackAppendCompletionMarker = !options.isError;
     // The fallback retry must reuse the EXACT identity of the failed push
     // (text/marker/default limits): any drift would reset the tracked chunk
@@ -1801,6 +1884,34 @@ export function createBotWsReplyHandle(params: {
       }
       return false;
     };
+    refreshCallbackStreamOwnership();
+    if (streamUpdateUnreliable) {
+      console.warn(
+        `[wecom-b3] stream-final-skip-unreliable account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId}`,
+      );
+      try {
+        await sendMarkdownChunksViaActivePush(fallbackText, {
+          reason: "stream-fallback",
+          appendCompletionMarker: fallbackAppendCompletionMarker,
+          progress: resolveFinalPushProgress(fallbackText, fallbackAppendCompletionMarker),
+        });
+        visibleReplyStarted = true;
+      } catch (fallbackError) {
+        return settleActivePushFailure(fallbackError);
+      }
+      return true;
+    }
+    const pendingAckCleared = await waitForPendingReplyAckToClear({
+      client: params.client,
+      frame: params.frame,
+      hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
+    });
+    if (runtimeRetired) {
+      return false;
+    }
+    // A preview can settle while final waits for the SDK queue. Recompute from
+    // the confirmed bookmark so fallback sends only the still-undelivered tail.
+    fallbackText = resolveStreamFallbackText(finalText, options.isError);
     // Re-check supersede after the await gap above (up to 5.5s): a new
     // inbound may have superseded this handle while we waited for the pending
     // ack. Without this check the old final would be flushed into the old
@@ -1983,7 +2094,7 @@ export function createBotWsReplyHandle(params: {
       timeoutMs: WECOM_REPLY_SEND_TIMEOUT_MS,
       hasLocalPendingReply: () => placeholderInFlight || previewInFlightCount > 0,
     });
-    if (!pendingAckCleared || supersededByNewInbound) {
+    if (!pendingAckCleared || supersededByNewInbound || streamDeliveryUntrusted()) {
       params.onFail?.(new Error("WeCom source final stream ACK did not clear."));
       return;
     }
@@ -2015,7 +2126,7 @@ export function createBotWsReplyHandle(params: {
       (elapsedMs >= BLOCK_PREVIEW_MAX_MS || sourceText.length >= BLOCK_PREVIEW_MAX_CHARS)
     ) {
       previewFrozen = true;
-      previewFrozenSourceText = sourceText.slice(0, BLOCK_PREVIEW_MAX_CHARS);
+      previewFrozenSourceText = sliceUtf16SafePrefix(sourceText, BLOCK_PREVIEW_MAX_CHARS);
       // Self-healing: start the status refresh interval at freeze time
       // instead of waiting for the first frozen preview send to succeed —
       // a skipped/failed first send would otherwise leave the counter dead.
@@ -2023,7 +2134,7 @@ export function createBotWsReplyHandle(params: {
     }
 
     const sourceLimit = previewFrozen
-      ? (previewFrozenSourceText || sourceText.slice(0, BLOCK_PREVIEW_MAX_CHARS))
+      ? (previewFrozenSourceText || sliceUtf16SafePrefix(sourceText, BLOCK_PREVIEW_MAX_CHARS))
       : sourceText;
     let bodyPreview: RenderedPreviewSource;
     if (previewFrozen) {
@@ -2153,11 +2264,25 @@ export function createBotWsReplyHandle(params: {
     // Reasoning stays out — only the visible body travels this way.
     const progressSnapshot = accumulatedText;
     const undeliveredProgress = resolveUndeliveredProgressText(progressSnapshot);
+    const transientProgressSnapshot = latestTransientProgressText;
+    const undeliveredTransientProgress =
+      transientProgressSnapshot &&
+      transientProgressSnapshot !== lastDeliveredTransientProgressText
+        ? transientProgressSnapshot
+        : "";
+    const noticeText = [
+      undeliveredProgress,
+      undeliveredTransientProgress,
+      formatElapsedStatus(elapsedMs),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
     void sendMarkdownChunksViaActivePush(
-      undeliveredProgress
-        ? `${undeliveredProgress}\n\n${formatElapsedStatus(elapsedMs)}`
-        : formatElapsedStatus(elapsedMs),
-      { reason: "preview-expired" },
+      noticeText,
+      {
+        reason: "preview-expired",
+        isObsolete: () => streamSettled || finalDelivered || supersededByNewInbound,
+      },
     )
       .then(() => {
         if (undeliveredProgress) {
@@ -2165,11 +2290,17 @@ export function createBotWsReplyHandle(params: {
           // this bookkeeping, so advancing it on a failed push would lose text.
           recordDeliveredBodySource({ bodySourceText: progressSnapshot });
         }
+        if (undeliveredTransientProgress) {
+          lastDeliveredTransientProgressText = transientProgressSnapshot;
+        }
         console.info(
-          `[wecom-preview] expired-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${elapsedMs} progressChars=${undeliveredProgress.length}`,
+          `[wecom-preview] expired-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${elapsedMs} progressChars=${undeliveredProgress.length} transientChars=${undeliveredTransientProgress.length}`,
         );
       })
       .catch((error) => {
+        if (error === OBSOLETE_FINAL_RETRY) {
+          return;
+        }
         console.warn(
           `[wecom-preview] expired-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
         );
@@ -2192,6 +2323,36 @@ export function createBotWsReplyHandle(params: {
     if (previewFrozen) {
       previewFrozenDeliveredSourceText = options?.bodySourceText ?? "";
     }
+  };
+
+  const recordDeliveredTransientProgress = (options?: PreviewDeliveryMetadata): void => {
+    if (options?.transientProgressText === undefined) {
+      return;
+    }
+    lastDeliveredTransientProgressText = options.transientProgressText;
+  };
+
+  const sendForcedTransientProgress = async (text: string): Promise<boolean> => {
+    if (!forceActivePushRequired()) {
+      return false;
+    }
+    if (!text || text === lastDeliveredTransientProgressText) {
+      return true;
+    }
+    try {
+      await sendMarkdownChunksViaActivePush(text, {
+        reason: "forced-progress",
+        isObsolete: () => streamSettled || finalDelivered || supersededByNewInbound,
+      });
+      lastDeliveredTransientProgressText = text;
+    } catch (error) {
+      if (error !== OBSOLETE_FINAL_RETRY) {
+        console.warn(
+          `[wecom-preview] forced-progress-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} error=${formatFallbackError(error)}`,
+        );
+      }
+    }
+    return true;
   };
 
   // Reasoning-only previews render as a collapsed <think> block: the user has
@@ -2231,6 +2392,7 @@ export function createBotWsReplyHandle(params: {
       longTaskStatusStarted = true;
     }
     recordDeliveredBodySource(options);
+    recordDeliveredTransientProgress(options);
     if (previewFrozen) {
       stopPreviewFreezeTimeout();
       lastPreviewStatusAt = now;
@@ -2245,6 +2407,10 @@ export function createBotWsReplyHandle(params: {
     now: number,
     options?: PreviewDeliveryMetadata & { fromPendingSlot?: boolean },
   ): Promise<boolean> => {
+    if (forceActivePushRequired()) {
+      maybeSendPreviewExpiredNotice(true);
+      return false;
+    }
     if (streamSettled || isEvent || supersededByNewInbound || streamUpdateUnreliable) {
       return false;
     }
@@ -2298,11 +2464,19 @@ export function createBotWsReplyHandle(params: {
             ) {
               return;
             }
+            if (!refreshCallbackStreamOwnership()) {
+              // The old frame may have surfaced after our local timeout, but it
+              // no longer proves the current bubble contains this body. Keep
+              // the bookmark conservative so active-push final sends it again.
+              maybeSendPreviewExpiredNotice(true);
+              return;
+            }
             if (streamSettled) {
               if (previewShowsVisibleBody(options)) {
                 visibleReplyStarted = true;
               }
               recordDeliveredBodySource(options);
+              recordDeliveredTransientProgress(options);
             } else {
               recordDeliveredPreview(previewText, now, options);
             }
@@ -2369,6 +2543,7 @@ export function createBotWsReplyHandle(params: {
         visibleReplyStarted = true;
       }
       recordDeliveredBodySource(options);
+      recordDeliveredTransientProgress(options);
       return false;
     }
     recordDeliveredPreview(previewText, now, options);
@@ -2392,6 +2567,7 @@ export function createBotWsReplyHandle(params: {
       text: previewText,
       bodySourceText: options?.bodySourceText,
       showsVisibleBody: options?.showsVisibleBody,
+      transientProgressText: options?.transientProgressText,
       deadline: pendingPreview?.deadline ?? Date.now() + WECOM_PENDING_ACK_GRACE_MS,
       retryCount: pendingPreview?.retryCount ?? 0,
     };
@@ -2454,6 +2630,7 @@ export function createBotWsReplyHandle(params: {
       const delivered = await sendPreviewUpdate(preview.text, Date.now(), {
         bodySourceText: preview.bodySourceText,
         showsVisibleBody: preview.showsVisibleBody,
+        transientProgressText: preview.transientProgressText,
         fromPendingSlot: true,
       });
       if (
@@ -2627,7 +2804,11 @@ export function createBotWsReplyHandle(params: {
   };
 
   const deliverBlockPreview = async (text: string): Promise<void> => {
-    if (streamSettled || streamUpdateUnreliable || isEvent || supersededByNewInbound || !text) {
+    if (streamSettled || isEvent || supersededByNewInbound || !text) {
+      return;
+    }
+    if (forceActivePushRequired()) {
+      maybeSendPreviewExpiredNotice(true);
       return;
     }
     const now = Date.now();
@@ -2691,7 +2872,11 @@ export function createBotWsReplyHandle(params: {
   // turn. The next routine update is scheduled directly at the long-task gate;
   // only a failed placeholder uses the short retry delay.
   const scheduleHeartbeat = (retryDelayMs?: number): void => {
-    if (streamSettled || runtimeRetired || streamUpdateUnreliable) {
+    if (forceActivePushRequired()) {
+      maybeSendPreviewExpiredNotice(true);
+      return;
+    }
+    if (streamSettled || runtimeRetired || streamUpdateUnreliable || supersededByNewInbound) {
       return;
     }
     const elapsedMs = Date.now() - handleStartedAt;
@@ -2732,6 +2917,10 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     if (params.autoSendPlaceholder === false || isEvent) {
+      return;
+    }
+    if (forceActivePushRequired()) {
+      maybeSendPreviewExpiredNotice(true);
       return;
     }
     sendPlaceholder();
@@ -2795,6 +2984,7 @@ export function createBotWsReplyHandle(params: {
       if (runtimeRetired || (!streamSettled && !ensureRuntimeCleanup())) {
         return;
       }
+      refreshCallbackStreamOwnership();
       // Mark this chat as active on this handle
       notifyPeerActive();
       if (info.kind === "final") {
@@ -2835,15 +3025,25 @@ export function createBotWsReplyHandle(params: {
         return;
       }
 
-      if (payload.channelData?.openclawProgressKind === "preamble") {
+      if (
+        payload.channelData?.openclawProgressKind === "preamble" ||
+        payload.channelData?.openclawProgressKind === "structured-item"
+      ) {
         const preambleText = payload.text?.trim() ?? "";
         if (!preambleText || isEvent || supersededByNewInbound || streamSettled) {
+            return;
+        }
+        const transientProgressText = rememberTransientProgress(
+          payload.channelData.openclawProgressKind,
+          preambleText,
+        );
+        if (await sendForcedTransientProgress(transientProgressText)) {
           return;
         }
         const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
         const progress = composePreviewSuffixWithinLimits({
           prefix: accumulatedText,
-          suffix: preambleText,
+          suffix: transientProgressText,
           separator: "\n",
           maxChars: thinkingLimits.maxChars,
           maxBytes: thinkingLimits.maxBytes,
@@ -2852,11 +3052,13 @@ export function createBotWsReplyHandle(params: {
         if (!progressPreviewText || progressPreviewText === lastPreviewText) {
           return;
         }
-        // Preamble is visible process feedback, not answer text. Rendering it
-        // through the preview lane keeps it out of accumulatedText and final.
+        // OpenClaw progress is visible process feedback, not answer text.
+        // Rendering it through the preview lane keeps it out of accumulatedText
+        // and final.
         await sendPreviewUpdate(progressPreviewText, Date.now(), {
           bodySourceText: progress.visiblePrefix,
           showsVisibleBody: Boolean(progress.visiblePrefix),
+          transientProgressText: progress.visibleSuffix,
         });
         return;
       }
@@ -2866,10 +3068,14 @@ export function createBotWsReplyHandle(params: {
         if (!fastText || isEvent || supersededByNewInbound || streamSettled) {
           return;
         }
+        const transientProgressText = rememberTransientProgress("fast-mode-auto", fastText);
+        if (await sendForcedTransientProgress(transientProgressText)) {
+          return;
+        }
         const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
         const progress = composePreviewSuffixWithinLimits({
           prefix: accumulatedText,
-          suffix: fastText,
+          suffix: transientProgressText,
           separator: "\n",
           maxChars: thinkingLimits.maxChars,
           maxBytes: thinkingLimits.maxBytes,
@@ -2881,6 +3087,7 @@ export function createBotWsReplyHandle(params: {
         await sendPreviewUpdate(progressPreviewText, Date.now(), {
           bodySourceText: progress.visiblePrefix,
           showsVisibleBody: Boolean(progress.visiblePrefix),
+          transientProgressText: progress.visibleSuffix,
         });
         return;
       }
@@ -2941,7 +3148,8 @@ export function createBotWsReplyHandle(params: {
       let finalAppendCompletionMarker = false;
       let finalMediaDelivered = false;
       let currentFinalDeliveryKey = "";
-      const currentFinalUsesPeerDedup = info.kind === "final" && !supersededByNewInbound;
+      let currentFinalUsesPeerDedup =
+        info.kind === "final" && !supersededByNewInbound && !forceActivePushRequired();
       if (info.kind === "final" && mediaUrls.length > 0) {
         const cfg = getWecomRuntime().config.loadConfig();
         const mediaLocalRoots = resolveWecomMergedMediaLocalRoots({ cfg });
@@ -2950,10 +3158,12 @@ export function createBotWsReplyHandle(params: {
           accountId: params.accountId,
           peerKind,
           peerId: peerKeyId,
-          reqId,
+          reqId: finalDeliveryReqId,
           text: outboundText,
           mediaUrls,
         });
+        currentFinalUsesPeerDedup =
+          !supersededByNewInbound && !forceActivePushRequired();
         if (
           !markFinalDelivered(currentFinalDeliveryKey, {
             peerDedup: currentFinalUsesPeerDedup,
@@ -3022,8 +3232,9 @@ export function createBotWsReplyHandle(params: {
         // failed.") and drops the raw text before it ever reaches a channel, so
         // this line is what lets a report be correlated with the gateway's own
         // `embedded run agent end … rawError=…` entry.
+        const forcedActivePush = forceActivePushRequired();
         console.warn(
-          `[wecom-reply] error-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} elapsedMs=${Date.now() - handleStartedAt} bodyChars=${accumulatedText.length} thinkingChars=${accumulatedThinkingText.length} streamDead=${String(streamUpdateUnreliable)} ackUntrusted=${String(streamAckUnreliable)} text=${JSON.stringify(finalText.slice(0, 200))}`,
+          `[wecom-reply] error-final account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} elapsedMs=${Date.now() - handleStartedAt} bodyChars=${accumulatedText.length} thinkingChars=${accumulatedThinkingText.length} streamDead=${String(streamUpdateUnreliable && !forcedActivePush)} forcedPush=${String(forcedActivePush)} ackUntrusted=${String(streamAckUnreliable)} text=${JSON.stringify(finalText.slice(0, 200))}`,
         );
       }
       if (info.kind === "final") {
@@ -3056,11 +3267,13 @@ export function createBotWsReplyHandle(params: {
       }
 
       if (info.kind === "final" && !currentFinalDeliveryKey) {
+        currentFinalUsesPeerDedup =
+          !supersededByNewInbound && !forceActivePushRequired();
         currentFinalDeliveryKey = buildFinalDeliveryKey({
           accountId: params.accountId,
           peerKind,
           peerId: peerKeyId,
-          reqId,
+          reqId: finalDeliveryReqId,
           text: finalText,
           mediaUrls,
         });
@@ -3075,7 +3288,7 @@ export function createBotWsReplyHandle(params: {
       }
 
       try {
-        if (params.inboundKind === "welcome") {
+        if (params.inboundKind === "welcome" && !forceActivePushRequired()) {
           settleStream();
           await withHandleSendTimeout(
             params.client.replyWelcome(params.frame, {
@@ -3168,15 +3381,19 @@ export function createBotWsReplyHandle(params: {
         } else {
           stopPlaceholderKeepalive();
           visibleReplyStarted = true;
-          await withHandleSendTimeout(
-            sendNonFinalStreamUpdate({
-              client: params.client,
-              frame: params.frame,
-              streamId: resolveStreamId(),
-              content: renderPreviewFrame(finalText).text,
-            }),
-            "direct block stream",
-          );
+          if (forceActivePushRequired()) {
+            await sendMarkdownChunksViaActivePush(finalText, { reason: "forced-progress" });
+          } else {
+            await withHandleSendTimeout(
+              sendNonFinalStreamUpdate({
+                client: params.client,
+                frame: params.frame,
+                streamId: resolveStreamId(),
+                content: renderPreviewFrame(finalText).text,
+              }),
+              "direct block stream",
+            );
+          }
         }
       } catch (error) {
         if (isTerminalReplyError(error)) {
@@ -3191,6 +3408,7 @@ export function createBotWsReplyHandle(params: {
       if (runtimeRetired || (!streamSettled && !ensureRuntimeCleanup())) {
         return;
       }
+      refreshCallbackStreamOwnership();
       notifyPeerActive();
       settleStream();
       if (supersededByNewInbound) {
@@ -3278,7 +3496,7 @@ export function createBotWsReplyHandle(params: {
         }
       }
       try {
-        if (params.inboundKind === "welcome") {
+        if (params.inboundKind === "welcome" && !forceActivePushRequired()) {
           await withHandleSendTimeout(
             params.client.replyWelcome(params.frame, {
               msgtype: "text",

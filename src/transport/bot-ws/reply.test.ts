@@ -784,6 +784,28 @@ describe("createBotWsReplyHandle", () => {
     expect(finalText).not.toContain("先分析需求");
   });
 
+  it("does not split an emoji at the thinking character boundary", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-code-point-boundary" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: `${"a".repeat(2_999)}😀`, isReasoning: true },
+      { kind: "block" },
+    );
+
+    expect(String(mockClient.replyStream.mock.calls[0]?.[2] ?? "")).toBe(
+      `<think>${"a".repeat(2_999)}</think>\n`,
+    );
+  });
+
   it("keeps reasoning on an error final within the final stream wire budget", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
@@ -1415,6 +1437,28 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
     expect(String(mockClient.replyStream.mock.calls[2]?.[2] ?? "")).toContain(
       "【长任务处理中，请勿打断，已用时8m15s】",
+    );
+  });
+
+  it("does not split an emoji when freezing the preview character boundary", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-preview-code-point-boundary" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: `${"a".repeat(2_999)}😀`, isReasoning: false },
+      { kind: "block" },
+    );
+
+    expect(String(mockClient.replyStream.mock.calls[0]?.[2] ?? "")).toBe(
+      "a".repeat(2_999),
     );
   });
 
@@ -2789,6 +2833,71 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(3);
   });
+
+  it.each(["final", "supersede"] as const)(
+    "does not send later chunks from an in-flight background notice after %s",
+    async (outcome) => {
+      const expiredError = {
+        headers: { req_id: `req-in-flight-status-${outcome}` },
+        errcode: 846608,
+        errmsg: "stream message update expired (>6 minutes), cannot update",
+      };
+      let releaseInFlightStatusChunk!: (value: unknown) => void;
+      mockClient.replyStream.mockRejectedValueOnce(expiredError);
+      mockClient.sendMessage
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseInFlightStatusChunk = resolve;
+            }),
+        )
+        .mockResolvedValue({} as any);
+      const handle = createBotWsReplyHandle({
+        client: mockClient,
+        frame: {
+          headers: { req_id: `req-in-flight-status-${outcome}` },
+          body: { from: { userid: "alice" }, chattype: "single" },
+        } as unknown as ReplyHandleParams["frame"],
+        accountId: "default",
+        inboundKind: "text",
+        autoSendPlaceholder: false,
+      });
+
+      await vi.advanceTimersByTimeAsync(8 * 60_000);
+      await handle.deliver(
+        {
+          text: "旧任务进度。".repeat(900),
+          channelData: { openclawProgressKind: "preamble" },
+        },
+        { kind: "block" },
+      );
+      await flushPromises();
+      expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+      expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+      if (outcome === "final") {
+        await handle.deliver({ text: "最终答案" }, { kind: "final" });
+        expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+        expect(String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content)).toContain(
+          "最终答案",
+        );
+      } else {
+        handle.supersedeByNewInbound?.({
+          accountId: "default",
+          peerKind: "direct",
+          peerId: "alice",
+          reason: "new-inbound",
+        });
+      }
+
+      releaseInFlightStatusChunk({});
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await flushPromises();
+
+      expect(mockClient.sendMessage).toHaveBeenCalledTimes(outcome === "final" ? 2 : 1);
+    },
+  );
 
   it("drops the deferred background notice when a new message supersedes the task", async () => {
     const expiredError = {
@@ -4554,7 +4663,12 @@ describe("createBotWsReplyHandle", () => {
     expect(onFail).toHaveBeenCalledTimes(2);
   });
 
-  it("renders OpenClaw preamble as transient progress without merging it into the final", async () => {
+  it.each([
+    ["preamble", "preamble"],
+    ["structured work item", "structured-item"],
+  ])(
+    "renders OpenClaw %s as transient progress without merging it into the final",
+    async (_label, openclawProgressKind) => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -4569,7 +4683,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver(
       {
         text: "正在检查仓库",
-        channelData: { openclawProgressKind: "preamble" },
+        channelData: { openclawProgressKind },
       },
       { kind: "block" },
     );
@@ -4581,6 +4695,224 @@ describe("createBotWsReplyHandle", () => {
     const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(finalText).toContain("最终答案");
     expect(finalText).not.toContain("正在检查仓库");
+    },
+  );
+
+  it("keeps OpenClaw progress visible when a req-id collision forces active push", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-collision-active-push" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "file",
+      forceActivePush: true,
+    });
+    await flushPromises();
+
+    await handle.deliver(
+      {
+        text: "🛠️ Exec: running",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+    );
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    const immediateProgressPush = String(
+      (mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content ?? "",
+    );
+    expect(immediateProgressPush).toContain("🛠️ Exec: running");
+
+    await vi.advanceTimersByTimeAsync(8 * 60_000);
+    await flushPromises();
+    const statusPush = String(
+      (mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content ?? "",
+    );
+    expect(statusPush).toContain("【长任务处理中，请勿打断，已用时8m00s】");
+
+    await handle.deliver({ text: "最终答案" }, { kind: "final" });
+    await flushPromises();
+    const finalPush = String(
+      (mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content ?? "",
+    );
+    expect(finalPush).toContain("最终答案");
+    expect(finalPush).not.toContain("Exec: running");
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+  });
+
+  it("latches callback ownership loss across progress and final delivery", async () => {
+    let callbackStreamCurrent = true;
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-dynamic-ownership" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      isCallbackStreamCurrent: () => callbackStreamCurrent,
+    });
+
+    await handle.deliver(
+      {
+        text: "🛠️ Exec: running",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+    );
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+
+    callbackStreamCurrent = false;
+    mockClient.replyStream.mockClear();
+    await handle.deliver(
+      {
+        text: "🛠️ Exec: completed",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+      { kind: "block" },
+    );
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(String((mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content)).toContain(
+      "Exec: completed",
+    );
+
+    // Ownership loss is one-way even if a stale checker later reports true.
+    callbackStreamCurrent = true;
+    mockClient.replyStream.mockClear();
+    await handle.deliver({ text: "最终答案" }, { kind: "final" });
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(String((mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content)).toContain(
+      "最终答案",
+    );
+  });
+
+  it("moves a scheduled heartbeat to active push after callback ownership expires", async () => {
+    let callbackStreamCurrent = true;
+    createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-dynamic-heartbeat" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      isCallbackStreamCurrent: () => callbackStreamCurrent,
+    });
+    await flushPromises();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+
+    callbackStreamCurrent = false;
+    mockClient.replyStream.mockClear();
+    await vi.advanceTimersByTimeAsync(8 * 60_000);
+    await flushPromises();
+
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(String((mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content)).toContain(
+      "【长任务处理中，请勿打断，已用时8m00s】",
+    );
+  });
+
+  it("actively pushes failure after callback ownership is lost", async () => {
+    let callbackStreamCurrent = true;
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-dynamic-failure" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      isCallbackStreamCurrent: () => callbackStreamCurrent,
+    });
+
+    callbackStreamCurrent = false;
+    await handle.fail(new Error("dynamic ownership failed"));
+
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    const failurePush = String(
+      (mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content ?? "",
+    );
+    expect(failurePush).toContain("本次回复投递中断");
+    expect(failurePush).not.toContain("dynamic ownership failed");
+  });
+
+  it("rechecks callback ownership after waiting for a pending final ACK", async () => {
+    let callbackStreamCurrent = true;
+    let pendingAck = true;
+    const pendingClient = mockClient as typeof mockClient & {
+      hasPendingReplyAck: ReturnType<typeof vi.fn>;
+    };
+    pendingClient.hasPendingReplyAck = vi.fn(() => pendingAck);
+    const handle = createBotWsReplyHandle({
+      client: pendingClient,
+      frame: {
+        headers: { req_id: "req-ownership-during-ack-wait" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      isCallbackStreamCurrent: () => callbackStreamCurrent,
+    });
+
+    const finalPromise = handle.deliver({ text: "等待期间的最终答案" }, { kind: "final" });
+    await flushPromises();
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(mockClient.sendMessage).not.toHaveBeenCalled();
+
+    callbackStreamCurrent = false;
+    pendingAck = false;
+    await vi.advanceTimersByTimeAsync(100);
+    await finalPromise;
+
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(String((mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content)).toContain(
+      "等待期间的最终答案",
+    );
+  });
+
+  it("does not advance body bookmarks from a late preview after ownership loss", async () => {
+    let callbackStreamCurrent = true;
+    let resolveLatePreview!: (value: unknown) => void;
+    mockClient.replyStream.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveLatePreview = resolve;
+        }) as any,
+    );
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-late-preview-ownership-loss" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      isCallbackStreamCurrent: () => callbackStreamCurrent,
+    });
+
+    const blockPromise = handle.deliver({ text: "必须保留的正文。" }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(8_000);
+    await blockPromise;
+
+    callbackStreamCurrent = false;
+    resolveLatePreview({});
+    await flushPromises();
+    mockClient.replyStream.mockClear();
+    mockClient.sendMessage.mockClear();
+    await handle.deliver({ text: "最终结论。" }, { kind: "final" });
+
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    const finalPush = String(
+      (mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content ?? "",
+    );
+    expect(finalPush).toContain("必须保留的正文。");
+    expect(finalPush).toContain("最终结论。");
   });
 
   it("does not let transient preamble reset the delivered-body bookmark", async () => {
@@ -4932,6 +5264,13 @@ describe("createBotWsReplyHandle", () => {
 
   it.each([
     [
+      "structured work item",
+      {
+        text: "• 长任务步骤: in_progress",
+        channelData: { openclawProgressKind: "structured-item" },
+      },
+    ],
+    [
       "preamble",
       {
         text: "正在检查仓库",
@@ -4960,15 +5299,15 @@ describe("createBotWsReplyHandle", () => {
     await vi.advanceTimersByTimeAsync(1);
     await flushPromises();
     expect(mockClient.replyStream).toHaveBeenCalledTimes(callsAfterProgress + 1);
-    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toBe(
-      "【长任务处理中，请勿打断，已用时8m00s】",
-    );
+    const eightMinuteHeartbeat = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(eightMinuteHeartbeat).toContain(String(payload.text));
+    expect(eightMinuteHeartbeat).toContain("【长任务处理中，请勿打断，已用时8m00s】");
 
     await vi.advanceTimersByTimeAsync(15_000);
     await flushPromises();
-    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toBe(
-      "【长任务处理中，请勿打断，已用时8m15s】",
-    );
+    const repeatedHeartbeat = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(repeatedHeartbeat).toContain(String(payload.text));
+    expect(repeatedHeartbeat).toContain("【长任务处理中，请勿打断，已用时8m15s】");
   });
 
   it("uses only the frozen-body lane for status once visible body has frozen", async () => {
@@ -5676,6 +6015,48 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream.mock.calls[1]?.[3]).toBe(true);
   });
 
+  it.each(["new-inbound", "new-inbound-unmerged"] as const)(
+    "does not rearm a lost-ACK placeholder after %s supersedes it",
+    async (reason) => {
+      let rejectPlaceholder!: (error: unknown) => void;
+      mockClient.replyStream
+        .mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectPlaceholder = reject;
+            }),
+        )
+        .mockResolvedValue({} as any);
+      const handle = createBotWsReplyHandle({
+        client: mockClient,
+        frame: {
+          headers: { req_id: `req-lost-ack-${reason}` },
+          body: { from: { userid: "alice" }, chattype: "single" },
+        } as unknown as ReplyHandleParams["frame"],
+        accountId: "default",
+        inboundKind: "file",
+        placeholderContent: "正在思考...",
+      });
+      await flushPromises();
+
+      handle.supersedeByNewInbound?.({
+        accountId: "default",
+        peerKind: "direct",
+        peerId: "alice",
+        reason,
+      });
+      rejectPlaceholder(
+        new Error(`Reply ack timeout (5000ms) for reqId: req-lost-ack-${reason}`),
+      );
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(3_100);
+      await flushPromises();
+
+      expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+      expect(mockClient.sendMessage).not.toHaveBeenCalled();
+    },
+  );
+
   it("tells an unmergeable superseded inbound that it was not processed", async () => {
     // A pending inbound that could not be folded into its successor (another
     // group member, an event turn) never reaches OpenClaw, so promising the
@@ -6032,6 +6413,33 @@ describe("createBotWsReplyHandle", () => {
     );
   });
 
+  it("delivers identical finals for distinct forced-push handles without weakening per-handle dedup", async () => {
+    const createForcedHandle = () =>
+      createBotWsReplyHandle({
+        client: mockClient,
+        frame: {
+          headers: { req_id: "req-identical-forced-final" },
+          body: { from: { userid: "alice" }, chattype: "single" },
+        } as unknown as ReplyHandleParams["frame"],
+        accountId: "default",
+        inboundKind: "text",
+        autoSendPlaceholder: false,
+        forceActivePush: true,
+      });
+    const firstHandle = createForcedHandle();
+    const secondHandle = createForcedHandle();
+    const finalPayload = { text: "合法的 forced-push 相同答案", isReasoning: false };
+
+    await firstHandle.deliver(finalPayload, { kind: "final" });
+    await firstHandle.deliver(finalPayload, { kind: "final" });
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    await secondHandle.deliver(finalPayload, { kind: "final" });
+
+    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     [{ headers: { req_id: "req-invalid" }, errcode: 846605, errmsg: "invalid req_id" }],
     [
@@ -6130,6 +6538,76 @@ describe("createBotWsReplyHandle", () => {
         msgtype: "text",
         text: { content: "Hello Bob" },
       },
+    );
+  });
+
+  it("uses active push for a welcome final when the callback req_id is unsafe", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "welcome_collision_req" },
+        body: { chattype: "single", from: { userid: "bob" } },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "welcome",
+      forceActivePush: true,
+    });
+
+    await handle.deliver({ text: "Hello Bob" }, { kind: "final" });
+
+    expect(mockClient.replyWelcome).not.toHaveBeenCalled();
+    expect(mockClient.sendMessage).toHaveBeenCalledWith(
+      "bob",
+      expect.objectContaining({
+        msgtype: "markdown",
+        markdown: expect.objectContaining({ content: expect.stringContaining("Hello Bob") }),
+      }),
+    );
+  });
+
+  it("uses active push when a welcome loses callback ownership after creation", async () => {
+    let callbackStreamCurrent = true;
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "welcome_dynamic_ownership_req" },
+        body: { chattype: "single", from: { userid: "bob" } },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "welcome",
+      isCallbackStreamCurrent: () => callbackStreamCurrent,
+    });
+
+    callbackStreamCurrent = false;
+    await handle.deliver({ text: "Hello after ownership loss" }, { kind: "final" });
+
+    expect(mockClient.replyWelcome).not.toHaveBeenCalled();
+    expect(String((mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content)).toContain(
+      "Hello after ownership loss",
+    );
+  });
+
+  it("uses active push for a welcome failure when the callback req_id is unsafe", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "welcome_failure_collision_req" },
+        body: { chattype: "single", from: { userid: "bob" } },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "welcome",
+      forceActivePush: true,
+    });
+
+    await handle.fail(new Error("welcome failed"));
+
+    expect(mockClient.replyWelcome).not.toHaveBeenCalled();
+    expect(mockClient.sendMessage).toHaveBeenCalledWith(
+      "bob",
+      expect.objectContaining({
+        msgtype: "markdown",
+        markdown: expect.objectContaining({ content: expect.stringContaining("welcome failed") }),
+      }),
     );
   });
 

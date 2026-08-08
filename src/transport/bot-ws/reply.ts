@@ -165,26 +165,6 @@ function appendPreviewSuffixWithinLimits(params: PreviewSuffixParams): string {
   return composePreviewSuffixWithinLimits(params).text;
 }
 
-function composeTransientProgressSnapshot(texts: Iterable<string>): string {
-  const seenLines = new Set<string>();
-  const sections: string[] = [];
-  for (const text of texts) {
-    const uniqueLines: string[] = [];
-    for (const rawLine of text.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line || seenLines.has(line)) {
-        continue;
-      }
-      seenLines.add(line);
-      uniqueLines.push(line);
-    }
-    if (uniqueLines.length > 0) {
-      sections.push(uniqueLines.join("\n"));
-    }
-  }
-  return sections.join("\n\n");
-}
-
 function appendFailureNoticeToProgress(progress: string, notice: string): string {
   const trimmedProgress = progress.trimEnd();
   const lastLineStart = trimmedProgress.lastIndexOf("\n") + 1;
@@ -1016,11 +996,13 @@ export function createBotWsReplyHandle(params: {
   let latestTransientProgressText = "";
   const transientProgressTextByKind = new Map<string, string>();
   let deferredMediaUrls: string[] = [];
+  // Two independent lanes only: the current narration step and OpenClaw's Fast
+  // mode line. Both are single current values, so composing is a plain join.
   const rememberTransientProgress = (kind: string, text: string): string => {
     transientProgressTextByKind.set(kind, text);
-    latestTransientProgressText = composeTransientProgressSnapshot(
-      transientProgressTextByKind.values(),
-    );
+    latestTransientProgressText = [...transientProgressTextByKind.values()]
+      .filter(Boolean)
+      .join("\n\n");
     return latestTransientProgressText;
   };
   const resolveStreamId = () => {
@@ -3047,17 +3029,15 @@ export function createBotWsReplyHandle(params: {
         return;
       }
 
-      if (
-        payload.channelData?.openclawProgressKind === "preamble" ||
-        payload.channelData?.openclawProgressKind === "structured-item"
-      ) {
-        const preambleText = payload.text?.trim() ?? "";
-        if (!preambleText || isEvent || supersededByNewInbound || streamSettled) {
-            return;
+      const transientProgressKind = payload.channelData?.openclawProgressKind;
+      if (transientProgressKind === "preamble" || transientProgressKind === "fast-mode-auto") {
+        const progressText = payload.text?.trim() ?? "";
+        if (!progressText || isEvent || supersededByNewInbound || streamSettled) {
+          return;
         }
         const transientProgressText = rememberTransientProgress(
-          payload.channelData.openclawProgressKind,
-          preambleText,
+          transientProgressKind,
+          progressText,
         );
         if (await sendForcedTransientProgress(transientProgressText)) {
           return;
@@ -3077,35 +3057,6 @@ export function createBotWsReplyHandle(params: {
         // OpenClaw progress is visible process feedback, not answer text.
         // Rendering it through the preview lane keeps it out of accumulatedText
         // and final.
-        await sendPreviewUpdate(progressPreviewText, Date.now(), {
-          bodySourceText: progress.visiblePrefix,
-          showsVisibleBody: Boolean(progress.visiblePrefix),
-          transientProgressText: progress.visibleSuffix,
-        });
-        return;
-      }
-
-      if (payload.channelData?.openclawProgressKind === "fast-mode-auto") {
-        const fastText = payload.text?.trim() ?? "";
-        if (!fastText || isEvent || supersededByNewInbound || streamSettled) {
-          return;
-        }
-        const transientProgressText = rememberTransientProgress("fast-mode-auto", fastText);
-        if (await sendForcedTransientProgress(transientProgressText)) {
-          return;
-        }
-        const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
-        const progress = composePreviewSuffixWithinLimits({
-          prefix: accumulatedText,
-          suffix: transientProgressText,
-          separator: "\n",
-          maxChars: thinkingLimits.maxChars,
-          maxBytes: thinkingLimits.maxBytes,
-        });
-        const progressPreviewText = prependThinkingToPreviewWire(progress.text);
-        if (!progressPreviewText || progressPreviewText === lastPreviewText) {
-          return;
-        }
         await sendPreviewUpdate(progressPreviewText, Date.now(), {
           bodySourceText: progress.visiblePrefix,
           showsVisibleBody: Boolean(progress.visiblePrefix),

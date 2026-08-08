@@ -375,8 +375,8 @@ describe("dispatchInboundEvent", () => {
       .mockImplementationOnce(async (params) => {
         await params.dispatcherOptions.deliver(
           {
-            text: "🛠️ Exec: running",
-            channelData: { openclawProgressKind: "structured-item" },
+            text: "正在读取待转换的文件",
+            channelData: { openclawProgressKind: "preamble" },
           },
           { kind: "block" },
         );

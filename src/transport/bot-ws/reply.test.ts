@@ -4663,12 +4663,7 @@ describe("createBotWsReplyHandle", () => {
     expect(onFail).toHaveBeenCalledTimes(2);
   });
 
-  it.each([
-    ["preamble", "preamble"],
-    ["structured work item", "structured-item"],
-  ])(
-    "renders OpenClaw %s as transient progress without merging it into the final",
-    async (_label, openclawProgressKind) => {
+  it("renders OpenClaw narration as transient progress without merging it into the final", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -4683,7 +4678,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver(
       {
         text: "正在检查仓库",
-        channelData: { openclawProgressKind },
+        channelData: { openclawProgressKind: "preamble" },
       },
       { kind: "block" },
     );
@@ -4691,65 +4686,23 @@ describe("createBotWsReplyHandle", () => {
       "正在检查仓库",
     );
 
+    // The next step replaces the previous one instead of stacking on top of it.
+    await handle.deliver(
+      {
+        text: "仓库检查完成，正在生成整改方案",
+        channelData: { openclawProgressKind: "preamble" },
+      },
+      { kind: "block" },
+    );
+    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toBe(
+      "仓库检查完成，正在生成整改方案",
+    );
+
     await handle.deliver({ text: "最终答案" }, { kind: "final" });
     const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(finalText).toContain("最终答案");
     expect(finalText).not.toContain("正在检查仓库");
-    },
-  );
-
-  it("deduplicates exact repeated lines in the composed transient progress bubble", async () => {
-    const handle = createBotWsReplyHandle({
-      client: mockClient,
-      frame: {
-        headers: { req_id: "req-transient-line-dedup" },
-        body: { from: { userid: "alice" }, chattype: "single" },
-      } as unknown as ReplyHandleParams["frame"],
-      accountId: "default",
-      inboundKind: "text",
-      autoSendPlaceholder: false,
-    });
-    const finding =
-      "目前已确认直接故障是上下文溢出，但这只是表象：昨天运行了约 20 分钟后才失败。";
-
-    await handle.deliver(
-      {
-        text: `我按三层排查任务配置、运行记录和发布门禁。\n${finding}\n${finding}`,
-        channelData: { openclawProgressKind: "preamble" },
-      },
-      { kind: "block" },
-    );
-    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toBe(
-      `我按三层排查任务配置、运行记录和发布门禁。\n${finding}`,
-    );
-
-    await handle.deliver(
-      {
-        text: "🧰 Tool Call\n🛠 Exec\n🧰 Tool Call\n🛠 Exec",
-        channelData: { openclawProgressKind: "structured-item" },
-      },
-      { kind: "block" },
-    );
-    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toBe(
-      `我按三层排查任务配置、运行记录和发布门禁。\n${finding}\n\n🧰 Tool Call\n🛠 Exec`,
-    );
-
-    await handle.deliver(
-      {
-        text: `我按三层排查任务配置、运行记录和发布门禁。\n${finding}\n整改方案已生成。`,
-        channelData: { openclawProgressKind: "preamble" },
-      },
-      { kind: "block" },
-    );
-    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toContain(
-      "整改方案已生成。",
-    );
-
-    await handle.deliver({ text: "最终答复" }, { kind: "final" });
-    const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(finalText).toContain("最终答复");
-    expect(finalText).not.toContain(finding);
-    expect(finalText).not.toContain("Tool Call");
+    expect(finalText).not.toContain("正在生成整改方案");
   });
 
   it("keeps OpenClaw progress visible when a req-id collision forces active push", async () => {
@@ -4767,8 +4720,8 @@ describe("createBotWsReplyHandle", () => {
 
     await handle.deliver(
       {
-        text: "🛠️ Exec: running",
-        channelData: { openclawProgressKind: "structured-item" },
+        text: "正在执行仓库检查",
+        channelData: { openclawProgressKind: "preamble" },
       },
       { kind: "block" },
     );
@@ -4776,7 +4729,7 @@ describe("createBotWsReplyHandle", () => {
     const immediateProgressPush = String(
       (mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content ?? "",
     );
-    expect(immediateProgressPush).toContain("🛠️ Exec: running");
+    expect(immediateProgressPush).toContain("正在执行仓库检查");
 
     await vi.advanceTimersByTimeAsync(8 * 60_000);
     await flushPromises();
@@ -4791,7 +4744,7 @@ describe("createBotWsReplyHandle", () => {
       (mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content ?? "",
     );
     expect(finalPush).toContain("最终答案");
-    expect(finalPush).not.toContain("Exec: running");
+    expect(finalPush).not.toContain("正在执行仓库检查");
     expect(mockClient.replyStream).not.toHaveBeenCalled();
   });
 
@@ -4811,8 +4764,8 @@ describe("createBotWsReplyHandle", () => {
 
     await handle.deliver(
       {
-        text: "🛠️ Exec: running",
-        channelData: { openclawProgressKind: "structured-item" },
+        text: "正在执行仓库检查",
+        channelData: { openclawProgressKind: "preamble" },
       },
       { kind: "block" },
     );
@@ -4823,14 +4776,14 @@ describe("createBotWsReplyHandle", () => {
     mockClient.replyStream.mockClear();
     await handle.deliver(
       {
-        text: "🛠️ Exec: completed",
-        channelData: { openclawProgressKind: "structured-item" },
+        text: "仓库检查完成",
+        channelData: { openclawProgressKind: "preamble" },
       },
       { kind: "block" },
     );
     expect(mockClient.replyStream).not.toHaveBeenCalled();
     expect(String((mockClient.sendMessage.mock.calls.at(-1)?.[1] as any)?.markdown?.content)).toContain(
-      "Exec: completed",
+      "仓库检查完成",
     );
 
     // Ownership loss is one-way even if a stale checker later reports true.
@@ -5317,13 +5270,6 @@ describe("createBotWsReplyHandle", () => {
   });
 
   it.each([
-    [
-      "structured work item",
-      {
-        text: "• 长任务步骤: in_progress",
-        channelData: { openclawProgressKind: "structured-item" },
-      },
-    ],
     [
       "preamble",
       {

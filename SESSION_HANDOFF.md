@@ -1,16 +1,16 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-08-07（`2.7.260-7` 发布收口）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-08-08（`2.7.260-8` 发布收口）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 当前正式版本：**`2.7.260-7`**，发布标签 `released/2.7.260-7`，包 `yanhaidao-wecom-2.7.260-7.tgz`（223,146 bytes；解包 1,035,265 bytes；139 文件；npm shasum `2ac582aab1b34d6444d3cb4b81627dd602f36e0f`；SHA-256 `91ab57349b98a1636036931e1181204f41f18b8f68032a83bf9c839f386e5c09`）。实现、测试、版本与首版发布文档提交为 `5ede9fb`。本版补齐 v6 未覆盖的整段内部重复、快照局部重叠和脱敏工具标签重复，在 Bot WS 最终瞬态气泡合成层按可见行精确去重，详见第 2l 节。
+- 当前正式版本：**`2.7.260-8`**，发布标签 `released/2.7.260-8`。本版是**净减法**：删除 v5 引入的整条结构化工具进度通道，并把 preamble 从「跨 item 累积」改回「当前步骤快照」，连带移除 v6/v7 两层展示层去重，产线代码净减约 340 行。详见第 2m 节。
 - `2.7.260-3` 是**已撤回的历史候选**：本地与 `fork` 上的 tag、对应 tarball 均已删除，历史提交保留且不重写；由 `2.7.260-4` 替代。上一有效正式版本为 `2.7.260-2`，发布标签 `released/2.7.260-2`。
 - v149 修复「文件+文字互相丢一半」「长任务产出被后台提示丢弃」「一次主动推送永久熄灭长任务反馈」，见第 2c 节；v148 修复「失败长任务只剩一行 `LLM request failed`」并优化长任务提示词，见第 2b 节；v147 修复现网反馈的三类问题（莫名失败提示、长任务无过程信息、思考块经常不出现）。
 - 当前及后续自测统一固定为 OpenClaw **2026.7.1-2**，仓库 devDependency 使用精确版本；不再运行其他版本或双版本矩阵。`peerDependencies` 仍保留 `^2026.6.11` 安装兼容范围（见第 2f 节），只表示安装兼容声明。
 - 企业微信 Bot SDK：`@wecom/aibot-node-sdk` **1.0.7**（固定版本）。
 - 远端纪律：**只推 `fork`（git@github.com:liny90626/wecom.git），绝不推 `origin`（上游 YanHaidao）**；从 `origin` **拉取/合并**是允许且必要的（见第 2f 节），禁止的只有推送；提交邮箱固化为 `liny90626@users.noreply.github.com`（GH007 教训）。
-- `2.7.260-7` 发布验证：只用 OpenClaw 2026.7.1-2，全量 45 文件 / **594 测试全绿**，核心 6 文件 / **370 测试全绿**；build/typecheck/dist/B1/B2/B3/diff-check 全绿。tarball 的版本、`package/dist/index.js` 入口、文件数、包/解包大小、npm shasum/integrity 与 SHA-256 均已直接核验。
+- `2.7.260-8` 发布验证：只用 OpenClaw 2026.7.1-2，全量 45 文件 / **589 测试全绿**；build/typecheck/dist/B1/B2/B3/diff-check 全绿。相对 v7 的 594：新增 4 条（两条根因复现、一条端到端工具密集回合、一条 deferred 工具回合回归），删除 9 条**只为已删除功能存在**的用例，保留行为的断言未削弱。
 - `reply.test.ts` 与 `gateway-sim.test.ts` 头部都有 `vi.setConfig({ testTimeout: 30_000 })`：这两套 fake-timer 密集，全量并发冷缓存下墙钟可超默认 5s。不要改回全局 timeout。
 - 涉及释放等待的 dispatcher 用例必须用 `vi.useFakeTimers()` 并在 `finally` 里 `vi.useRealTimers()`，否则污染后续用例（已发生过一次超时）。
 
@@ -256,6 +256,49 @@ v6 在 orchestrator 的 `resolvePreamblePayload` 中按“每个 item 的完整�
 
 新增测试直接构造用户反馈形态：preamble 包含两条完全相同的长句，随后 structured-item 包含两组 `Tool Call / Exec`。旧实现第一帧明确保留重复长句；修复后自然语言和工具标签均只出现一次，后续新增“整改方案已生成”仍能显示，final 中不含任何瞬态过程。只用 OpenClaw **2026.7.1-2**：全量 45 文件 / 594 测试，核心 6 文件 / 370 测试，以及 typecheck、build、dist、B1/B2/B3、diff-check 全部通过。未做真实企微网关/客户端验证，未执行 `npm publish`。
 
+## 2m. `2.7.260-8`：删掉工具提示通道，过程文字回到「当前步骤」
+
+现网反馈两条：**①长任务和短任务过程中都会出现 tool call 等工具调用提示；②重复的文字段落，v5~v7 都没治好。** 并要求复查 v118 → 当前的冗余代码，「所有代码都是解决根因而存在的，而不是不停地通过加保护牺牲了稳定性与速度」。
+
+### ① 工具提示：这条通道结构上不可能有信息量
+
+v5 为了让长任务显示真实过程，接了 7 个 lifecycle 回调（`onToolStart` / `onCommandOutput` / `onPlanUpdate` / `onApprovalEvent` / `onPatchSummary` / `onCompactionStart` / `onCompactionEnd`）+ 非 preamble 的 `onItemEvent`，再喂进 OpenClaw 官方 progress formatter。但**禁改 35 要求命令、参数、路径、搜索词、审批内容、工具返回值全部不可外发，工具名也要降级成白名单通用值**。实测把真实事件喂进 formatter，输出只有 `🧰 Tool Call: running` / `🛠️ Exec`。
+
+也就是说，脱敏之后这条通道只能表达「有个工具在跑」——而 8 分钟长任务心跳已经在说同一件事，且不占正文预算。**整条删除**（7 个回调、三张归一化表、`structured-item` 载荷类型，以及 `reply.ts` / `reply-visibility.ts` 的对应分支）。
+
+**唯一保留**：`onToolStart` 仍订阅，但只置 `runActivityObserved`，不产生任何投递。删掉它会让「只跑工具、无可见输出、被判 deferred」的回合退化成空回合并回 `WeComReplyNoVisibleOutputError`——已用定向用例复现（去掉这 3 行 → 用例直接抛错）。这是分诊需要的事实证据，不是保护。未知/内部 item kind 仍不算证据（既有 `it.each` 用例守着）。
+
+### ② 重复段落：把「当前步骤」当成了「清单」
+
+OpenClaw CLI 后端 `execute.runtime` 的 `emitCliCommentaryText` 用自增计数器发 commentary：
+
+```js
+let commentaryCounter = 0;
+const emitCliCommentaryText = (text) => {
+  commentaryCounter += 1;
+  emitAgentEvent({ stream: "item", data: {
+    kind: "preamble", itemId: `commentary-${params.runId}-${commentaryCounter}`, progressText: transformedText,
+  }});
+};
+```
+
+触发点是 `claude-live-session` 里 `content_block_start` 遇到 `tool_use` ⇒ **每调一次工具，工具之前那段自述就被 flush 成一条新 commentary，`itemId` 每次都变**。插件却把 `preambleItemOrder` 里所有 item 的文本换行拼接，于是调 6 次工具就叠 6 段自述。模型跨步骤自述天然相似但并不相同，**v6 的整段 `Set` 和 v7 的按行 `Set` 都吃不掉**。
+
+**这不只是难看**：气泡按 `composePreviewSuffixWithinLimits(prefix=正文, suffix=过程)` 合成，**suffix 先按全额预算渲染，正文只拿剩下的**，所以自述越堆，用户能看到的答案正文被截得越短。
+
+修复：`preambleTextByItem` / `preambleItemOrder` / `anonymousPreambleItem` 合并成一个 `currentPreambleText`，最新值覆盖，文本没变不发帧；`itemId` 不再参与判定。v6、v7 两层去重一并删除（根因消失后它们只是对模型原文的多余改写）。`reply.ts` 里 preamble 与 fast-mode 两个完全相同的分支也合并成一个。
+
+### ③ 对速度/稳定性的实际影响
+
+企微 SDK 每个 `req_id` 只有**一个串行回执槽**，final 发送前要等 `waitForPendingReplyAckToClear`（最长 5.5s）。过程帧越少，final 撞上待回执的概率越低——**这是直接的答复提速**。6 步工具回合的过程帧由「每个 lifecycle 边沿都可能推（18 个事件）」降到「仅自述变化时推（≤6 帧）」，端到端用例已固化上界。
+
+### ④ 冗余复查结论（v118 → v8）
+
+- reply.ts / reply-orchestrator.ts 用脚本扫过：**没有零引用的顶层符号或闭包**，累积的不是死代码而是活机制。
+- `dedupeLongFinalText` / `findRepeatedHeadingTail`（约 130 行最终文本去重启发式）**在 v118 里就存在**，属稳定基线，本轮未动。
+- 心跳（`placeholderKeepalive`）、冻结状态（`previewStatusInterval`）、后台推送（`previewExpiredNotice`）三条长任务反馈看似重复，实为**三种不同传输条件**下的同一语义（气泡未渲染 / 气泡已冻结 / 气泡不可用），且分别由禁改 25、27、34 锁定，本轮判定为必要，未合并。
+- 上游 `YanHaidao/wecom` 有新提交（markdown 子集拆分、多分片节流、agent-api 重构等），**本轮未合并**：不在本次任务范围内，且会污染本次改动的验证信号。
+
 ## 3. OpenClaw / 企微 SDK 核心机制速查（源码级已验证）
 
 - **企微 SDK 1.0.7 投递层**（`node_modules/@wecom/aibot-node-sdk/dist/index.cjs.js`）：
@@ -319,8 +362,10 @@ v6 在 orchestrator 的 `resolvePreamblePayload` 中按“每个 item 的完整�
 32. **不要在最终 wire 落定前做字符预算**：Markdown 规范化、literal think 转义、真实 thinking block、completion marker 都可能改变长度；预览、normal final 与 active push 必须继续复用 wire-aware 分段原语。
 33. **全帧瞬态状态必须携带它实际保留的正文 source prefix**：preamble/Fast 可清空或缩短当前气泡正文，书签必须同步回退；但仅有瞬态状态时不得设置 `visibleReplyStarted`。
 34. **8 分钟是回合开始后的绝对门槛，15 秒是门槛后的统一 cadence**：不要用最近一次冻结预览时间推迟首状态；长任务状态 ACK 持续不可信时必须切 active push；确认 preview 恢复时必须同时解除后台 timer 和 armed 状态。
-35. **不要把 OpenClaw 结构化 lifecycle 的原始 payload 直接发到企微**：只能通过受控 kind/name/status 和官方 progress formatter 生成状态；命令、参数、路径、搜索词、审批内容与工具结果都属于不可见载荷。
-36. **回调 `req_id` 不能再被视为天然唯一**：必须保留 `messageId + ownerToken + TTL` 的动态认领；冲突、重投、缺失、容量或 pending ACK 一律 fail closed，owner 丢失必须永久锁存并在每条投递路径复查。
+35. **不要把 OpenClaw 结构化 lifecycle 事件渲染成任何用户可见文字**（v8 收紧）：命令、参数、路径、搜索词、审批内容与工具结果本就不可外发，工具名也必须降级为通用值——脱敏之后剩下的只有 `🧰 Tool Call: running` 这类零信息量标签，却要占用与正文共享的气泡预算。lifecycle 事件**只能**用作 `runActivityObserved` 的事实证据（`onToolStart`，不产生投递），不得重新接回投递通道。未知/内部 item kind 连证据也不算。
+36. **preamble 必须是「当前步骤快照」，不得跨 item 累积**（v8）：OpenClaw CLI 后端每遇到一次 `tool_use` 就把之前那段自述 flush 成一条新 commentary，`itemId` 每次递增（`execute.runtime` 的 `commentary-<runId>-<n>`）。按 item 顺序拼接会把整轮自述堆进一个气泡，并因为「suffix 先占额度」把答案正文挤出 3500 字符预算。改回累积＝同时复发「重复的文字段落」和「答案被截断」，且任何展示层去重都治不住（各段文本并不相同）。
+37. **不要重新引入展示层去重来掩盖过程文字重复**（v8）：v6 的跨 item 整段 `Set` 与 v7 的按行 `Set` 都是症状补丁，根因修好后已删除。插件不得擅自改写模型写下的句子——真出现重复，先查产出侧语义，不要在渲染层删行。
+38. **回调 `req_id` 不能再被视为天然唯一**：必须保留 `messageId + ownerToken + TTL` 的动态认领；冲突、重投、缺失、容量或 pending ACK 一律 fail closed，owner 丢失必须永久锁存并在每条投递路径复查。
 
 ## 6. 已知边界与待办观察
 
@@ -335,12 +380,13 @@ v6 在 orchestrator 的 `resolvePreamblePayload` 中按“每个 item 的完整�
 - 被接管且「已可见」的旧 final 仍按 B3 丢弃，这是 B3 设计语义，不是 bug。
 - ambiguous 补发存在有界重复风险（仅未确认分片、≤3 次）——刻意取舍。
 - 若一轮内一次预览都没成功过且流在 120 秒内就死，占位保活会 `settleStream()` 并连带取消后台通知；此时答案仍以主动推送到达。窄场景，未处理。
-- **真机（企微网关/客户端）验证仍未做**：`2.7.260-7` 发布后除继续观察结构化进度、8 分钟心跳、相邻气泡、复用 `req_id`、迟到 ACK 与 emoji 边界外，还需确认多行/局部重叠 preamble 和重复通用工具标签只显示一次，后续新增行仍能出现。
+- **真机（企微网关/客户端）验证仍未做**：`2.7.260-8` 发布后需确认两点——过程气泡里**再也看不到任何工具调用标签**，且自述**只显示当前一步、不再叠加**；另需继续观察 8 分钟心跳、相邻气泡、复用 `req_id`、迟到 ACK 与 emoji 边界。
+- **上游 `YanHaidao/wecom` 已有新提交未合并**（markdown 子集拆分、多分片发送节流、agent-api 骨架重构、零引用清理等）：本轮任务范围不含上游同步，合并时按第 2f 节对照表处理 `package.json`，并注意上游的多分片节流可能与本仓库的分段/书签逻辑相互影响。
 - `npm audit --omit=dev` 当前仍报告直接生产依赖 `undici@7.28.0` 的 1 个 high 告警，已知修复版本为 7.29.0；本次发布没有扩大到依赖升级。
 - 发布 tarball 不入 git（*.tgz 未跟踪），以 changelog 打包记录的 shasum 为准。
 
 ## 7. 版本脉络备忘
 
-`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增长任务诊断 → `v149` 文件/文字双向并入与后台产出书签 → **`2.7.260-1`（原 v150）** 时间驱动长任务反馈与 final 重试保全 → **`2.7.260-2`** 完成态接收 TOCTOU 与重复错误记录修复 → **`2.7.260-3`（已撤回）** preamble 候选 → **`2.7.260-4`** preamble 快照、8 分钟/15 秒节奏、最终 wire 预算与可见正文书签统一 → **`2.7.260-5`** 结构化真实进度、动态 `req_id` owner、文件+文字相邻气泡与迟到 ACK 根治 → **`2.7.260-6`** 跨 commentary item 的完全同文 preamble 精确去重 → **`2.7.260-7`** 最终瞬态气泡按可见行统一去重。
+`v118`（稳定基线）→ v119-135 开发线**未入主线** → `v136` 基于 v118 重建 → `v137` init-conflict 短重试 → `v138` 媒体+文字合并 → `v139` OpenClaw 7.1 适配 + 投递抗丢失 → `v140` 未发布体验包 → `v141` routed-final 收口 + SDK 1.0.7 → `v142` 进度/模型流解耦 → `v143` 暖会话 metadata 解阻塞 → `v144` 外部答案成功后的旧流静默结算 → `v145` retry/keepalive/注册表/source 生命周期闭环 → `v146` 入站即时确认、被接管消息并入、提示与事实对齐、7.1 冻结中止有界等待 → `v147` 回执缺失不再熄灭进度通道、错误 final 保留思考块、被接管失败文案不外泄、接管与中止同 tick 发布 → `v148` 失败长任务的推送带上耗时与框架、新增长任务诊断 → `v149` 文件/文字双向并入与后台产出书签 → **`2.7.260-1`（原 v150）** 时间驱动长任务反馈与 final 重试保全 → **`2.7.260-2`** 完成态接收 TOCTOU 与重复错误记录修复 → **`2.7.260-3`（已撤回）** preamble 候选 → **`2.7.260-4`** preamble 快照、8 分钟/15 秒节奏、最终 wire 预算与可见正文书签统一 → **`2.7.260-5`** 结构化真实进度、动态 `req_id` owner、文件+文字相邻气泡与迟到 ACK 根治 → **`2.7.260-6`** 跨 commentary item 的完全同文 preamble 精确去重 → **`2.7.260-7`** 最终瞬态气泡按可见行统一去重 → **`2.7.260-8`** 删除结构化工具进度通道、preamble 回到当前步骤快照、移除 v6/v7 两层展示层去重。
 
 **版本号规则**：`<上游基线>-<构建号>`。构建号在**同一基线内**单调递增；**上游基线一变就从 1 重新计数**——`2.5.110` 基线走到 `2.5.110-149`，合并上游 `2.7.260` 后重新从 `2.7.260-1` 开始。tag 为 `released/<完整版本号>`，简报为 `changelog/v<完整版本号>.md`。

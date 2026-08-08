@@ -24,7 +24,6 @@ export function hasVisibleReplyBody(
   if (
     kind === "tool" ||
     payload.channelData?.openclawProgressKind === "preamble" ||
-    payload.channelData?.openclawProgressKind === "structured-item" ||
     payload.channelData?.openclawProgressKind === "fast-mode-auto" ||
     payload.isReasoning === true ||
     payload.isStatusNotice === true ||

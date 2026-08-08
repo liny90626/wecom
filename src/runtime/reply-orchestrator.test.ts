@@ -148,7 +148,59 @@ describe("dispatchRuntimeReply", () => {
     expect(deliver).toHaveBeenCalledTimes(2);
   });
 
-  it("forwards structured OpenClaw work-item progress before a long-task failure", async () => {
+  it("shows only the current commentary step when OpenClaw restarts the item id", async () => {
+    // Reproduces the real CLI backend: every assistant段 flushed before a tool
+    // call is emitted as commentary with a FRESH `commentary-<run>-<n>` id
+    // (execute.runtime `emitCliCommentaryText`). Stacking those ids turns the
+    // progress bubble into a growing wall of near-identical narration.
+    const steps = [
+      "我先读取仓库配置，确认发布门禁。",
+      "配置里没有相关项，我再检索一次运行记录。",
+      "运行记录也没有，我继续检查发布门禁。",
+    ];
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      for (const [index, progressText] of steps.entries()) {
+        await params.replyOptions.onItemEvent({
+          itemId: `commentary-run-${index + 1}`,
+          kind: "preamble",
+          progressText,
+        });
+      }
+      await params.dispatcherOptions.deliver({ text: "排查完成" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-commentary-restart" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    const progressTexts = deliver.mock.calls
+      .filter(([payload]) => payload?.channelData?.openclawProgressKind === "preamble")
+      .map(([payload]) => String(payload.text ?? ""));
+    expect(progressTexts.length).toBeGreaterThan(0);
+    for (const text of progressTexts) {
+      expect(text).not.toContain("\n");
+      expect(steps).toContain(text);
+    }
+    expect(progressTexts.at(-1)).toBe(steps.at(-1));
+  });
+
+  it("keeps tool lifecycle events out of the channel entirely", async () => {
+    // The tool identity is redacted before it can ever be rendered, so the only
+    // thing a tool line can say is "🧰 Tool Call: running" — noise that costs
+    // the answer its share of the 3500-char bubble budget. A failing turn must
+    // still deliver its final, and no redacted payload may leak on the way out.
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
       await params.replyOptions.onItemEvent({
         itemId: "tool:long-step-1",
@@ -165,14 +217,23 @@ describe("dispatchRuntimeReply", () => {
         itemId: "command:long-step-1",
         toolCallId: "long-step-1",
         kind: "command_execution",
-        title: "command cat /private/credentials",
         name: "bash",
         phase: "end",
         status: "failed",
         summary: "SECRET_COMMAND_OUTPUT",
-        progressText: "SECRET_COMMAND_OUTPUT",
-        meta: "cat /private/credentials",
       });
+      await params.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      await params.replyOptions.onCommandOutput?.({
+        itemId: "command:long-step-1",
+        name: "bash",
+        phase: "end",
+        status: "failed",
+      });
+      await params.replyOptions.onPlanUpdate?.({ phase: "start" });
+      await params.replyOptions.onApprovalEvent?.({ phase: "requested", status: "pending" });
+      await params.replyOptions.onPatchSummary?.({ itemId: "patch-1", phase: "end" });
+      await params.replyOptions.onCompactionStart?.();
+      await params.replyOptions.onCompactionEnd?.();
       await params.dispatcherOptions.deliver(
         { text: "LLM request failed.", isError: true },
         { kind: "final" },
@@ -184,7 +245,7 @@ describe("dispatchRuntimeReply", () => {
     await dispatchRuntimeReply({
       core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
       cfg: {} as any,
-      session: { ctx: { SessionKey: "session-structured-progress" } } as any,
+      session: { ctx: { SessionKey: "session-no-tool-labels" } } as any,
       replyHandle: {
         context: {
           transport: "bot-ws",
@@ -195,72 +256,132 @@ describe("dispatchRuntimeReply", () => {
       } as any,
     });
 
-    expect(deliver).toHaveBeenNthCalledWith(
-      1,
-      {
-        text: "🧰 Tool Call: running",
-        channelData: { openclawProgressKind: "structured-item" },
-      },
-      { kind: "block" },
-    );
-    expect(deliver).toHaveBeenNthCalledWith(
-      2,
-      {
-        text: "🛠️ Exec: failed",
-        channelData: { openclawProgressKind: "structured-item" },
-      },
-      { kind: "block" },
-    );
-    expect(deliver).toHaveBeenNthCalledWith(
-      3,
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver).toHaveBeenCalledWith(
       { text: "LLM request failed.", isError: true },
       { kind: "final" },
     );
-    expect(JSON.stringify(deliver.mock.calls)).not.toContain("/private/credentials");
-    expect(JSON.stringify(deliver.mock.calls)).not.toContain("SECRET_COMMAND_OUTPUT");
-    expect(JSON.stringify(deliver.mock.calls)).not.toContain("internal_customer_secret_api");
+    const delivered = JSON.stringify(deliver.mock.calls);
+    expect(delivered).not.toContain("Tool Call");
+    expect(delivered).not.toContain("Exec");
+    expect(delivered).not.toContain("Approval");
+    expect(delivered).not.toContain("/private/credentials");
+    expect(delivered).not.toContain("SECRET_COMMAND_OUTPUT");
+    expect(delivered).not.toContain("internal_customer_secret_api");
   });
 
-  it.each([
-    ["accepted", "🧩 Approval"],
-    ["approved", "🧩 Approval"],
-    ["expired", "Approval: cancelled"],
-    ["unavailable", "Approval: blocked"],
-  ])("normalizes structured progress status %s", async (status, expectedProgress) => {
+  it("closes a deferred tool-only turn quietly instead of reporting an empty run", async () => {
+    // Nothing is rendered from tool lifecycle any more, but a started tool is
+    // still the proof this turn ran. Losing that proof would answer a silent
+    // tool-only turn with "no visible output" — an error the user never earned.
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
-      await params.replyOptions.onItemEvent({
-        itemId: `approval-${status}`,
-        kind: "tool",
-        name: "approval",
-        status,
-      });
-      await params.dispatcherOptions.deliver({ text: "done" }, { kind: "final" });
-      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      await params.replyOptions.onToolStart?.({ name: "exec", phase: "start" });
+      return {
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+        noVisibleReplyFallbackEligible: true,
+      };
     });
     const deliver = vi.fn().mockResolvedValue(undefined);
+    const fail = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-tool-only-deferred" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+          fail,
+        } as any,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(fail).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver).toHaveBeenCalledWith({ text: "" }, { kind: "final" });
+  });
+
+  it("keeps a tool-heavy turn's bubble to one narration step through a real Bot WS handle", async () => {
+    __resetBotWsReplyTestState();
+    const replyStream = vi.fn().mockResolvedValue({});
+    const client = {
+      replyStreamNonBlocking: vi.fn().mockResolvedValue({}),
+      hasPendingReplyAck: vi.fn(() => false),
+      replyStream,
+      sendMessage: vi.fn().mockResolvedValue({}),
+      replyWelcome: vi.fn().mockResolvedValue({}),
+    } as unknown as WSClient;
+    const replyHandle = createBotWsReplyHandle({
+      client,
+      frame: {
+        headers: { req_id: "req-tool-heavy-turn" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as any,
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const steps = [
+      "先确认发布门禁配置",
+      "门禁正常，检查最近一次运行记录",
+      "运行记录缺少上下文，展开任务定义",
+      "任务定义无异常，核对依赖版本",
+      "依赖版本一致，复算超时边界",
+      "超时边界定位完成，正在整理结论",
+    ];
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      for (const [index, progressText] of steps.entries()) {
+        await params.replyOptions.onItemEvent({
+          itemId: `commentary-heavy-${index + 1}`,
+          kind: "preamble",
+          progressText,
+        });
+        await params.replyOptions.onToolStart?.({ name: "exec", phase: "start" });
+        await params.replyOptions.onCommandOutput?.({
+          itemId: `command-heavy-${index + 1}`,
+          name: "exec",
+          phase: "end",
+          status: "completed",
+        });
+      }
+      await params.dispatcherOptions.deliver({ text: "结论：超时来自网关代理" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
 
     await dispatchRuntimeReply({
       core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
       cfg: {} as any,
-      session: { ctx: { SessionKey: `session-status-${status}` } } as any,
-      replyHandle: {
-        context: {
-          transport: "bot-ws",
-          accountId: "default",
-          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
-        },
-        deliver,
-      } as any,
+      session: { ctx: { SessionKey: "session-tool-heavy-turn" } } as any,
+      replyHandle,
     });
 
-    expect(String(deliver.mock.calls[0]?.[0]?.text ?? "")).toContain(expectedProgress);
-    expect(deliver).toHaveBeenLastCalledWith({ text: "done" }, { kind: "final" });
+    const nonFinalFrames = (client as any).replyStreamNonBlocking.mock.calls.map((call: any[]) =>
+      String(call[2] ?? ""),
+    );
+    expect(nonFinalFrames.length).toBeGreaterThan(0);
+    // One tool-heavy turn used to emit a progress frame per lifecycle edge on
+    // top of an ever-growing narration stack; now only changed narration ships.
+    expect(nonFinalFrames.length).toBeLessThanOrEqual(steps.length);
+    for (const frame of nonFinalFrames) {
+      expect(steps).toContain(frame);
+      expect(frame).not.toMatch(/Tool Call|Exec|🧰|🛠/);
+    }
+
+    const finalFrame = replyStream.mock.calls.at(-1);
+    expect(finalFrame?.[3]).toBe(true);
+    expect(String(finalFrame?.[2] ?? "")).toBe("结论：超时来自网关代理");
   });
 
-  it("receives sanitized work-item progress through the real OpenClaw dispatcher", async () => {
+  it("keeps real commentary flowing through the real OpenClaw dispatcher", async () => {
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    process.env.OPENCLAW_STATE_DIR = "/tmp/wecom-openclaw-progress-dispatcher-test";
+    process.env.OPENCLAW_STATE_DIR = "/tmp/wecom-openclaw-commentary-dispatcher-test";
     process.env.OPENCLAW_TEST_FAST = "1";
     try {
       const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
@@ -270,16 +391,17 @@ describe("dispatchRuntimeReply", () => {
         realDispatch({
           ...params,
           replyResolver: async (_ctx, options) => {
+            // Each narration segment arrives under a fresh commentary item id,
+            // exactly as OpenClaw's CLI backend mints them.
             await options.onItemEvent?.({
-              itemId: "command:real-1",
-              toolCallId: "real-1",
-              kind: "command",
-              title: "command cat /private/runtime-secret",
-              name: "exec",
-              phase: "start",
-              status: "running",
-              meta: "cat /private/runtime-secret",
-              progressText: "REAL_SECRET_OUTPUT",
+              itemId: "commentary-real-1",
+              kind: "preamble",
+              progressText: "先确认发布门禁配置",
+            });
+            await options.onItemEvent?.({
+              itemId: "commentary-real-2",
+              kind: "preamble",
+              progressText: "门禁配置正常，继续检查运行记录",
             });
             return { text: "真实 dispatcher 最终答案" };
           },
@@ -315,18 +437,18 @@ describe("dispatchRuntimeReply", () => {
         } as any,
       });
 
-      expect(deliver.mock.calls).toEqual([
-        [
-          {
-            text: "🛠️ Exec: running",
-            channelData: { openclawProgressKind: "structured-item" },
-          },
-          { kind: "block" },
-        ],
-        [{ text: "真实 dispatcher 最终答案" }, { kind: "final" }],
-      ]);
-      expect(JSON.stringify(deliver.mock.calls)).not.toContain("/private/runtime-secret");
-      expect(JSON.stringify(deliver.mock.calls)).not.toContain("REAL_SECRET_OUTPUT");
+      const progressTexts = deliver.mock.calls
+        .filter(([payload]) => payload?.channelData?.openclawProgressKind === "preamble")
+        .map(([payload]) => String(payload.text ?? ""));
+      expect(progressTexts.length).toBeGreaterThan(0);
+      expect(progressTexts.at(-1)).toBe("门禁配置正常，继续检查运行记录");
+      for (const text of progressTexts) {
+        expect(text).not.toContain("先确认发布门禁配置\n");
+      }
+      expect(deliver).toHaveBeenLastCalledWith(
+        { text: "真实 dispatcher 最终答案" },
+        { kind: "final" },
+      );
     } finally {
       if (previousStateDir === undefined) {
         delete process.env.OPENCLAW_STATE_DIR;
@@ -341,10 +463,10 @@ describe("dispatchRuntimeReply", () => {
     }
   });
 
-  it("receives sanitized tool lifecycle progress when OpenClaw emits no item event", async () => {
+  it("keeps every real-dispatcher lifecycle event out of the channel", async () => {
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    process.env.OPENCLAW_STATE_DIR = "/tmp/wecom-openclaw-tool-lifecycle-dispatcher-test";
+    process.env.OPENCLAW_STATE_DIR = "/tmp/wecom-openclaw-lifecycle-dispatcher-test";
     process.env.OPENCLAW_TEST_FAST = "1";
     try {
       const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
@@ -354,6 +476,17 @@ describe("dispatchRuntimeReply", () => {
         realDispatch({
           ...params,
           replyResolver: async (_ctx, options) => {
+            await options.onItemEvent?.({
+              itemId: "command:real-1",
+              toolCallId: "real-1",
+              kind: "command",
+              title: "command cat /private/runtime-secret",
+              name: "exec",
+              phase: "start",
+              status: "running",
+              meta: "cat /private/runtime-secret",
+              progressText: "REAL_SECRET_OUTPUT",
+            });
             await options.onToolStart?.({
               itemId: "tool:lifecycle-1",
               toolCallId: "lifecycle-1",
@@ -372,7 +505,31 @@ describe("dispatchRuntimeReply", () => {
               output: "TOOL_LIFECYCLE_SECRET_OUTPUT",
               cwd: "/private/tool-lifecycle-cwd",
             });
-            return { text: "工具生命周期 dispatcher 最终答案" };
+            await options.onPlanUpdate?.({
+              phase: "start",
+              title: "SECRET_PLAN_TITLE",
+              explanation: "SECRET_PLAN_EXPLANATION",
+              steps: ["inspect /private/plan-secret"],
+            });
+            await options.onApprovalEvent?.({
+              phase: "requested",
+              kind: "command",
+              status: "pending",
+              title: "SECRET_APPROVAL_TITLE",
+              approvalId: "approval-private-1",
+              command: "cat /private/approval-secret",
+            });
+            await options.onPatchSummary?.({
+              itemId: "patch:extended-1",
+              toolCallId: "extended-1",
+              phase: "end",
+              title: "SECRET_PATCH_TITLE",
+              name: "apply_patch",
+              summary: "SECRET_PATCH_SUMMARY",
+            });
+            await options.onCompactionStart?.();
+            await options.onCompactionEnd?.();
+            return { text: "生命周期 dispatcher 最终答案" };
           },
         }),
       );
@@ -407,132 +564,18 @@ describe("dispatchRuntimeReply", () => {
       });
 
       expect(deliver.mock.calls).toEqual([
-        [
-          {
-            text: "🛠️ Exec: running",
-            channelData: { openclawProgressKind: "structured-item" },
-          },
-          { kind: "block" },
-        ],
-        [
-          {
-            text: "🛠️ Exec: failed",
-            channelData: { openclawProgressKind: "structured-item" },
-          },
-          { kind: "block" },
-        ],
-        [{ text: "工具生命周期 dispatcher 最终答案" }, { kind: "final" }],
+        [{ text: "生命周期 dispatcher 最终答案" }, { kind: "final" }],
       ]);
-      expect(JSON.stringify(deliver.mock.calls)).not.toContain("/private/tool-start-secret");
-      expect(JSON.stringify(deliver.mock.calls)).not.toContain("TOOL_LIFECYCLE_SECRET_OUTPUT");
-      expect(JSON.stringify(deliver.mock.calls)).not.toContain("/private/tool-lifecycle-cwd");
-    } finally {
-      if (previousStateDir === undefined) {
-        delete process.env.OPENCLAW_STATE_DIR;
-      } else {
-        process.env.OPENCLAW_STATE_DIR = previousStateDir;
-      }
-      if (previousTestFast === undefined) {
-        delete process.env.OPENCLAW_TEST_FAST;
-      } else {
-        process.env.OPENCLAW_TEST_FAST = previousTestFast;
-      }
-    }
-  });
-
-  it("receives sanitized plan, approval, patch, and compaction lifecycle progress", async () => {
-    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
-    const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    process.env.OPENCLAW_STATE_DIR = "/tmp/wecom-openclaw-extended-lifecycle-test";
-    process.env.OPENCLAW_TEST_FAST = "1";
-    try {
-      const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
-        "openclaw/plugin-sdk/reply-runtime"
-      );
-      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation((params) =>
-        realDispatch({
-          ...params,
-          replyResolver: async (_ctx, options) => {
-            await options.onPlanUpdate?.({
-              phase: "start",
-              title: "SECRET_PLAN_TITLE",
-              explanation: "SECRET_PLAN_EXPLANATION",
-              steps: ["inspect /private/plan-secret"],
-              source: "SECRET_PLAN_SOURCE",
-            });
-            await options.onApprovalEvent?.({
-              phase: "requested",
-              kind: "command",
-              status: "pending",
-              title: "SECRET_APPROVAL_TITLE",
-              approvalId: "approval-private-1",
-              command: "cat /private/approval-secret",
-              host: "private-host",
-              reason: "SECRET_APPROVAL_REASON",
-              message: "SECRET_APPROVAL_MESSAGE",
-            });
-            await options.onPatchSummary?.({
-              itemId: "patch:extended-1",
-              toolCallId: "extended-1",
-              phase: "end",
-              title: "SECRET_PATCH_TITLE",
-              name: "apply_patch",
-              added: ["/private/added-secret"],
-              modified: ["/private/modified-secret"],
-              summary: "SECRET_PATCH_SUMMARY",
-            });
-            await options.onCompactionStart?.();
-            await options.onCompactionEnd?.();
-            return { text: "扩展生命周期 dispatcher 最终答案" };
-          },
-        }),
-      );
-      const deliver = vi.fn().mockResolvedValue(undefined);
-
-      await dispatchRuntimeReply({
-        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
-        cfg: {} as any,
-        session: {
-          ctx: {
-            Body: "执行包含多类生命周期事件的长任务",
-            RawBody: "执行包含多类生命周期事件的长任务",
-            CommandBody: "执行包含多类生命周期事件的长任务",
-            From: "user-extended-lifecycle",
-            To: "wecom-bot",
-            SessionKey: "agent:main:wecom:direct:user-extended-lifecycle",
-            Provider: "wecom",
-            Surface: "wecom",
-            ChatType: "direct",
-            AccountId: "default",
-            MessageSid: "msg-extended-lifecycle",
-          },
-        } as any,
-        replyHandle: {
-          context: {
-            transport: "bot-ws",
-            accountId: "default",
-            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
-          },
-          deliver,
-        } as any,
-      });
-
-      const progressText = deliver.mock.calls
-        .filter((call) => call[1]?.kind === "block")
-        .map((call) => String(call[0]?.text ?? ""))
-        .join("\n");
-      expect(progressText).toContain("Plan: running");
-      expect(progressText).toContain("Approval: pending");
-      expect(progressText).toContain("Apply Patch");
-      expect(progressText).toContain("Compaction");
-      expect(deliver).toHaveBeenLastCalledWith(
-        { text: "扩展生命周期 dispatcher 最终答案" },
-        { kind: "final" },
-      );
-      expect(JSON.stringify(deliver.mock.calls)).not.toContain("SECRET_");
-      expect(JSON.stringify(deliver.mock.calls)).not.toContain("/private/");
-      expect(JSON.stringify(deliver.mock.calls)).not.toContain("private-host");
-      expect(JSON.stringify(deliver.mock.calls)).not.toContain("approval-private-1");
+      const delivered = JSON.stringify(deliver.mock.calls);
+      expect(delivered).not.toContain("Exec");
+      expect(delivered).not.toContain("Tool Call");
+      expect(delivered).not.toContain("Plan");
+      expect(delivered).not.toContain("Approval");
+      expect(delivered).not.toContain("Patch");
+      expect(delivered).not.toContain("Compaction");
+      expect(delivered).not.toContain("SECRET_");
+      expect(delivered).not.toContain("/private/");
+      expect(delivered).not.toContain("approval-private-1");
     } finally {
       if (previousStateDir === undefined) {
         delete process.env.OPENCLAW_STATE_DIR;
@@ -675,7 +718,7 @@ describe("dispatchRuntimeReply", () => {
     expect(JSON.stringify(deliver.mock.calls)).not.toContain("SECRET_FILTERED_TOOL_RESULT");
   });
 
-  it("preserves preamble order when OpenClaw omits an item id", async () => {
+  it("shows the newest narration even when OpenClaw omits an item id", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
       await params.replyOptions.onItemEvent({
         kind: "preamble",
@@ -708,7 +751,7 @@ describe("dispatchRuntimeReply", () => {
     expect(deliver).toHaveBeenNthCalledWith(
       2,
       {
-        text: "正在准备上下文\n正在读取仓库",
+        text: "正在读取仓库",
         channelData: { openclawProgressKind: "preamble" },
       },
       { kind: "block" },
@@ -766,7 +809,7 @@ describe("dispatchRuntimeReply", () => {
       ],
       [
         {
-          text: "正在读取仓库配置\n正在验证依赖",
+          text: "正在验证依赖",
           channelData: { openclawProgressKind: "preamble" },
         },
         { kind: "block" },
@@ -775,7 +818,7 @@ describe("dispatchRuntimeReply", () => {
     ]);
   });
 
-  it("deduplicates identical preamble text across items while preserving later updates", async () => {
+  it("re-sends narration only when its text actually changes", async () => {
     const run = async (
       sessionKey: string,
       events: Array<{ itemId: string; progressText: string }>,
@@ -832,7 +875,7 @@ describe("dispatchRuntimeReply", () => {
       ],
       [
         {
-          text: "正在评估终止风险\n终止风险评估完成",
+          text: "终止风险评估完成",
           channelData: { openclawProgressKind: "preamble" },
         },
         { kind: "block" },

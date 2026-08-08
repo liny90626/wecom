@@ -27,7 +27,8 @@ const WECOM_STREAM_MAX_BYTES = 12_000;
 const BLOCK_PREVIEW_MAX_MS = 300_000;
 const BLOCK_PREVIEW_MAX_CHARS = 3_000;
 const BLOCK_PREVIEW_MIN_UPDATE_MS = 1_500;
-const BLOCK_PREVIEW_STATUS_UPDATE_MS = 15_000;
+/** How often the long-task status line may repaint, on ANY lane. */
+const LONG_TASK_STATUS_INTERVAL_MS = 60_000;
 const THINKING_PREVIEW_MIN_UPDATE_MS = 3_000;
 const WECOM_REPLY_SEND_TIMEOUT_MS = 8_000;
 const WECOM_PENDING_ACK_GRACE_MS = 5_500;
@@ -44,7 +45,6 @@ const FINAL_COMPLETION_MARKER = "（回复完毕）";
 const LONG_TASK_STATUS_PREFIX = "【长任务处理中，请勿打断，已用时";
 const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
 const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = LONG_TASK_STATUS_AFTER_MS;
-const PREVIEW_EXPIRED_NOTICE_REPEAT_MS = BLOCK_PREVIEW_STATUS_UPDATE_MS;
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
 const REPLY_MODEL_TIMEOUT_NOTICE_TEXT = "⚠️ 模型响应超时，本次任务未完成，请稍后重试。";
 const REPLY_PREPARE_TIMEOUT_NOTICE_TEXT =
@@ -1144,10 +1144,13 @@ export function createBotWsReplyHandle(params: {
     return thinkingBlock ? `${thinkingBlock}\n${body}` : body;
   };
 
-  const sendPlaceholder = () => {
+  /** Returns true when a frame was actually put on the wire. A false result
+   *  means the lane was momentarily blocked, so the caller retries shortly
+   *  rather than re-arming on a due time that is already in the past. */
+  const sendPlaceholder = (): boolean => {
     if (forceActivePushRequired()) {
       maybeSendPreviewExpiredNotice(true);
-      return;
+      return false;
     }
     if (
       runtimeRetired ||
@@ -1158,13 +1161,20 @@ export function createBotWsReplyHandle(params: {
       supersededByNewInbound ||
       isEvent
     )
-      return;
+      return false;
     const elapsedMs = Date.now() - handleStartedAt;
     // Before the long-task gate, real process text owns the bubble. Once the
     // gate is reached, reasoning/preamble-only turns still need the same timed
     // status; body previews use their dedicated frozen-status lane.
     if (lastPreviewText && (elapsedMs < LONG_TASK_STATUS_AFTER_MS || previewFrozen)) {
-      return;
+      return false;
+    }
+    // Re-check the shared clock at paint time, not just at schedule time: the
+    // slot may have been spent by a real progress frame while this timer sat
+    // in the queue, and repainting anyway is what produced a status frame a
+    // second or two behind an unrelated update.
+    if (elapsedMs >= LONG_TASK_STATUS_AFTER_MS && !isLongTaskStatusDue()) {
+      return false;
     }
     if (
       streamId !== undefined &&
@@ -1173,16 +1183,19 @@ export function createBotWsReplyHandle(params: {
         Boolean(pendingPreview) ||
         hasPendingReplyAck(params.client, params.frame))
     ) {
-      return;
+      return false;
     }
     placeholderInFlight = true;
     // A turn that produces nothing (all tool work, and OpenClaw's reasoning
     // stream is off by default) has no other feedback: repeating one static
     // line taught the user nothing, so show the clock instead.
-    const heartbeatText =
-      elapsedMs >= LONG_TASK_STATUS_AFTER_MS
-        ? renderLongTaskHeartbeat(elapsedMs)
-        : placeholderText;
+    const showsLongTaskStatus = elapsedMs >= LONG_TASK_STATUS_AFTER_MS;
+    const heartbeatText = showsLongTaskStatus
+      ? renderLongTaskHeartbeat(elapsedMs)
+      : placeholderText;
+    const releaseLongTaskStatusSlot = showsLongTaskStatus
+      ? claimLongTaskStatusSlot()
+      : undefined;
     withHandleSendTimeout(
       params.client.replyStream(params.frame, resolveStreamId(), heartbeatText, false),
       "stream placeholder",
@@ -1223,6 +1236,9 @@ export function createBotWsReplyHandle(params: {
         // The bubble is unrepaintable, but the turn is still running. Settling
         // the whole handle here cancelled the deferred background push too, so
         // a silent long task stayed silent; retire the lane and hand over.
+        // WeCom refused the frame, so this slot was never shown — give it back
+        // and let the push lane use it right away.
+        releaseLongTaskStatusSlot?.();
         streamUpdateUnreliable = true;
         stopPlaceholderKeepalive();
         maybeSendPreviewExpiredNotice(true);
@@ -1234,6 +1250,7 @@ export function createBotWsReplyHandle(params: {
           closeSupersededPlaceholder();
         }
       });
+    return true;
   };
 
   const notifyPeerActive = () => {
@@ -1324,8 +1341,15 @@ export function createBotWsReplyHandle(params: {
   let lastDeliveredBodySourceText = "";
   let lastDeliveredTransientProgressText = "";
   let lastPreviewUpdateAt = 0;
-  let lastPreviewStatusAt = 0;
-  let longTaskStatusStarted = false;
+  // The status line has three possible painters — the bubble heartbeat, the
+  // frozen-preview refresh and the background push — and they used to keep
+  // three independent timers, each re-armed by whatever unrelated event
+  // happened to touch it (a narration frame, an external push, a missing ACK).
+  // That is why the observed spacing wandered between 5 s and 22 s and why the
+  // same status could arrive twice through two channels seconds apart. There
+  // is now ONE clock on an absolute grid anchored to the turn start: every
+  // lane asks it whether a repaint is due, and reports back when it painted.
+  let longTaskStatusPaintedAt = 0;
   let previewExpiredNoticeInFlight = false;
   let previewExpiredNoticeCancelled = false;
   let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2199,8 +2223,10 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     stopPreviewExpiredNoticeTimer();
+    // Re-arm on the shared grid, not "one interval from now": an external
+    // message must not be able to drag the status schedule around either.
     schedulePreviewExpiredNotice(
-      PREVIEW_EXPIRED_NOTICE_REPEAT_MS,
+      Math.max(0, nextLongTaskStatusDueAt() - Date.now()),
       previewExpiredNoticeAllowUnfrozen,
     );
   };
@@ -2260,9 +2286,6 @@ export function createBotWsReplyHandle(params: {
       }
       return;
     }
-    stopPreviewExpiredNoticeTimer();
-    previewExpiredNoticeInFlight = true;
-    const elapsedMs = Date.now() - handleStartedAt;
     // The bubble is unrepaintable but the agent keeps producing: carry whatever
     // the user has not seen out with the status line instead of dropping it.
     // Reasoning stays out — only the visible body travels this way.
@@ -2274,6 +2297,27 @@ export function createBotWsReplyHandle(params: {
       transientProgressSnapshot !== lastDeliveredTransientProgressText
         ? transientProgressSnapshot
         : "";
+    const now = Date.now();
+    // Real content still goes out as soon as it exists — that is what this push
+    // is for. A status-only push, though, is the same line the bubble may have
+    // painted seconds ago, so it has to wait for its slot on the shared clock;
+    // firing it on arming is what delivered the same status twice, 5 s apart.
+    if (!undeliveredProgress && !undeliveredTransientProgress && !isLongTaskStatusDue(now)) {
+      if (!previewExpiredNoticeTimer) {
+        schedulePreviewExpiredNotice(
+          Math.max(0, nextLongTaskStatusDueAt() - now),
+          allowUnfrozen,
+        );
+      }
+      return;
+    }
+    stopPreviewExpiredNoticeTimer();
+    previewExpiredNoticeInFlight = true;
+    // Same rule as the bubble lane: the slot is spent on dispatch. A push that
+    // fails is no more provably unseen than a frame with a missing ACK, so it
+    // does not hand the slot back and cannot make two lanes race for it.
+    markLongTaskStatusPainted(now);
+    const elapsedMs = now - handleStartedAt;
     const noticeText = [
       undeliveredProgress,
       undeliveredTransientProgress,
@@ -2312,7 +2356,10 @@ export function createBotWsReplyHandle(params: {
       .finally(() => {
         previewExpiredNoticeInFlight = false;
         if (previewExpiredNoticeStarted) {
-          schedulePreviewExpiredNotice(PREVIEW_EXPIRED_NOTICE_REPEAT_MS, allowUnfrozen);
+          schedulePreviewExpiredNotice(
+            Math.max(0, nextLongTaskStatusDueAt() - Date.now()),
+            allowUnfrozen,
+          );
         }
       });
   };
@@ -2392,14 +2439,18 @@ export function createBotWsReplyHandle(params: {
     }
     lastPreviewText = previewText;
     lastPreviewUpdateAt = now;
-    if (previewText.includes(LONG_TASK_STATUS_PREFIX)) {
-      longTaskStatusStarted = true;
-    }
+    // ANY confirmed repaint counts against the status slot, not just one that
+    // literally carries the status line. The status only ever means "still
+    // working", and a fresh progress frame proves that better — without this,
+    // a progress frame landing just after the gate was immediately followed by
+    // a status frame a second or two later. Stamp the CONFIRMATION time, not
+    // `now`: `now` is when the frame was composed, which for a slow ACK can be
+    // before the gate and would leave the slot looking unspent.
+    markLongTaskStatusPainted();
     recordDeliveredBodySource(options);
     recordDeliveredTransientProgress(options);
     if (previewFrozen) {
       stopPreviewFreezeTimeout();
-      lastPreviewStatusAt = now;
       startPreviewStatusInterval();
     } else {
       scheduleHeartbeat();
@@ -2691,7 +2742,7 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     const now = Date.now();
-    if (longTaskStatusStarted && now - lastPreviewStatusAt < BLOCK_PREVIEW_STATUS_UPDATE_MS) {
+    if (!isLongTaskStatusDue(now)) {
       return;
     }
     const preview = renderPreviewFrame(accumulatedText || previewFrozenSourceText, now);
@@ -2710,19 +2761,17 @@ export function createBotWsReplyHandle(params: {
     if (previewStatusInterval || streamSettled || !previewFrozen || previewWatchdogExpired) {
       return;
     }
-    const untilLongTaskStatusMs = LONG_TASK_STATUS_AFTER_MS - (Date.now() - handleStartedAt);
-    if (untilLongTaskStatusMs > 0) {
-      previewStatusInterval = setTimeout(() => {
+    // A fixed-phase setInterval drifted out of step with the shared clock and
+    // fired ticks that the throttle then silently dropped. Re-arm from the
+    // clock each time instead, so a tick and a due slot are the same thing.
+    previewStatusInterval = setTimeout(
+      () => {
         previewStatusInterval = undefined;
         void sendFrozenPreviewStatus();
         startPreviewStatusInterval();
-      }, untilLongTaskStatusMs);
-      previewStatusInterval.unref?.();
-      return;
-    }
-    previewStatusInterval = setInterval(() => {
-      void sendFrozenPreviewStatus();
-    }, BLOCK_PREVIEW_STATUS_UPDATE_MS);
+      },
+      Math.max(0, nextLongTaskStatusDueAt() - Date.now()),
+    );
     previewStatusInterval.unref?.();
   };
 
@@ -2771,10 +2820,7 @@ export function createBotWsReplyHandle(params: {
       if (previewWatchdogExpired) {
         return false;
       }
-      if (!longTaskStatusStarted && now - handleStartedAt >= LONG_TASK_STATUS_AFTER_MS) {
-        return true;
-      }
-      return now - lastPreviewStatusAt >= BLOCK_PREVIEW_STATUS_UPDATE_MS;
+      return isLongTaskStatusDue(now);
     }
     if (!lastPreviewText) {
       return true;
@@ -2875,6 +2921,41 @@ export function createBotWsReplyHandle(params: {
   // A successful initial placeholder is enough to acknowledge an ordinary
   // turn. The next routine update is scheduled directly at the long-task gate;
   // only a failed placeholder uses the short retry delay.
+  const longTaskStatusGateAt = (): number => handleStartedAt + LONG_TASK_STATUS_AFTER_MS;
+
+  /** Next grid slot. Snapping to the grid (rather than to "last paint + one
+   *  interval") stops a late paint from dragging every later slot with it. */
+  const nextLongTaskStatusDueAt = (): number => {
+    const gateAt = longTaskStatusGateAt();
+    if (longTaskStatusPaintedAt < gateAt) {
+      return gateAt;
+    }
+    const slotsUsed =
+      Math.floor((longTaskStatusPaintedAt - gateAt) / LONG_TASK_STATUS_INTERVAL_MS) + 1;
+    return gateAt + slotsUsed * LONG_TASK_STATUS_INTERVAL_MS;
+  };
+
+  const isLongTaskStatusDue = (now = Date.now()): boolean => now >= nextLongTaskStatusDueAt();
+
+  const markLongTaskStatusPainted = (now = Date.now()): void => {
+    longTaskStatusPaintedAt = now;
+  };
+
+  /** Claim the slot before sending, and hand it back only when the send is
+   *  PROVEN not to have reached the user (846605/846608 — WeCom refused the
+   *  frame). A missing ACK is not such proof: the gateway most likely rendered
+   *  it, so releasing the slot there is what let the background lane repeat the
+   *  very same status seconds later. */
+  const claimLongTaskStatusSlot = (): (() => void) => {
+    const previousPaintedAt = longTaskStatusPaintedAt;
+    markLongTaskStatusPainted(Date.now());
+    return () => {
+      if (longTaskStatusPaintedAt !== previousPaintedAt) {
+        longTaskStatusPaintedAt = previousPaintedAt;
+      }
+    };
+  };
+
   const scheduleHeartbeat = (retryDelayMs?: number): void => {
     if (forceActivePushRequired()) {
       maybeSendPreviewExpiredNotice(true);
@@ -2894,17 +2975,15 @@ export function createBotWsReplyHandle(params: {
       clearTimeout(placeholderKeepalive);
       placeholderKeepalive = undefined;
     }
-    const delayMs =
-      retryDelayMs ??
-      (elapsedMs >= LONG_TASK_STATUS_AFTER_MS
-        ? BLOCK_PREVIEW_STATUS_UPDATE_MS
-        : LONG_TASK_STATUS_AFTER_MS - elapsedMs);
+    // One shared schedule, so an unrelated frame can neither delay the next
+    // status nor let a second lane sneak one in early.
+    const delayMs = retryDelayMs ?? Math.max(0, nextLongTaskStatusDueAt() - Date.now());
     placeholderKeepalive = setTimeout(
       () => {
         placeholderKeepalive = undefined;
-        sendPlaceholder();
+        const sent = sendPlaceholder();
         if (!previewFrozen) {
-          scheduleHeartbeat();
+          scheduleHeartbeat(sent ? undefined : PLACEHOLDER_RETRY_MS);
         }
       },
       delayMs,
@@ -3504,7 +3583,6 @@ export function createBotWsReplyHandle(params: {
       // Defer our own cadence by one interval so it does not pile onto the
       // message that just arrived — but never retire it: the turn is still
       // running, and this handle owns its only progress feedback.
-      lastPreviewStatusAt = Date.now();
       if (placeholderKeepalive) {
         clearTimeout(placeholderKeepalive);
         placeholderKeepalive = undefined;

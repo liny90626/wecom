@@ -4678,24 +4678,32 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver(
       {
         text: "正在检查仓库",
-        channelData: { openclawProgressKind: "preamble" },
+        channelData: {
+          openclawProgressKind: "preamble",
+          openclawProgressSteps: ["正在检查仓库"],
+          openclawProgressDroppedSteps: 0,
+        },
       },
       { kind: "block" },
     );
     expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toBe(
-      "正在检查仓库",
+      "1）正在检查仓库",
     );
 
-    // The next step replaces the previous one instead of stacking on top of it.
+    // The next step appends to the numbered log instead of overwriting it.
     await handle.deliver(
       {
-        text: "仓库检查完成，正在生成整改方案",
-        channelData: { openclawProgressKind: "preamble" },
+        text: "正在检查仓库\n仓库检查完成，正在生成整改方案",
+        channelData: {
+          openclawProgressKind: "preamble",
+          openclawProgressSteps: ["正在检查仓库", "仓库检查完成，正在生成整改方案"],
+          openclawProgressDroppedSteps: 0,
+        },
       },
       { kind: "block" },
     );
     expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toBe(
-      "仓库检查完成，正在生成整改方案",
+      "1）正在检查仓库\n2）仓库检查完成，正在生成整改方案",
     );
 
     await handle.deliver({ text: "最终答案" }, { kind: "final" });

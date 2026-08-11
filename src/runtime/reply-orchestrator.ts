@@ -15,6 +15,9 @@ type CompatibleReplyOptions = ReplyOptions & {
 // but the detached lane still needs ordering at turn close. Keep the barrier
 // short so a broken ACK cannot hold the actual reply indefinitely.
 const DETACHED_PROGRESS_DRAIN_GRACE_MS = 500;
+// Bounded memory for the narration log of a very long run. Overflow drops the
+// oldest steps and is reported downstream so the record can say so.
+const PREAMBLE_LOG_MAX_STEPS = 200;
 
 // Two different outcomes, two different truths: the busy notice is only for an
 // inbound OpenClaw provably refused (dispatch admission released it), while an
@@ -93,7 +96,14 @@ export async function dispatchRuntimeReply(params: {
   let progressSealPromise: Promise<void> | undefined;
   let pendingReasoningSlot: { payload: ReplyPayload } | undefined;
   let pendingPreambleSlot: { payload?: ReplyPayload } | undefined;
-  let currentPreambleText = "";
+  // The run's narration as an ordered step log. OpenClaw's CLI backend flushes
+  // the narration before each tool call as a one-shot commentary item with a
+  // fresh id, so the segments in arrival order ARE the process record. Only
+  // the newest entry may still change: a re-flush carrying the same text (or a
+  // prefix-extension of it) is the same narration crossing a flush boundary,
+  // not a new step.
+  const preambleSteps: Array<{ itemId?: string; text: string }> = [];
+  let preambleDroppedStepCount = 0;
   let lastPreambleSnapshot = "";
 
   const updateFastProgressState = (payload: ReplyPayload): boolean => {
@@ -186,13 +196,18 @@ export async function dispatchRuntimeReply(params: {
   };
 
   const resolvePreamblePayload = (): ReplyPayload | undefined => {
-    if (!currentPreambleText || currentPreambleText === lastPreambleSnapshot) {
+    const logText = preambleSteps.map((step) => step.text).join("\n");
+    if (!logText || logText === lastPreambleSnapshot) {
       return undefined;
     }
-    lastPreambleSnapshot = currentPreambleText;
+    lastPreambleSnapshot = logText;
     return {
-      text: currentPreambleText,
-      channelData: { openclawProgressKind: "preamble" },
+      text: logText,
+      channelData: {
+        openclawProgressKind: "preamble",
+        openclawProgressSteps: preambleSteps.map((step) => step.text),
+        openclawProgressDroppedSteps: preambleDroppedStepCount,
+      },
     };
   };
 
@@ -204,19 +219,46 @@ export async function dispatchRuntimeReply(params: {
     pendingPreambleSlot = undefined;
   }
 
-  const enqueuePreamble = (payload: { progressText?: string }): boolean => {
+  const enqueuePreamble = (payload: { itemId?: string; progressText?: string }): boolean => {
     const text = payload.progressText?.trim() ?? "";
     if (!progressAccepting || abortSignal?.aborted || !text) {
       return false;
     }
-    // A preamble is the narration of the step running right now, and OpenClaw
-    // mints a fresh item id per narration segment. Keeping earlier segments
-    // would stack the whole run's commentary into one bubble and crowd the
-    // answer out of its shared character budget, so the newest value wins.
-    if (currentPreambleText === text) {
-      return true;
+    const itemId = typeof payload.itemId === "string" && payload.itemId ? payload.itemId : undefined;
+    let known: { itemId?: string; text: string } | undefined;
+    if (itemId) {
+      for (let i = preambleSteps.length - 1; i >= 0; i -= 1) {
+        if (preambleSteps[i]?.itemId === itemId) {
+          known = preambleSteps[i];
+          break;
+        }
+      }
     }
-    currentPreambleText = text;
+    const last = preambleSteps.at(-1);
+    if (known) {
+      // The same item narrating on: its step text is replaced in place.
+      if (known.text === text) {
+        return true;
+      }
+      known.text = text;
+    } else if (last && last.text === text) {
+      // A fresh item id re-flushing the previous text is the same narration
+      // crossing a tool-call flush boundary — one step, not two. The new id is
+      // NOT adopted: if that item later diverges to different text, it is its
+      // own step rather than a rewrite of this one.
+      return true;
+    } else if (last && text.startsWith(last.text)) {
+      // A fresh item id extending the previous text is the same narration
+      // continuing; the id moves with it so its updates keep landing here.
+      last.itemId = itemId ?? last.itemId;
+      last.text = text;
+    } else {
+      preambleSteps.push({ itemId, text });
+      if (preambleSteps.length > PREAMBLE_LOG_MAX_STEPS) {
+        preambleSteps.shift();
+        preambleDroppedStepCount += 1;
+      }
+    }
     pendingReasoningSlot = undefined;
     if (pendingPreambleSlot) {
       return true;

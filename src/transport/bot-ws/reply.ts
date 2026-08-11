@@ -45,6 +45,11 @@ const FINAL_COMPLETION_MARKER = "（回复完毕）";
 const LONG_TASK_STATUS_PREFIX = "【长任务处理中，请勿打断，已用时";
 const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
 const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = LONG_TASK_STATUS_AFTER_MS;
+/** With answer text on screen the log tail yields the bubble to the answer. */
+const PROCESS_LOG_TAIL_WITH_BODY_MAX_CHARS = 800;
+/** Runs shorter than this settle without a process-record push. */
+const PROCESS_RECORD_MIN_TASK_MS = 2 * 60_000;
+const PROCESS_RECORD_TITLE_PREFIX = "📋 本轮过程记录";
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
 const REPLY_MODEL_TIMEOUT_NOTICE_TEXT = "⚠️ 模型响应超时，本次任务未完成，请稍后重试。";
 const REPLY_PREPARE_TIMEOUT_NOTICE_TEXT =
@@ -993,18 +998,136 @@ export function createBotWsReplyHandle(params: {
   let streamId: string | undefined;
   let accumulatedText = "";
   let accumulatedThinkingText = "";
-  let latestTransientProgressText = "";
-  const transientProgressTextByKind = new Map<string, string>();
   let deferredMediaUrls: string[] = [];
-  // Two independent lanes only: the current narration step and OpenClaw's Fast
-  // mode line. Both are single current values, so composing is a plain join.
-  const rememberTransientProgress = (kind: string, text: string): string => {
-    transientProgressTextByKind.set(kind, text);
-    latestTransientProgressText = [...transientProgressTextByKind.values()]
+
+  // ---- Process log --------------------------------------------------------
+  // The run's narration is a record, not a status: the orchestrator sends the
+  // whole step log, the bubble paints its tail as a pure display, and the push
+  // lanes persist it. Steps are addressed in ABSOLUTE indices (dropped + array
+  // index). ONE bookmark: the durable prefix — steps that exist as pushed
+  // messages surviving the final repaint. Every push lane sends the durable
+  // remainder, so each step becomes durable exactly once and the numbered
+  // lines keep continuity self-evident even when a push repeats a step the
+  // live bubble briefly showed.
+  let processLogSteps: string[] = [];
+  let processLogDroppedStepCount = 0;
+  const processLogDurable = { count: 0, lastText: "" };
+  let transientFastModeText = "";
+  let pushedFastModeText = "";
+  let processRecordFlushed = false;
+
+  const processLogTotalStepCount = (): number =>
+    processLogDroppedStepCount + processLogSteps.length;
+
+  const processLogStepAt = (absoluteIndex: number): string | undefined =>
+    processLogSteps[absoluteIndex - processLogDroppedStepCount];
+
+  // Full-width paren on purpose: "1）" is not markdown list syntax, so WeCom
+  // cannot renumber a tail that starts mid-log the way "1." lists are.
+  const formatProcessLogStep = (absoluteIndex: number, text: string): string =>
+    `${absoluteIndex + 1}）${text}`;
+
+  const clampProcessLogBookmark = (
+    bookmark: { count: number; lastText: string },
+    steps: string[],
+    droppedStepCount: number,
+  ): void => {
+    let count = Math.min(bookmark.count, droppedStepCount + steps.length);
+    while (count > droppedStepCount) {
+      const currentText = steps[count - 1 - droppedStepCount];
+      const deliveredText =
+        count === bookmark.count ? bookmark.lastText : processLogStepAt(count - 1);
+      if (currentText !== undefined && currentText === deliveredText) {
+        break;
+      }
+      count -= 1;
+    }
+    bookmark.count = Math.max(count, Math.min(bookmark.count, droppedStepCount));
+    bookmark.lastText =
+      bookmark.count > droppedStepCount
+        ? (steps[bookmark.count - 1 - droppedStepCount] ?? "")
+        : "";
+  };
+
+  const advanceProcessLogBookmark = (
+    bookmark: { count: number; lastText: string },
+    absoluteCount: number,
+    lastText: string,
+  ): void => {
+    if (absoluteCount <= bookmark.count) {
+      return;
+    }
+    bookmark.count = Math.min(absoluteCount, processLogTotalStepCount());
+    bookmark.lastText = lastText;
+  };
+
+  const adoptProcessLogSteps = (steps: string[], droppedStepCount: number): void => {
+    // A mutated or replaced step becomes deliverable again; settled history
+    // (only the tail can change in the real pipeline) stays settled.
+    clampProcessLogBookmark(processLogDurable, steps, droppedStepCount);
+    processLogSteps = steps.slice();
+    processLogDroppedStepCount = droppedStepCount;
+  };
+
+  const composeProcessLogLines = (fromAbsolute: number): string[] => {
+    const lines: string[] = [];
+    for (
+      let i = Math.max(fromAbsolute, processLogDroppedStepCount);
+      i < processLogTotalStepCount();
+      i += 1
+    ) {
+      const text = processLogStepAt(i);
+      if (text) {
+        lines.push(formatProcessLogStep(i, text));
+      }
+    }
+    return lines;
+  };
+
+  /**
+   * Newest steps first-fit within BOTH budgets, oldest first in the output.
+   * Sizing by bytes as well matters: the wire composer trims an oversized
+   * suffix from its tail, which for a log means losing the newest step (or a
+   * trailing status line) instead of the oldest.
+   */
+  const composeProcessLogTailView = (maxChars: number, maxBytes: number): string => {
+    if (!processLogSteps.length || maxChars <= 0 || maxBytes <= 0) {
+      return "";
+    }
+    const lines: string[] = [];
+    let usedChars = 0;
+    let usedBytes = 0;
+    let firstShown = processLogTotalStepCount();
+    for (let i = processLogTotalStepCount() - 1; i >= processLogDroppedStepCount; i -= 1) {
+      const text = processLogStepAt(i);
+      if (!text) {
+        continue;
+      }
+      const line = formatProcessLogStep(i, text);
+      const separator = lines.length ? 1 : 0;
+      const costChars = line.length + separator;
+      const costBytes = Buffer.byteLength(line, "utf8") + separator;
+      if (lines.length && (usedChars + costChars > maxChars || usedBytes + costBytes > maxBytes)) {
+        break;
+      }
+      lines.unshift(line);
+      usedChars += costChars;
+      usedBytes += costBytes;
+      firstShown = i;
+      if (usedChars >= maxChars || usedBytes >= maxBytes) {
+        break;
+      }
+    }
+    if (firstShown > 0) {
+      lines.unshift(`…（已省略前 ${firstShown} 步）`);
+    }
+    return lines.join("\n");
+  };
+
+  const composeTransientPreviewSuffix = (logMaxChars: number, logMaxBytes: number): string =>
+    [composeProcessLogTailView(logMaxChars, logMaxBytes), transientFastModeText]
       .filter(Boolean)
       .join("\n\n");
-    return latestTransientProgressText;
-  };
   const resolveStreamId = () => {
     streamId ||= generateReqId("stream");
     return streamId;
@@ -1021,13 +1144,11 @@ export function createBotWsReplyHandle(params: {
   type PreviewDeliveryMetadata = {
     bodySourceText?: string;
     showsVisibleBody?: boolean;
-    transientProgressText?: string;
   };
   type PendingPreview = {
     text: string;
     bodySourceText?: PreviewDeliveryMetadata["bodySourceText"];
     showsVisibleBody?: PreviewDeliveryMetadata["showsVisibleBody"];
-    transientProgressText?: PreviewDeliveryMetadata["transientProgressText"];
     deadline: number;
     retryCount: number;
   };
@@ -1132,9 +1253,17 @@ export function createBotWsReplyHandle(params: {
   const renderLongTaskHeartbeat = (elapsedMs: number): string => {
     const thinkingBlock = renderInlineThinkBlock(accumulatedThinkingText);
     const bodyLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
-    const statusSuffix = [latestTransientProgressText, formatElapsedStatus(elapsedMs)]
-      .filter(Boolean)
-      .join("\n\n");
+    const statusText = formatElapsedStatus(elapsedMs);
+    // The status line is this frame's whole purpose (禁改 25) — reserve its
+    // budget up front so an ample log can never squeeze it off the wire.
+    const statusReserveChars = statusText.length + 2;
+    const statusReserveBytes = Buffer.byteLength(statusText, "utf8") + 2;
+    const transientView = composeTransientPreviewSuffix(
+      (accumulatedText ? PROCESS_LOG_TAIL_WITH_BODY_MAX_CHARS : bodyLimits.maxChars) -
+        statusReserveChars,
+      bodyLimits.maxBytes - statusReserveBytes,
+    );
+    const statusSuffix = [transientView, statusText].filter(Boolean).join("\n\n");
     const body = composePreviewSuffixWithinLimits({
       prefix: accumulatedText,
       suffix: statusSuffix,
@@ -1339,7 +1468,6 @@ export function createBotWsReplyHandle(params: {
   let previewFrozenText = "";
   let lastPreviewText = "";
   let lastDeliveredBodySourceText = "";
-  let lastDeliveredTransientProgressText = "";
   let lastPreviewUpdateAt = 0;
   // The status line has three possible painters — the bubble heartbeat, the
   // frozen-preview refresh and the background push — and they used to keep
@@ -1507,6 +1635,7 @@ export function createBotWsReplyHandle(params: {
         | "final-retry"
         | "preview-expired"
         | "forced-progress"
+        | "process-record"
         | "fail-notice";
       appendCompletionMarker?: boolean;
       progress?: { delivered: number };
@@ -1710,6 +1839,7 @@ export function createBotWsReplyHandle(params: {
         `[wecom-b3] final-retry-delivered attempt=${finalPushRetryCount}/${FINAL_PUSH_MAX_RETRIES} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
       );
       params.onDeliver?.();
+      maybeFlushProcessRecordPush();
     } catch (error) {
       if (error === OBSOLETE_FINAL_RETRY) {
         finishPendingFinalRetry(true);
@@ -2291,18 +2421,26 @@ export function createBotWsReplyHandle(params: {
     // Reasoning stays out — only the visible body travels this way.
     const progressSnapshot = accumulatedText;
     const undeliveredProgress = resolveUndeliveredProgressText(progressSnapshot);
-    const transientProgressSnapshot = latestTransientProgressText;
-    const undeliveredTransientProgress =
-      transientProgressSnapshot &&
-      transientProgressSnapshot !== lastDeliveredTransientProgressText
-        ? transientProgressSnapshot
+    const logTotalAtCompose = processLogTotalStepCount();
+    const logLastTextAtCompose = processLogSteps.at(-1) ?? "";
+    const undeliveredTransientProgress = composeProcessLogLines(
+      processLogDurable.count,
+    ).join("\n");
+    const undeliveredFastText =
+      transientFastModeText && transientFastModeText !== pushedFastModeText
+        ? transientFastModeText
         : "";
     const now = Date.now();
     // Real content still goes out as soon as it exists — that is what this push
     // is for. A status-only push, though, is the same line the bubble may have
     // painted seconds ago, so it has to wait for its slot on the shared clock;
     // firing it on arming is what delivered the same status twice, 5 s apart.
-    if (!undeliveredProgress && !undeliveredTransientProgress && !isLongTaskStatusDue(now)) {
+    if (
+      !undeliveredProgress &&
+      !undeliveredTransientProgress &&
+      !undeliveredFastText &&
+      !isLongTaskStatusDue(now)
+    ) {
       if (!previewExpiredNoticeTimer) {
         schedulePreviewExpiredNotice(
           Math.max(0, nextLongTaskStatusDueAt() - now),
@@ -2321,6 +2459,7 @@ export function createBotWsReplyHandle(params: {
     const noticeText = [
       undeliveredProgress,
       undeliveredTransientProgress,
+      undeliveredFastText,
       formatElapsedStatus(elapsedMs),
     ]
       .filter(Boolean)
@@ -2339,7 +2478,10 @@ export function createBotWsReplyHandle(params: {
           recordDeliveredBodySource({ bodySourceText: progressSnapshot });
         }
         if (undeliveredTransientProgress) {
-          lastDeliveredTransientProgressText = transientProgressSnapshot;
+          advanceProcessLogBookmark(processLogDurable, logTotalAtCompose, logLastTextAtCompose);
+        }
+        if (undeliveredFastText) {
+          pushedFastModeText = undeliveredFastText;
         }
         console.info(
           `[wecom-preview] expired-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${elapsedMs} progressChars=${undeliveredProgress.length} transientChars=${undeliveredTransientProgress.length}`,
@@ -2376,26 +2518,32 @@ export function createBotWsReplyHandle(params: {
     }
   };
 
-  const recordDeliveredTransientProgress = (options?: PreviewDeliveryMetadata): void => {
-    if (options?.transientProgressText === undefined) {
-      return;
-    }
-    lastDeliveredTransientProgressText = options.transientProgressText;
-  };
-
-  const sendForcedTransientProgress = async (text: string): Promise<boolean> => {
+  const sendForcedTransientProgress = async (): Promise<boolean> => {
     if (!forceActivePushRequired()) {
       return false;
     }
-    if (!text || text === lastDeliveredTransientProgressText) {
+    const logText = composeProcessLogLines(processLogDurable.count).join("\n");
+    const fastText =
+      transientFastModeText && transientFastModeText !== pushedFastModeText
+        ? transientFastModeText
+        : "";
+    const text = [logText, fastText].filter(Boolean).join("\n\n");
+    if (!text) {
       return true;
     }
+    const logTotalAtCompose = processLogTotalStepCount();
+    const logLastTextAtCompose = processLogSteps.at(-1) ?? "";
     try {
       await sendMarkdownChunksViaActivePush(text, {
         reason: "forced-progress",
         isObsolete: () => streamSettled || finalDelivered || supersededByNewInbound,
       });
-      lastDeliveredTransientProgressText = text;
+      if (logText) {
+        advanceProcessLogBookmark(processLogDurable, logTotalAtCompose, logLastTextAtCompose);
+      }
+      if (fastText) {
+        pushedFastModeText = fastText;
+      }
     } catch (error) {
       if (error !== OBSOLETE_FINAL_RETRY) {
         console.warn(
@@ -2404,6 +2552,56 @@ export function createBotWsReplyHandle(params: {
       }
     }
     return true;
+  };
+
+  // The final repaints the bubble with the answer, which is the one place the
+  // narration log cannot survive on its own. Once the turn's outcome has been
+  // delivered, persist every step that never became a pushed message — that
+  // push IS the record the bubble could only ever preview. Short turns settle
+  // without one: their answer is the record.
+  const maybeFlushProcessRecordPush = (): void => {
+    if (processRecordFlushed || isEvent || supersededByNewInbound) {
+      return;
+    }
+    const elapsedMs = Date.now() - handleStartedAt;
+    if (elapsedMs < PROCESS_RECORD_MIN_TASK_MS) {
+      return;
+    }
+    const totalSteps = processLogTotalStepCount();
+    if (totalSteps < 2) {
+      return;
+    }
+    const remainderLines = composeProcessLogLines(processLogDurable.count);
+    if (remainderLines.length === 0) {
+      return;
+    }
+    processRecordFlushed = true;
+    const logTotalAtCompose = totalSteps;
+    const logLastTextAtCompose = processLogSteps.at(-1) ?? "";
+    const headerLines = [
+      `${PROCESS_RECORD_TITLE_PREFIX}（共 ${totalSteps} 步，用时 ${formatElapsedDuration(elapsedMs)}）`,
+    ];
+    if (processLogDroppedStepCount > 0) {
+      headerLines.push(`…（最早 ${processLogDroppedStepCount} 步超出记录上限，未保留）`);
+    }
+    void sendMarkdownChunksViaActivePush([...headerLines, ...remainderLines].join("\n"), {
+      reason: "process-record",
+      isObsolete: () => supersededByNewInbound,
+    })
+      .then(() => {
+        advanceProcessLogBookmark(processLogDurable, logTotalAtCompose, logLastTextAtCompose);
+        console.info(
+          `[wecom-preview] process-record account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} steps=${logTotalAtCompose} lines=${remainderLines.length} elapsedMs=${elapsedMs}`,
+        );
+      })
+      .catch((error) => {
+        if (error === OBSOLETE_FINAL_RETRY) {
+          return;
+        }
+        console.warn(
+          `[wecom-preview] process-record-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+        );
+      });
   };
 
   // Reasoning-only previews render as a collapsed <think> block: the user has
@@ -2448,7 +2646,6 @@ export function createBotWsReplyHandle(params: {
     // before the gate and would leave the slot looking unspent.
     markLongTaskStatusPainted();
     recordDeliveredBodySource(options);
-    recordDeliveredTransientProgress(options);
     if (previewFrozen) {
       stopPreviewFreezeTimeout();
       startPreviewStatusInterval();
@@ -2531,7 +2728,6 @@ export function createBotWsReplyHandle(params: {
                 visibleReplyStarted = true;
               }
               recordDeliveredBodySource(options);
-              recordDeliveredTransientProgress(options);
             } else {
               recordDeliveredPreview(previewText, now, options);
             }
@@ -2598,7 +2794,6 @@ export function createBotWsReplyHandle(params: {
         visibleReplyStarted = true;
       }
       recordDeliveredBodySource(options);
-      recordDeliveredTransientProgress(options);
       return false;
     }
     recordDeliveredPreview(previewText, now, options);
@@ -2622,7 +2817,6 @@ export function createBotWsReplyHandle(params: {
       text: previewText,
       bodySourceText: options?.bodySourceText,
       showsVisibleBody: options?.showsVisibleBody,
-      transientProgressText: options?.transientProgressText,
       deadline: pendingPreview?.deadline ?? Date.now() + WECOM_PENDING_ACK_GRACE_MS,
       retryCount: pendingPreview?.retryCount ?? 0,
     };
@@ -2685,7 +2879,6 @@ export function createBotWsReplyHandle(params: {
       const delivered = await sendPreviewUpdate(preview.text, Date.now(), {
         bodySourceText: preview.bodySourceText,
         showsVisibleBody: preview.showsVisibleBody,
-        transientProgressText: preview.transientProgressText,
         fromPendingSlot: true,
       });
       if (
@@ -3114,17 +3307,28 @@ export function createBotWsReplyHandle(params: {
         if (!progressText || isEvent || supersededByNewInbound || streamSettled) {
           return;
         }
-        const transientProgressText = rememberTransientProgress(
-          transientProgressKind,
-          progressText,
-        );
-        if (await sendForcedTransientProgress(transientProgressText)) {
+        if (transientProgressKind === "preamble") {
+          const steps = payload.channelData?.openclawProgressSteps;
+          adoptProcessLogSteps(
+            Array.isArray(steps) && steps.length > 0
+              ? steps.map((step) => String(step))
+              : [progressText],
+            Number(payload.channelData?.openclawProgressDroppedSteps ?? 0) || 0,
+          );
+        } else {
+          transientFastModeText = progressText;
+        }
+        if (await sendForcedTransientProgress()) {
           return;
         }
         const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
+        const transientView = composeTransientPreviewSuffix(
+          accumulatedText ? PROCESS_LOG_TAIL_WITH_BODY_MAX_CHARS : thinkingLimits.maxChars,
+          accumulatedText ? PROCESS_LOG_TAIL_WITH_BODY_MAX_CHARS * 3 : thinkingLimits.maxBytes,
+        );
         const progress = composePreviewSuffixWithinLimits({
           prefix: accumulatedText,
-          suffix: transientProgressText,
+          suffix: transientView,
           separator: "\n",
           maxChars: thinkingLimits.maxChars,
           maxBytes: thinkingLimits.maxBytes,
@@ -3139,7 +3343,6 @@ export function createBotWsReplyHandle(params: {
         await sendPreviewUpdate(progressPreviewText, Date.now(), {
           bodySourceText: progress.visiblePrefix,
           showsVisibleBody: Boolean(progress.visiblePrefix),
-          transientProgressText: progress.visibleSuffix,
         });
         return;
       }
@@ -3455,6 +3658,9 @@ export function createBotWsReplyHandle(params: {
         throw error;
       }
       params.onDeliver?.();
+      if (info.kind === "final") {
+        maybeFlushProcessRecordPush();
+      }
     },
     fail: async (error: unknown) => {
       if (runtimeRetired || (!streamSettled && !ensureRuntimeCleanup())) {
@@ -3510,6 +3716,8 @@ export function createBotWsReplyHandle(params: {
             `[wecom-reply] fail-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(pushError)}`,
           );
         }
+        // A failed run is exactly when the record matters most.
+        maybeFlushProcessRecordPush();
       };
 
       if (isTerminalReplyError(error)) {
@@ -3575,6 +3783,7 @@ export function createBotWsReplyHandle(params: {
         params.onFail?.(sendError);
         return;
       }
+      maybeFlushProcessRecordPush();
       params.onFail?.(error);
     },
     markExternalActivity: () => {

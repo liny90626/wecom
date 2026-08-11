@@ -136,7 +136,11 @@ describe("dispatchRuntimeReply", () => {
       1,
       {
         text: "正在读取仓库配置",
-        channelData: { openclawProgressKind: "preamble" },
+        channelData: {
+          openclawProgressKind: "preamble",
+          openclawProgressSteps: ["正在读取仓库配置"],
+          openclawProgressDroppedSteps: 0,
+        },
       },
       { kind: "block" },
     );
@@ -148,11 +152,12 @@ describe("dispatchRuntimeReply", () => {
     expect(deliver).toHaveBeenCalledTimes(2);
   });
 
-  it("shows only the current commentary step when OpenClaw restarts the item id", async () => {
-    // Reproduces the real CLI backend: every assistant段 flushed before a tool
-    // call is emitted as commentary with a FRESH `commentary-<run>-<n>` id
-    // (execute.runtime `emitCliCommentaryText`). Stacking those ids turns the
-    // progress bubble into a growing wall of near-identical narration.
+  it("keeps the whole narration log when OpenClaw restarts the item id", async () => {
+    // The real CLI backend flushes每段自述 as a one-shot commentary item with a
+    // FRESH `commentary-<run>-<n>` id (execute.runtime `emitCliCommentaryText`).
+    // Those ordered segments ARE the run's process record: distinct steps
+    // accumulate in arrival order instead of overwriting each other, and the
+    // full log travels in channelData for the transport's bookkeeping.
     const steps = [
       "我先读取仓库配置，确认发布门禁。",
       "配置里没有相关项，我再检索一次运行记录。",
@@ -185,15 +190,22 @@ describe("dispatchRuntimeReply", () => {
       } as any,
     });
 
-    const progressTexts = deliver.mock.calls
-      .filter(([payload]) => payload?.channelData?.openclawProgressKind === "preamble")
-      .map(([payload]) => String(payload.text ?? ""));
-    expect(progressTexts.length).toBeGreaterThan(0);
-    for (const text of progressTexts) {
-      expect(text).not.toContain("\n");
-      expect(steps).toContain(text);
+    const progressCalls = deliver.mock.calls.filter(
+      ([payload]) => payload?.channelData?.openclawProgressKind === "preamble",
+    );
+    expect(progressCalls.length).toBeGreaterThan(0);
+    // Each dispatched snapshot is a prefix of the growing log — never a
+    // rewrite, never a duplicate line.
+    for (const [payload] of progressCalls) {
+      const text = String(payload.text ?? "");
+      expect(steps.join("\n").startsWith(text)).toBe(true);
+      const lines = text.split("\n");
+      expect(new Set(lines).size).toBe(lines.length);
     }
-    expect(progressTexts.at(-1)).toBe(steps.at(-1));
+    const lastPayload = progressCalls.at(-1)?.[0];
+    expect(String(lastPayload?.text ?? "")).toBe(steps.join("\n"));
+    expect(lastPayload?.channelData?.openclawProgressSteps).toEqual(steps);
+    expect(lastPayload?.channelData?.openclawProgressDroppedSteps).toBe(0);
   });
 
   it("keeps tool lifecycle events out of the channel entirely", async () => {
@@ -365,12 +377,15 @@ describe("dispatchRuntimeReply", () => {
       String(call[2] ?? ""),
     );
     expect(nonFinalFrames.length).toBeGreaterThan(0);
-    // One tool-heavy turn used to emit a progress frame per lifecycle edge on
-    // top of an ever-growing narration stack; now only changed narration ships.
+    // One tool-heavy turn used to emit a progress frame per lifecycle edge; now
+    // only changed narration ships, each frame extending the numbered step log.
     expect(nonFinalFrames.length).toBeLessThanOrEqual(steps.length);
     for (const frame of nonFinalFrames) {
-      expect(steps).toContain(frame);
       expect(frame).not.toMatch(/Tool Call|Exec|🧰|🛠/);
+    }
+    const lastProgressFrame = nonFinalFrames.at(-1) ?? "";
+    for (const [index, step] of steps.entries()) {
+      expect(lastProgressFrame).toContain(`${index + 1}）${step}`);
     }
 
     const finalFrame = replyStream.mock.calls.at(-1);
@@ -441,10 +456,10 @@ describe("dispatchRuntimeReply", () => {
         .filter(([payload]) => payload?.channelData?.openclawProgressKind === "preamble")
         .map(([payload]) => String(payload.text ?? ""));
       expect(progressTexts.length).toBeGreaterThan(0);
-      expect(progressTexts.at(-1)).toBe("门禁配置正常，继续检查运行记录");
-      for (const text of progressTexts) {
-        expect(text).not.toContain("先确认发布门禁配置\n");
-      }
+      // Two real narration segments stay two ordered log steps.
+      expect(progressTexts.at(-1)).toBe(
+        "先确认发布门禁配置\n门禁配置正常，继续检查运行记录",
+      );
       expect(deliver).toHaveBeenLastCalledWith(
         { text: "真实 dispatcher 最终答案" },
         { kind: "final" },
@@ -718,7 +733,7 @@ describe("dispatchRuntimeReply", () => {
     expect(JSON.stringify(deliver.mock.calls)).not.toContain("SECRET_FILTERED_TOOL_RESULT");
   });
 
-  it("shows the newest narration even when OpenClaw omits an item id", async () => {
+  it("keeps narration from anonymous items in the log", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
       await params.replyOptions.onItemEvent({
         kind: "preamble",
@@ -751,8 +766,12 @@ describe("dispatchRuntimeReply", () => {
     expect(deliver).toHaveBeenNthCalledWith(
       2,
       {
-        text: "正在读取仓库",
-        channelData: { openclawProgressKind: "preamble" },
+        text: "正在准备上下文\n正在读取仓库",
+        channelData: {
+          openclawProgressKind: "preamble",
+          openclawProgressSteps: ["正在准备上下文", "正在读取仓库"],
+          openclawProgressDroppedSteps: 0,
+        },
       },
       { kind: "block" },
     );
@@ -804,13 +823,25 @@ describe("dispatchRuntimeReply", () => {
 
     expect(deliver.mock.calls).toEqual([
       [
-        { text: "正在读取", channelData: { openclawProgressKind: "preamble" } },
+        {
+          text: "正在读取",
+          channelData: {
+            openclawProgressKind: "preamble",
+            openclawProgressSteps: ["正在读取"],
+            openclawProgressDroppedSteps: 0,
+          },
+        },
         { kind: "block" },
       ],
       [
         {
-          text: "正在验证依赖",
-          channelData: { openclawProgressKind: "preamble" },
+          // In-item updates replace step 1 in place; the new item appends.
+          text: "正在读取仓库配置\n正在验证依赖",
+          channelData: {
+            openclawProgressKind: "preamble",
+            openclawProgressSteps: ["正在读取仓库配置", "正在验证依赖"],
+            openclawProgressDroppedSteps: 0,
+          },
         },
         { kind: "block" },
       ],
@@ -856,7 +887,14 @@ describe("dispatchRuntimeReply", () => {
       ]),
     ).resolves.toEqual([
       [
-        { text: "正在评估终止风险", channelData: { openclawProgressKind: "preamble" } },
+        {
+          text: "正在评估终止风险",
+          channelData: {
+            openclawProgressKind: "preamble",
+            openclawProgressSteps: ["正在评估终止风险"],
+            openclawProgressDroppedSteps: 0,
+          },
+        },
         { kind: "block" },
       ],
       [{ text: "任务已终止" }, { kind: "final" }],
@@ -870,13 +908,27 @@ describe("dispatchRuntimeReply", () => {
       ]),
     ).resolves.toEqual([
       [
-        { text: "正在评估终止风险", channelData: { openclawProgressKind: "preamble" } },
+        {
+          text: "正在评估终止风险",
+          channelData: {
+            openclawProgressKind: "preamble",
+            openclawProgressSteps: ["正在评估终止风险"],
+            openclawProgressDroppedSteps: 0,
+          },
+        },
         { kind: "block" },
       ],
       [
         {
-          text: "终止风险评估完成",
-          channelData: { openclawProgressKind: "preamble" },
+          // The same-text re-flush merged into step 1 WITHOUT adopting the new
+          // id, so the item's later divergence is a new step — not a rewrite
+          // that would lose "正在评估终止风险" from the record.
+          text: "正在评估终止风险\n终止风险评估完成",
+          channelData: {
+            openclawProgressKind: "preamble",
+            openclawProgressSteps: ["正在评估终止风险", "终止风险评估完成"],
+            openclawProgressDroppedSteps: 0,
+          },
         },
         { kind: "block" },
       ],
@@ -885,9 +937,19 @@ describe("dispatchRuntimeReply", () => {
   });
 
   it.each([
-    ["keyed", "commentary-replaced"],
-    ["anonymous", undefined],
-  ])("treats each %s OpenClaw preamble value as the current item snapshot", async (_label, itemId) => {
+    [
+      "keyed items update their own step in place",
+      "commentary-replaced",
+      "配置检查完成",
+      ["配置检查完成"],
+    ],
+    [
+      "anonymous divergent narration appends a new step",
+      undefined,
+      "正在检查仓库中的全部配置文件\n配置检查完成",
+      ["正在检查仓库中的全部配置文件", "配置检查完成"],
+    ],
+  ])("%s", async (_label, itemId, expectedText, expectedSteps) => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
       await params.replyOptions.onItemEvent({
         itemId,
@@ -921,8 +983,12 @@ describe("dispatchRuntimeReply", () => {
     expect(deliver).toHaveBeenNthCalledWith(
       2,
       {
-        text: "配置检查完成",
-        channelData: { openclawProgressKind: "preamble" },
+        text: expectedText,
+        channelData: {
+          openclawProgressKind: "preamble",
+          openclawProgressSteps: expectedSteps,
+          openclawProgressDroppedSteps: 0,
+        },
       },
       { kind: "block" },
     );

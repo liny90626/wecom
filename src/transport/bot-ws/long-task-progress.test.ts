@@ -29,13 +29,16 @@ const tick = async (ms: number) => {
 };
 
 /**
- * 现网反馈：「8 分钟以内的长任务，虽然消息在刷，但每一条都在 agent 发送的原
- * 气泡上覆盖刷写，过程没有正确记录和回复」。根因是过程文字被建模成可变状态
- * （只存当前步骤，帧帧覆盖，final 不含它），而 OpenClaw 源头本来就把自述作为
- * 一次性有序段落发射。修复后过程是一份追加式步骤日志：气泡内步骤编号追加显
- * 示，final 送达后未持久化的步骤作为「📋 本轮过程记录」推送落档。
+ * 长任务的过程可见性契约（真实 orchestrator → handle → 网关模拟）：
+ *
+ * - 过程是一份**追加式步骤日志**：气泡内按编号追加，不再互相覆盖刷写。
+ * - 流窗还活着时，过程就在气泡里；收尾由答案接管，**不再补一条过程记录推送**
+ *   （现网反馈：那条「共 N 步、正文只有 2 步」的记录反而让人困惑）。
+ * - 流窗一死（846608），气泡永远停在最后一帧确认送达的内容——那已经是聊天
+ *   记录，所以推送通道从这里往后**只送新步骤**，并且**立刻接手**，不再等回合
+ *   满 8 分钟（6→8 分钟那段盲区正是「过程消息丢失」的现场）。
  */
-describe("长任务过程记录（真实 orchestrator + 网关模拟）", () => {
+describe("长任务过程可见性（真实 orchestrator + 网关模拟）", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     __resetBotWsReplyTestState();
@@ -69,6 +72,7 @@ describe("长任务过程记录（真实 orchestrator + 网关模拟）", () => 
     handle: ReplyHandle,
     body: (options: {
       onItemEvent: (payload: Record<string, unknown>) => Promise<void> | void;
+      deliverBlock: (payload: Record<string, unknown>) => Promise<void>;
       deliverFinal: (payload: Record<string, unknown>) => Promise<void>;
     }) => Promise<void>,
   ): Promise<void> => {
@@ -77,6 +81,9 @@ describe("长任务过程记录（真实 orchestrator + 网关模拟）", () => 
       .mockImplementation(async (params: any) => {
         await body({
           onItemEvent: (payload) => params.replyOptions.onItemEvent(payload),
+          deliverBlock: async (payload) => {
+            await params.dispatcherOptions.deliver(payload, { kind: "block" });
+          },
           deliverFinal: async (payload) => {
             const delivery = params.dispatcherOptions.deliver(payload, { kind: "final" });
             await tick(3_000);
@@ -118,7 +125,7 @@ describe("长任务过程记录（真实 orchestrator + 网关模拟）", () => 
   ];
   const ANSWER = "结论：超时来自网关代理，已给出修复建议。";
 
-  it("4 分钟 4 步骤：气泡步骤追加、final 只留答案、过程记录随收尾落档", async () => {
+  it("4 分钟 4 步骤（流窗健康）：气泡步骤追加、final 只留答案、不追加记录推送", async () => {
     const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
     const handle = startTurn(sim);
     await tick(100);
@@ -152,22 +159,11 @@ describe("长任务过程记录（真实 orchestrator + 网关模拟）", () => 
     expect(bubble?.closed).toBe(true);
     expect(bubble?.content).toBe(ANSWER);
 
-    // 过程记录作为一条持久推送落档：标题 + 全部步骤，每步恰好一次。
-    const pushes = pushContents(sim);
-    expect(pushes).toHaveLength(1);
-    const record = pushes[0]!;
-    expect(record).toContain("📋 本轮过程记录");
-    expect(record).toContain("共 4 步");
-    for (const [index, step] of STEPS.entries()) {
-      expect(record.split(step)).toHaveLength(2);
-      expect(record).toContain(`${index + 1}）${step}`);
-    }
-    // 记录按步骤顺序排列。
-    const positions = STEPS.map((step) => record.indexOf(step));
-    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    // 气泡全程可见过程，收尾只留答案——不再额外推一条「过程记录」。
+    expect(pushContents(sim)).toHaveLength(0);
   });
 
-  it("不足 2 分钟的短回合：气泡内照样追加，但收尾不推记录", async () => {
+  it("短回合：气泡内照样追加，全程零推送", async () => {
     const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
     const handle = startTurn(sim);
     await tick(100);
@@ -265,56 +261,106 @@ describe("长任务过程记录（真实 orchestrator + 网关模拟）", () => 
     expect(history.every((text) => !text.includes("2）"))).toBe(true);
   });
 
-  it("流窗死亡后步骤随状态推送落档，收尾不再重复推记录", async () => {
-    // 1 分钟后流窗关闭（846608）。此前 2 步进过气泡，此后 2 步只能走推送。
-    // 推送通道从 durable 书签补齐：首条通知会带全 4 步（编号连续），此后
-    // 收尾时已无剩余步骤，不再追加记录推送——每一步恰好持久化一次。
-    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 60_000 });
+  it("流窗死亡：推送立刻接手、不重复气泡里已永久的步骤、每步恰好一次", async () => {
+    // 企微流窗约 6 分钟后 846608。此前的步骤留在那一帧气泡里，它此后再也不会
+    // 被覆盖（final 也改不动它），所以推送只从这里往后送新步骤。
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 6 * 60_000 });
+    const handle = startTurn(sim);
+    const startedAt = Date.now();
+    const pushAtMs: number[] = [];
+    let seenPushes = 0;
+    const samplePushes = () => {
+      const pushes = sim.chat.filter((entry) => entry.kind === "push");
+      for (let i = seenPushes; i < pushes.length; i += 1) {
+        pushAtMs.push(Date.now() - startedAt);
+      }
+      seenPushes = pushes.length;
+    };
+    await tick(100);
+
+    const LONG_STEPS = Array.from(
+      { length: 12 },
+      (_, i) => `第 ${i + 1} 步：核对第 ${i + 1} 项配置`,
+    );
+    await runTurn(handle, async ({ onItemEvent, deliverFinal }) => {
+      for (const [index, step] of LONG_STEPS.entries()) {
+        await tick(45_000);
+        await onItemEvent({
+          itemId: `commentary-long-${index + 1}`,
+          kind: "preamble",
+          progressText: step,
+        });
+        samplePushes();
+      }
+      // 让最后一步也拿到它的推送名额，再收尾。
+      await tick(90_000);
+      samplePushes();
+      await deliverFinal({ text: ANSWER });
+      samplePushes();
+    });
+    samplePushes();
+
+    const bubble = sim.streamBubble("req-sim");
+    const frozenBubbleText = bubble?.kind === "stream" ? bubble.content : "";
+    const pushes = pushContents(sim);
+    const joined = pushes.join("\n===\n");
+
+    // ① 盲区已消失：第一条推送远早于 8 分钟门槛（流窗一死就接手）。
+    expect(pushAtMs[0]).toBeLessThan(8 * 60_000);
+
+    // ② 气泡里已永久的步骤不再被推送重复一遍。
+    const stepsInBubble = LONG_STEPS.filter((step) => frozenBubbleText.includes(step));
+    expect(stepsInBubble.length).toBeGreaterThan(0);
+    for (const step of stepsInBubble) {
+      expect(joined).not.toContain(step);
+    }
+
+    // ③ 每一步恰好出现一次（气泡或推送），一步不丢、一步不重。
+    for (const [index, step] of LONG_STEPS.entries()) {
+      const inBubble = frozenBubbleText.split(step).length - 1;
+      const inPushes = joined.split(step).length - 1;
+      expect(inBubble + inPushes).toBe(1);
+      if (inPushes === 1) {
+        expect(joined).toContain(`${index + 1}）${step}`);
+      }
+    }
+
+    // ④ 答案以推送到达，且不再跟一条「过程记录」。
+    expect(pushes.at(-1)).toContain(ANSWER);
+    expect(joined).not.toContain("过程记录");
+  });
+
+  it("正文帧把日志挤出气泡后，这些步骤仍会随推送落到聊天记录", async () => {
+    // 气泡是整帧覆盖：一帧正文预览（不含日志）会把刚显示过的步骤抹掉。若把
+    // 「气泡展示过」直接当成已送达，流窗一死这些步骤就再也没人送了。
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 6 * 60_000 });
     const handle = startTurn(sim);
     await tick(100);
 
-    await runTurn(handle, async ({ onItemEvent, deliverFinal }) => {
-      await tick(10_000);
+    await runTurn(handle, async ({ onItemEvent, deliverBlock, deliverFinal }) => {
+      await tick(30_000);
       await onItemEvent({
-        itemId: "commentary-dead-1",
+        itemId: "commentary-wiped-1",
         kind: "preamble",
-        progressText: STEPS[0],
+        progressText: "先读取配置文件",
       });
-      await tick(20_000);
-      await onItemEvent({
-        itemId: "commentary-dead-2",
-        kind: "preamble",
-        progressText: STEPS[1],
-      });
-      // 越过流窗（60s）后气泡死亡，之后的步骤到不了气泡。
-      await tick(70_000);
-      await onItemEvent({
-        itemId: "commentary-dead-3",
-        kind: "preamble",
-        progressText: STEPS[2],
-      });
-      await tick(60_000);
-      await onItemEvent({
-        itemId: "commentary-dead-4",
-        kind: "preamble",
-        progressText: STEPS[3],
-      });
-      // 走到 8 分钟门槛之后，让后台推送通道启动并送出未持久化步骤。
+      await tick(30_000);
+      // 一帧纯正文预览覆盖整条气泡，日志从屏幕上消失。
+      await deliverBlock({ text: "初步结论：配置存在冲突。" });
+      // 流窗关闭后才有下一步自述：这一帧撞上 846608，推送通道接手。
       await tick(6 * 60_000);
+      await onItemEvent({
+        itemId: "commentary-wiped-2",
+        kind: "preamble",
+        progressText: "再核对运行记录",
+      });
+      await tick(90_000);
       await deliverFinal({ text: ANSWER });
     });
 
-    const pushes = pushContents(sim);
-    const joined = pushes.join("\n===\n");
-    // 每一步在推送集合中恰好出现一次（通知或记录，不重复）。
-    for (const step of STEPS) {
-      expect(joined.split(step)).toHaveLength(2);
-    }
-    // 编号连续可读。
-    for (const [index, step] of STEPS.entries()) {
-      expect(joined).toContain(`${index + 1}）${step}`);
-    }
-    // 答案最终以推送到达（回执已不可信）。
-    expect(joined).toContain(ANSWER);
+    const joined = pushContents(sim).join("\n===\n");
+    // 被正文帧抹掉的那一步没有被当成「已送达」，它随推送补齐。
+    expect(joined).toContain("先读取配置文件");
+    expect(joined).toContain("再核对运行记录");
   });
 });

@@ -47,9 +47,12 @@ const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
 const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = LONG_TASK_STATUS_AFTER_MS;
 /** With answer text on screen the log tail yields the bubble to the answer. */
 const PROCESS_LOG_TAIL_WITH_BODY_MAX_CHARS = 800;
-/** Runs shorter than this settle without a process-record push. */
-const PROCESS_RECORD_MIN_TASK_MS = 2 * 60_000;
-const PROCESS_RECORD_TITLE_PREFIX = "📋 本轮过程记录";
+/**
+ * A push carrying new steps earns its slot on the shared 60 s grid. A push with
+ * nothing new to say is just the clock, so it waits out this much silence
+ * first: it exists to prove a silent turn is alive (禁改 25), not to tick.
+ */
+const LONG_TASK_QUIET_STATUS_INTERVAL_MS = 5 * 60_000;
 const REPLY_FAIL_NOTICE_TEXT = "⚠️ 本次回复投递中断，请稍后重试或重新发起提问。";
 const REPLY_MODEL_TIMEOUT_NOTICE_TEXT = "⚠️ 模型响应超时，本次任务未完成，请稍后重试。";
 const REPLY_PREPARE_TIMEOUT_NOTICE_TEXT =
@@ -883,17 +886,31 @@ function shouldAppendStreamCompletionMarker(params: {
   );
 }
 
+/**
+ * Reasoning was the one text that reached the wire without the body's Markdown
+ * normalization: it only had same-line `<…>` pairs removed. A bare `<` (`if (a
+ * < b)`, `Map<string`, an XML snippet) then survives, and because the block is
+ * always closed with `</think>`, the client consumes `< … </think>` as one tag
+ * — the block never closes and swallows the answer behind it. That is the
+ * "bubble shows only the thinking block, no answer" report.
+ *
+ * So normalize with the body's own pipeline, then neutralize whatever could
+ * still open a tag. Escaping expands the text, so it must happen before the
+ * budget is applied (禁改 32), which is exactly where this runs.
+ */
 function escapeThinkBlockText(text: string): string {
-  return text
-    .replace(/\r\n?/g, "\n")
-    .replace(/<[^>\n]*>/g, "")
-    .trim();
+  return toWeComMarkdownV2(text, null).replace(/</g, "&lt;").trim();
 }
 
+/** Truncation happens after escaping, so the tail can hold half an entity or
+ *  an opened code fence — and an unclosed fence swallows the answer just like
+ *  an unclosed tag did. */
 function stripDanglingThinkMarkup(text: string): string {
-  return text
-    .replace(/(?:<!--(?:(?!-->)[\s\S])*|<!-?|<--|<)$/, "")
-    .trimEnd();
+  let out = text.replace(/&[a-zA-Z#0-9]{0,6}$/, "").trimEnd();
+  if ((out.match(/```/g)?.length ?? 0) % 2 === 1) {
+    out = out.slice(0, out.lastIndexOf("```")).trimEnd();
+  }
+  return out;
 }
 
 function trimToUtf8Bytes(value: string, maxBytes: number): string {
@@ -928,12 +945,15 @@ function renderThinkContent(
   maxBytes = THINKING_BLOCK_MAX_BYTES,
   maxChars = THINKING_BLOCK_MAX_CHARS,
 ): string {
+  const charBudget = Math.min(THINKING_BLOCK_MAX_CHARS, Math.max(0, maxChars));
+  // Only a bounded head of the reasoning can ever fit the budget, and this runs
+  // on every frame of a stream that grows without limit — normalizing the whole
+  // accumulated text would be work the wire throws away. The 4x window leaves
+  // room for the normalizer to shrink the text and still fill the budget.
+  const source = sliceUtf16SafePrefix(text || "progress", Math.max(charBudget * 4, 1_000));
   return stripDanglingThinkMarkup(
     trimToUtf8Bytes(
-      sliceUtf16SafePrefix(
-        escapeThinkBlockText(text || "progress"),
-        Math.min(THINKING_BLOCK_MAX_CHARS, Math.max(0, maxChars)),
-      ),
+      sliceUtf16SafePrefix(escapeThinkBlockText(source), charBudget),
       Math.min(THINKING_BLOCK_MAX_BYTES, maxBytes),
     ).trim(),
   );
@@ -1004,17 +1024,18 @@ export function createBotWsReplyHandle(params: {
   // The run's narration is a record, not a status: the orchestrator sends the
   // whole step log, the bubble paints its tail as a pure display, and the push
   // lanes persist it. Steps are addressed in ABSOLUTE indices (dropped + array
-  // index). ONE bookmark: the durable prefix — steps that exist as pushed
-  // messages surviving the final repaint. Every push lane sends the durable
-  // remainder, so each step becomes durable exactly once and the numbered
-  // lines keep continuity self-evident even when a push repeats a step the
-  // live bubble briefly showed.
+  // index). ONE durable prefix — the steps that survive this turn — advanced by
+  // the two things that prove survival: a confirmed push, and the moment WeCom
+  // retires the stream window, which freezes the bubble's own confirmed frame
+  // into a permanent chat message. `processLogBubble` is that pending frame's
+  // prefix, never a second delivery lane: it only ever folds into the durable
+  // one, and only while it stays contiguous with it.
   let processLogSteps: string[] = [];
   let processLogDroppedStepCount = 0;
   const processLogDurable = { count: 0, lastText: "" };
+  const processLogBubble = { count: 0, lastText: "" };
   let transientFastModeText = "";
   let pushedFastModeText = "";
-  let processRecordFlushed = false;
 
   const processLogTotalStepCount = (): number =>
     processLogDroppedStepCount + processLogSteps.length;
@@ -1065,6 +1086,7 @@ export function createBotWsReplyHandle(params: {
     // A mutated or replaced step becomes deliverable again; settled history
     // (only the tail can change in the real pipeline) stays settled.
     clampProcessLogBookmark(processLogDurable, steps, droppedStepCount);
+    clampProcessLogBookmark(processLogBubble, steps, droppedStepCount);
     processLogSteps = steps.slice();
     processLogDroppedStepCount = droppedStepCount;
   };
@@ -1090,7 +1112,12 @@ export function createBotWsReplyHandle(params: {
    * suffix from its tail, which for a log means losing the newest step (or a
    * trailing status line) instead of the oldest.
    */
+  /** What the last composed tail view actually showed, so a frame confirmed on
+   *  the wire can report the steps the bubble now holds. */
+  let lastProcessLogViewRange: { from: number; to: number; lastText: string } | undefined;
+
   const composeProcessLogTailView = (maxChars: number, maxBytes: number): string => {
+    lastProcessLogViewRange = undefined;
     if (!processLogSteps.length || maxChars <= 0 || maxBytes <= 0) {
       return "";
     }
@@ -1118,6 +1145,13 @@ export function createBotWsReplyHandle(params: {
         break;
       }
     }
+    if (lines.length > 0) {
+      lastProcessLogViewRange = {
+        from: firstShown,
+        to: processLogTotalStepCount(),
+        lastText: processLogSteps.at(-1) ?? "",
+      };
+    }
     if (firstShown > 0) {
       lines.unshift(`…（已省略前 ${firstShown} 步）`);
     }
@@ -1144,11 +1178,14 @@ export function createBotWsReplyHandle(params: {
   type PreviewDeliveryMetadata = {
     bodySourceText?: string;
     showsVisibleBody?: boolean;
+    /** The step range this frame puts on screen, reported once it is confirmed. */
+    processLogShown?: { from: number; to: number; lastText: string };
   };
   type PendingPreview = {
     text: string;
     bodySourceText?: PreviewDeliveryMetadata["bodySourceText"];
     showsVisibleBody?: PreviewDeliveryMetadata["showsVisibleBody"];
+    processLogShown?: PreviewDeliveryMetadata["processLogShown"];
     deadline: number;
     retryCount: number;
   };
@@ -1368,7 +1405,7 @@ export function createBotWsReplyHandle(params: {
         // WeCom refused the frame, so this slot was never shown — give it back
         // and let the push lane use it right away.
         releaseLongTaskStatusSlot?.();
-        streamUpdateUnreliable = true;
+        retireBubbleForDeadWindow(true);
         stopPlaceholderKeepalive();
         maybeSendPreviewExpiredNotice(true);
         params.onFail?.(error);
@@ -1478,6 +1515,9 @@ export function createBotWsReplyHandle(params: {
   // is now ONE clock on an absolute grid anchored to the turn start: every
   // lane asks it whether a repaint is due, and reports back when it painted.
   let longTaskStatusPaintedAt = 0;
+  /** Set when the bubble stops being repaintable: from then on the push lane is
+   *  the only channel, so the shared grid starts there instead of at 8 minutes. */
+  let longTaskStatusGateOverrideAt: number | undefined;
   let previewExpiredNoticeInFlight = false;
   let previewExpiredNoticeCancelled = false;
   let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1635,7 +1675,6 @@ export function createBotWsReplyHandle(params: {
         | "final-retry"
         | "preview-expired"
         | "forced-progress"
-        | "process-record"
         | "fail-notice";
       appendCompletionMarker?: boolean;
       progress?: { delivered: number };
@@ -1839,7 +1878,6 @@ export function createBotWsReplyHandle(params: {
         `[wecom-b3] final-retry-delivered attempt=${finalPushRetryCount}/${FINAL_PUSH_MAX_RETRIES} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
       );
       params.onDeliver?.();
-      maybeFlushProcessRecordPush();
     } catch (error) {
       if (error === OBSOLETE_FINAL_RETRY) {
         finishPendingFinalRetry(true);
@@ -2405,17 +2443,6 @@ export function createBotWsReplyHandle(params: {
     }
     previewExpiredNoticeStarted = true;
     previewExpiredNoticeAllowUnfrozen = allowUnfrozen;
-    const taskElapsedMs = Date.now() - handleStartedAt;
-    if (taskElapsedMs < PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS) {
-      if (!previewExpiredNoticeTimer) {
-        const remainingMs = PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS - taskElapsedMs;
-        console.info(
-          `[wecom-preview] expired-notice-deferred delayMs=${remainingMs} account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
-        );
-        schedulePreviewExpiredNotice(remainingMs, allowUnfrozen);
-      }
-      return;
-    }
     // The bubble is unrepaintable but the agent keeps producing: carry whatever
     // the user has not seen out with the status line instead of dropping it.
     // Reasoning stays out — only the visible body travels this way.
@@ -2431,21 +2458,31 @@ export function createBotWsReplyHandle(params: {
         ? transientFastModeText
         : "";
     const now = Date.now();
-    // Real content still goes out as soon as it exists — that is what this push
-    // is for. A status-only push, though, is the same line the bubble may have
-    // painted seconds ago, so it has to wait for its slot on the shared clock;
-    // firing it on arming is what delivered the same status twice, 5 s apart.
-    if (
-      !undeliveredProgress &&
-      !undeliveredTransientProgress &&
-      !undeliveredFastText &&
-      !isLongTaskStatusDue(now)
-    ) {
+    const hasNewContent = Boolean(
+      undeliveredProgress || undeliveredTransientProgress || undeliveredFastText,
+    );
+    // New content earns its slot on the shared grid, and once the window is
+    // dead that grid starts at the death — so real progress no longer waits out
+    // the 8-minute gate in silence. A push with nothing new to say is just the
+    // clock: it keeps the absolute 8-minute threshold (禁改 34) and on top of it
+    // waits out a quiet stretch, because it exists to prove a silent turn is
+    // alive, not to tick every minute.
+    const dueForContent = hasNewContent && isLongTaskStatusDue(now);
+    const dueForStatus =
+      !hasNewContent &&
+      now - handleStartedAt >= PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS &&
+      isLongTaskStatusDue(now) &&
+      now - longTaskStatusPaintedAt >= LONG_TASK_QUIET_STATUS_INTERVAL_MS;
+    if (!dueForContent && !dueForStatus) {
       if (!previewExpiredNoticeTimer) {
-        schedulePreviewExpiredNotice(
-          Math.max(0, nextLongTaskStatusDueAt() - now),
-          allowUnfrozen,
-        );
+        const dueAt = hasNewContent
+          ? nextLongTaskStatusDueAt()
+          : Math.max(
+              nextLongTaskStatusDueAt(),
+              handleStartedAt + PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS,
+              longTaskStatusPaintedAt + LONG_TASK_QUIET_STATUS_INTERVAL_MS,
+            );
+        schedulePreviewExpiredNotice(Math.max(0, dueAt - now), allowUnfrozen);
       }
       return;
     }
@@ -2506,6 +2543,25 @@ export function createBotWsReplyHandle(params: {
       });
   };
 
+  /** A confirmed frame proves the user has this step range on screen. Only a
+   *  range that continues the bubble prefix may extend it — a tail view that
+   *  skipped ahead leaves a hole the push lane still has to fill. */
+  const recordDeliveredProcessLogView = (options?: PreviewDeliveryMetadata): void => {
+    const shown = options?.processLogShown;
+    if (!shown) {
+      // A frame replaces the whole bubble. This one carries no log (a body
+      // preview, a thinking snapshot, the frozen status), so the steps that
+      // were on screen are gone and only the pushed ones still count.
+      processLogBubble.count = processLogDurable.count;
+      processLogBubble.lastText = processLogDurable.lastText;
+      return;
+    }
+    if (shown.from > processLogBubble.count) {
+      return;
+    }
+    advanceProcessLogBookmark(processLogBubble, shown.to, shown.lastText);
+  };
+
   const recordDeliveredBodySource = (
     options?: PreviewDeliveryMetadata,
   ): void => {
@@ -2554,56 +2610,6 @@ export function createBotWsReplyHandle(params: {
     return true;
   };
 
-  // The final repaints the bubble with the answer, which is the one place the
-  // narration log cannot survive on its own. Once the turn's outcome has been
-  // delivered, persist every step that never became a pushed message — that
-  // push IS the record the bubble could only ever preview. Short turns settle
-  // without one: their answer is the record.
-  const maybeFlushProcessRecordPush = (): void => {
-    if (processRecordFlushed || isEvent || supersededByNewInbound) {
-      return;
-    }
-    const elapsedMs = Date.now() - handleStartedAt;
-    if (elapsedMs < PROCESS_RECORD_MIN_TASK_MS) {
-      return;
-    }
-    const totalSteps = processLogTotalStepCount();
-    if (totalSteps < 2) {
-      return;
-    }
-    const remainderLines = composeProcessLogLines(processLogDurable.count);
-    if (remainderLines.length === 0) {
-      return;
-    }
-    processRecordFlushed = true;
-    const logTotalAtCompose = totalSteps;
-    const logLastTextAtCompose = processLogSteps.at(-1) ?? "";
-    const headerLines = [
-      `${PROCESS_RECORD_TITLE_PREFIX}（共 ${totalSteps} 步，用时 ${formatElapsedDuration(elapsedMs)}）`,
-    ];
-    if (processLogDroppedStepCount > 0) {
-      headerLines.push(`…（最早 ${processLogDroppedStepCount} 步超出记录上限，未保留）`);
-    }
-    void sendMarkdownChunksViaActivePush([...headerLines, ...remainderLines].join("\n"), {
-      reason: "process-record",
-      isObsolete: () => supersededByNewInbound,
-    })
-      .then(() => {
-        advanceProcessLogBookmark(processLogDurable, logTotalAtCompose, logLastTextAtCompose);
-        console.info(
-          `[wecom-preview] process-record account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} steps=${logTotalAtCompose} lines=${remainderLines.length} elapsedMs=${elapsedMs}`,
-        );
-      })
-      .catch((error) => {
-        if (error === OBSOLETE_FINAL_RETRY) {
-          return;
-        }
-        console.warn(
-          `[wecom-preview] process-record-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
-        );
-      });
-  };
-
   // Reasoning-only previews render as a collapsed <think> block: the user has
   // not seen any visible reply body yet. Treating them as "visible reply
   // started" made supersede silently discard the run's real final answer.
@@ -2637,6 +2643,7 @@ export function createBotWsReplyHandle(params: {
     }
     lastPreviewText = previewText;
     lastPreviewUpdateAt = now;
+    recordDeliveredProcessLogView(options);
     // ANY confirmed repaint counts against the status slot, not just one that
     // literally carries the status line. The status only ever means "still
     // working", and a fresh progress frame proves that better — without this,
@@ -2742,7 +2749,7 @@ export function createBotWsReplyHandle(params: {
         console.warn(
           `[wecom-preview] terminal-update-stopped account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${previewStreamId} error=${formatFallbackError(error)}`,
         );
-        streamUpdateUnreliable = true;
+        retireBubbleForDeadWindow(true);
         clearPendingPreview();
         stopPreviewFreezeTimeout();
         stopPreviewStatusInterval();
@@ -2817,6 +2824,7 @@ export function createBotWsReplyHandle(params: {
       text: previewText,
       bodySourceText: options?.bodySourceText,
       showsVisibleBody: options?.showsVisibleBody,
+      processLogShown: options?.processLogShown,
       deadline: pendingPreview?.deadline ?? Date.now() + WECOM_PENDING_ACK_GRACE_MS,
       retryCount: pendingPreview?.retryCount ?? 0,
     };
@@ -2857,7 +2865,7 @@ export function createBotWsReplyHandle(params: {
         `[wecom-preview] update-delayed-expired account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
       );
       clearPendingPreview();
-      streamUpdateUnreliable = true;
+      retireBubbleForDeadWindow(false);
       stopPreviewFreezeTimeout();
       stopPreviewStatusInterval();
       maybeSendPreviewExpiredNotice(true);
@@ -2879,6 +2887,7 @@ export function createBotWsReplyHandle(params: {
       const delivered = await sendPreviewUpdate(preview.text, Date.now(), {
         bodySourceText: preview.bodySourceText,
         showsVisibleBody: preview.showsVisibleBody,
+        processLogShown: preview.processLogShown,
         fromPendingSlot: true,
       });
       if (
@@ -3039,6 +3048,18 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     const now = Date.now();
+    // Reasoning arrives as cumulative snapshots — tens per second on a long
+    // thinking block — and all but one in each throttle window is discarded.
+    // Ask the clock BEFORE rendering a frame nobody will send: composing it
+    // means normalizing and budgeting the whole block, on the same thread the
+    // stream's ACKs are waiting on.
+    if (
+      !params?.force &&
+      lastPreviewText &&
+      now - lastPreviewUpdateAt < THINKING_PREVIEW_MIN_UPDATE_MS
+    ) {
+      return;
+    }
     const preview = renderPreviewFrame(accumulatedText, now);
     if (!params?.force && !shouldSendThinkingPreview(preview.text, now)) {
       return;
@@ -3114,7 +3135,11 @@ export function createBotWsReplyHandle(params: {
   // A successful initial placeholder is enough to acknowledge an ordinary
   // turn. The next routine update is scheduled directly at the long-task gate;
   // only a failed placeholder uses the short retry delay.
-  const longTaskStatusGateAt = (): number => handleStartedAt + LONG_TASK_STATUS_AFTER_MS;
+  const longTaskStatusGateAt = (): number =>
+    Math.min(
+      handleStartedAt + LONG_TASK_STATUS_AFTER_MS,
+      longTaskStatusGateOverrideAt ?? Number.POSITIVE_INFINITY,
+    );
 
   /** Next grid slot. Snapping to the grid (rather than to "last paint + one
    *  interval") stops a late paint from dragging every later slot with it. */
@@ -3132,6 +3157,37 @@ export function createBotWsReplyHandle(params: {
 
   const markLongTaskStatusPainted = (now = Date.now()): void => {
     longTaskStatusPaintedAt = now;
+  };
+
+  /**
+   * The bubble can no longer be repainted, so the push lane takes over now
+   * rather than at the 8-minute mark — the gap between the ~6-minute stream
+   * window and that mark was pure silence for the user.
+   *
+   * `bubbleIsPermanent` means WeCom REFUSED the frame (846605/846608): nothing
+   * can overwrite that bubble afterwards, not even the final, so the steps it
+   * confirmed are already a permanent chat message and the push lane must not
+   * repeat them. A merely untrusted ACK ledger proves no such thing.
+   */
+  const retireBubbleForDeadWindow = (bubbleIsPermanent: boolean): void => {
+    streamUpdateUnreliable = true;
+    if (!bubbleIsPermanent) {
+      // An untrusted ACK ledger is not a closed window: the turn may still be
+      // seconds old, and the 8-minute gate is what keeps short turns quiet.
+      return;
+    }
+    // WeCom refusing the frame means the window is spent, which by itself says
+    // the turn has been streaming for minutes — but the floor keeps a freak
+    // early refusal from turning a young turn into a push conversation.
+    longTaskStatusGateOverrideAt ??= Math.max(
+      Date.now(),
+      handleStartedAt + BLOCK_PREVIEW_MAX_MS,
+    );
+    advanceProcessLogBookmark(
+      processLogDurable,
+      processLogBubble.count,
+      processLogBubble.lastText,
+    );
   };
 
   /** Claim the slot before sending, and hand it back only when the send is
@@ -3326,6 +3382,9 @@ export function createBotWsReplyHandle(params: {
           accumulatedText ? PROCESS_LOG_TAIL_WITH_BODY_MAX_CHARS : thinkingLimits.maxChars,
           accumulatedText ? PROCESS_LOG_TAIL_WITH_BODY_MAX_CHARS * 3 : thinkingLimits.maxBytes,
         );
+        // Captured at compose time: once this frame is confirmed, these are the
+        // steps the bubble holds, and a dead window turns them permanent.
+        const shownLogRange = lastProcessLogViewRange;
         const progress = composePreviewSuffixWithinLimits({
           prefix: accumulatedText,
           suffix: transientView,
@@ -3343,6 +3402,13 @@ export function createBotWsReplyHandle(params: {
         await sendPreviewUpdate(progressPreviewText, Date.now(), {
           bodySourceText: progress.visiblePrefix,
           showsVisibleBody: Boolean(progress.visiblePrefix),
+          // Only claim the range if the whole view survived composition: the
+          // wire composer trims an oversized suffix from its tail, and crediting
+          // steps that never reached the frame would drop them from the record.
+          processLogShown:
+            progress.visibleSuffix.trimEnd() === transientView.trimEnd()
+              ? shownLogRange
+              : undefined,
         });
         return;
       }
@@ -3658,9 +3724,6 @@ export function createBotWsReplyHandle(params: {
         throw error;
       }
       params.onDeliver?.();
-      if (info.kind === "final") {
-        maybeFlushProcessRecordPush();
-      }
     },
     fail: async (error: unknown) => {
       if (runtimeRetired || (!streamSettled && !ensureRuntimeCleanup())) {
@@ -3716,8 +3779,6 @@ export function createBotWsReplyHandle(params: {
             `[wecom-reply] fail-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(pushError)}`,
           );
         }
-        // A failed run is exactly when the record matters most.
-        maybeFlushProcessRecordPush();
       };
 
       if (isTerminalReplyError(error)) {
@@ -3783,7 +3844,6 @@ export function createBotWsReplyHandle(params: {
         params.onFail?.(sendError);
         return;
       }
-      maybeFlushProcessRecordPush();
       params.onFail?.(error);
     },
     markExternalActivity: () => {

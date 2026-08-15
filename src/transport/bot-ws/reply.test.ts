@@ -520,10 +520,15 @@ describe("createBotWsReplyHandle", () => {
     );
     await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
-    // Already delivered above, so the repeat carries the status only.
+    // Already delivered above, so the repeat carries the status only — and a
+    // status with nothing new to say waits out the quiet cadence.
     expect(String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content)).toBe(
-      "【长任务处理中，请勿打断，已用时9m00s】",
+      "【长任务处理中，请勿打断，已用时13m00s】",
     );
   });
 
@@ -878,15 +883,18 @@ describe("createBotWsReplyHandle", () => {
 
     const progressText = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
     const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
-    expect(progressText).toContain("<think>先内部alert(1)结束</think>");
+    // Reasoning now goes through the body's own normalizer, so a script block
+    // loses its payload too instead of only its tags.
+    expect(progressText).toContain("<think>先内部结束</think>");
     expect(progressText).not.toContain("<script>");
+    expect(progressText).not.toContain("alert(1)");
     expect(progressText.match(/<think>/g)).toHaveLength(1);
     expect(progressText.match(/<\/think>/g)).toHaveLength(1);
     expect(finalText).toBe("最终正文");
   });
 
   it.each(["分析完成<--", "分析完成<!--"])(
-    "strips a dangling comment marker from thinking content: %s",
+    "neutralises a dangling comment marker in thinking content: %s",
     async (thinkingText) => {
       const handle = createBotWsReplyHandle({
         client: mockClient,
@@ -902,11 +910,76 @@ describe("createBotWsReplyHandle", () => {
       await handle.deliver({ text: thinkingText, isReasoning: true }, { kind: "block" });
 
       const progressText = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
-      expect(progressText).toContain("<think>分析完成</think>");
+      // The model's own words stay; what must not survive is anything the
+      // client could read as an opening tag and use to eat `</think>`.
+      expect(progressText).toContain("分析完成");
+      expect(progressText).toContain("</think>");
       expect(progressText).not.toContain("<--");
       expect(progressText).not.toContain("<!--");
+      const inner = progressText.replace(/^[\s\S]*?<think>/, "").replace(/<\/think>[\s\S]*$/, "");
+      expect(inner).not.toContain("<");
     },
   );
+
+  it("keeps the frame inside its budget when escaping expands the reasoning", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-expansion" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    // Every character escapes to four, the worst expansion this path can hit.
+    await handle.deliver({ text: "<".repeat(6_000), isReasoning: true }, { kind: "block" });
+    await handle.deliver({ text: "正文内容。".repeat(400), isReasoning: false }, { kind: "block" });
+
+    for (const call of mockClient.replyStream.mock.calls) {
+      const content = String(call[2] ?? "");
+      expect(content.length).toBeLessThanOrEqual(3_500);
+      expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(12_000);
+    }
+    const frame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(frame).toContain("&lt;");
+    expect(frame).toContain("</think>");
+  });
+
+  // 现网反馈：「思考块内容过长时消息回复失败——气泡里只有思考块，没有答案」。
+  // 思考块曾是唯一没走正文归一化的通道：裸 `<` 让客户端把 `</think>` 当成标签
+  // 内容吃掉，块不闭合，后面的答案跟着消失。长思考只是提高了命中裸 `<`／被截断
+  // 代码围栏的概率，不是尺寸越界（帧始终在 3500 字符 / 12000 字节内）。
+  it.each([
+    ["行内比较符", "先判断 if (retries < maxRetries) 再决定是否重试。"],
+    ["泛型签名", "返回值是 Map<string, item> 这种形状。"],
+    ["被截断的代码围栏", "先看实现：\n```ts\nconst budget = limit - prefix.length;"],
+    ["跨行标签", "配置片段：\n<config\n  timeout=900>\n继续分析。"],
+  ])("keeps the answer visible when reasoning contains %s", async (_name, thinkingText) => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-swallow" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: thinkingText, isReasoning: true }, { kind: "block" });
+    await handle.deliver({ text: "这是最终答案。", isReasoning: false }, { kind: "final" });
+
+    const progressText = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
+    const inner = progressText.replace(/^[\s\S]*?<think>/, "").replace(/<\/think>[\s\S]*$/, "");
+    // Nothing inside the block may open a tag or a fence that outlives it.
+    expect(inner).not.toContain("<");
+    expect((inner.match(/```/g) ?? []).length % 2).toBe(0);
+    expect(progressText.match(/<think>/g)).toHaveLength(1);
+    expect(progressText.match(/<\/think>/g)).toHaveLength(1);
+    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toContain("这是最终答案。");
+  });
 
   it("keeps body text that was truncated by a large thinking preview", async () => {
     const expiredError = {
@@ -2688,17 +2761,25 @@ describe("createBotWsReplyHandle", () => {
     );
     expect(noticePushes).toHaveLength(1);
 
-    // The status keeps advancing every 60 seconds while the task is active.
+    // A status line with nothing new to say is just the clock: it repeats on
+    // the quiet cadence instead of once a minute.
     await vi.advanceTimersByTimeAsync(180_000);
     await flushPromises();
     expect(
       mockClient.sendMessage.mock.calls.filter((call) =>
         String((call[1] as any).markdown.content).includes("【长任务处理中，请勿打断，已用时"),
       ),
-    ).toHaveLength(4);
+    ).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    await flushPromises();
+    expect(
+      mockClient.sendMessage.mock.calls.filter((call) =>
+        String((call[1] as any).markdown.content).includes("【长任务处理中，请勿打断，已用时"),
+      ),
+    ).toHaveLength(2);
   });
 
-  it("repeats the expired-stream background status every 60 seconds until the final arrives", async () => {
+  it("repeats the expired-stream background status on the quiet cadence until the final arrives", async () => {
     const expiredError = {
       headers: { req_id: "req-recurring-background-status" },
       errcode: 846608,
@@ -2733,18 +2814,22 @@ describe("createBotWsReplyHandle", () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
+    expect(backgroundPushes()).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    await flushPromises();
     expect(backgroundPushes()).toHaveLength(2);
     expect(String((backgroundPushes()[1]?.[1] as any).markdown.content)).toBe(
-      "【长任务处理中，请勿打断，已用时9m00s】",
+      "【长任务处理中，请勿打断，已用时13m00s】",
     );
 
     await handle.deliver({ text: "最终结果", isReasoning: false }, { kind: "final" });
-    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
     await flushPromises();
     expect(backgroundPushes()).toHaveLength(2);
   });
 
-  it("retries the recurring background status 60 seconds after a push failure", async () => {
+  it("retries the recurring background status on the next quiet slot after a push failure", async () => {
     const expiredError = {
       headers: { req_id: "req-recurring-status-retry" },
       errcode: 846608,
@@ -2774,11 +2859,11 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
     expect(String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content)).toBe(
-      "【长任务处理中，请勿打断，已用时9m00s】",
+      "【长任务处理中，请勿打断，已用时13m00s】",
     );
     expect(onFail).not.toHaveBeenCalled();
   });
@@ -2820,7 +2905,7 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
     // Nothing piles onto the message that just reached the user, and the
     // in-flight push must not arm a second timer on top of the deferred one.
-    await vi.advanceTimersByTimeAsync(59_999);
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
 
@@ -2829,7 +2914,7 @@ describe("createBotWsReplyHandle", () => {
     await vi.advanceTimersByTimeAsync(1);
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(3);
   });

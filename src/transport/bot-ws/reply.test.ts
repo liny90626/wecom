@@ -789,7 +789,12 @@ describe("createBotWsReplyHandle", () => {
     expect(finalText).not.toContain("先分析需求");
   });
 
-  it("does not split an emoji at the thinking character boundary", async () => {
+  // The block keeps the newest slice, so a code point can land on either cut.
+  it.each([
+    ["尾部边界", `${"a".repeat(2_999)}😀`],
+    ["头部边界", `😀${"a".repeat(3_200)}`],
+    ["两端都是", `😀${"a".repeat(3_200)}😀`],
+  ])("does not split an emoji at the thinking boundary: %s", async (_name, reasoning) => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -801,14 +806,39 @@ describe("createBotWsReplyHandle", () => {
       autoSendPlaceholder: false,
     });
 
+    await handle.deliver({ text: reasoning, isReasoning: true }, { kind: "block" });
+
+    const frame = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
+    const content = frame.replace(/^[\s\S]*?<think>/, "").replace(/<\/think>[\s\S]*$/, "");
+    expect(content.length).toBeGreaterThan(0);
+    // No half of a surrogate pair may survive the cut, at either end.
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(content)).toBe(false);
+    expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(content)).toBe(false);
+    expect(content.length).toBeLessThanOrEqual(3_000);
+  });
+
+  it("keeps the newest reasoning when the block is capped", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-tail-window" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
     await handle.deliver(
-      { text: `${"a".repeat(2_999)}😀`, isReasoning: true },
+      { text: `开头很久以前的推理${"填充".repeat(3_000)}最新的推理结论`, isReasoning: true },
       { kind: "block" },
     );
 
-    expect(String(mockClient.replyStream.mock.calls[0]?.[2] ?? "")).toBe(
-      `<think>${"a".repeat(2_999)}</think>\n`,
-    );
+    const frame = String(mockClient.replyStream.mock.calls[0]?.[2] ?? "");
+    expect(frame).toContain("最新的推理结论");
+    expect(frame).not.toContain("开头很久以前的推理");
+    // The user is told why the block starts mid-thought.
+    expect(frame).toContain("较早的思考已省略");
   });
 
   it("keeps reasoning on an error final within the final stream wire budget", async () => {
@@ -921,6 +951,43 @@ describe("createBotWsReplyHandle", () => {
     },
   );
 
+  // 现网反馈：「思考块一直输出到一定长度，就再也收不到消息了」。思考块按**头部**
+  // 截断，一旦累计推理超过上限，渲染结果每一帧完全相同，等值判定直接把这条通道
+  // 静音——用户看到的就是气泡停在某个长度不动了。
+  it("keeps the thinking preview moving after the block reaches its cap", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-cap-freeze" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    // OpenClaw 的 thinking 是**累计快照**，每次都带上此前的全部内容。
+    let reasoning = "";
+    const marks: string[] = [];
+    for (let i = 1; i <= 6; i += 1) {
+      const mark = `【第${i}段思考】`;
+      marks.push(mark);
+      reasoning += `${mark}${"推理正文".repeat(400)}`;
+      await handle.deliver({ text: reasoning, isReasoning: true }, { kind: "block" });
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flushPromises();
+    }
+
+    const frames = mockClient.replyStream.mock.calls.map((call) => String(call[2] ?? ""));
+    expect(frames.length).toBeGreaterThanOrEqual(6);
+    // 每一帧都在往前走，没有一帧和上一帧相同（相同就意味着通道会静音）。
+    for (let i = 1; i < frames.length; i += 1) {
+      expect(frames[i]).not.toBe(frames[i - 1]);
+    }
+    // 最新的思考必须可见——用户要的是「现在在想什么」，不是开头三千字。
+    expect(frames.at(-1)).toContain(marks.at(-1));
+  });
+
   it("keeps the frame inside its budget when escaping expands the reasoning", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
@@ -945,6 +1012,115 @@ describe("createBotWsReplyHandle", () => {
     const frame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(frame).toContain("&lt;");
     expect(frame).toContain("</think>");
+  });
+
+  // 思考块与正文共用同一帧预算（3500 字符 / 12000 字节）。正文一旦在场，思考块
+  // 必须让位，否则 3000 字符的思考会把答案预览压到 484 字符。
+  it("gives the answer the bubble when a long thinking block and a long body compete", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-vs-body" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    let reasoning = "";
+    let body = "";
+    const bodyMarks: string[] = [];
+    for (let i = 1; i <= 5; i += 1) {
+      reasoning += `${"推理正文".repeat(400)}【思考${i}】`;
+      await handle.deliver({ text: reasoning, isReasoning: true }, { kind: "block" });
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flushPromises();
+      const mark = `【正文${i}】`;
+      bodyMarks.push(mark);
+      body += `${"答案内容".repeat(125)}${mark}`;
+      await handle.deliver({ text: body }, { kind: "block" });
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flushPromises();
+    }
+
+    const frames = mockClient.replyStream.mock.calls.map((call) => String(call[2] ?? ""));
+    // Ten deliveries, all under the 3 000-char preview freeze: every one paints.
+    expect(frames.length).toBeGreaterThanOrEqual(8);
+    for (const frame of frames) {
+      expect(frame.length).toBeLessThanOrEqual(3_500);
+      expect(Buffer.byteLength(frame, "utf8")).toBeLessThanOrEqual(12_000);
+      const think = frame.match(/<think>([\s\S]*?)<\/think>/)?.[1] ?? "";
+      const bodyPart = frame.replace(/^[\s\S]*?<\/think>\n/, "");
+      // With an answer on screen the block is held to its reduced share; before
+      // there is one, the reasoning may use the whole bubble.
+      expect(think.length).toBeLessThanOrEqual(bodyPart ? 800 : 3_000);
+    }
+
+    const lastFrame = frames.at(-1) ?? "";
+    const visibleBody = lastFrame.replace(/^[\s\S]*?<\/think>\n/, "");
+    // The answer keeps the rest of the frame instead of the old 484-char sliver.
+    expect(visibleBody.length).toBeGreaterThan(1_500);
+    expect(lastFrame).toContain(bodyMarks.at(-1));
+    // The block tracks the newest reasoning rather than freezing on its opening.
+    expect(lastFrame).toContain("【思考5】");
+    // Both halves keep moving; a frozen frame is what silenced the lane before.
+    for (let i = 1; i < frames.length; i += 1) {
+      expect(frames[i]).not.toBe(frames[i - 1]);
+    }
+  });
+
+  // B2：正文超过气泡阈值必须分段发送，且思考块不得改变正文的分段。
+  it("segments a long final the same way whether or not a long thinking block rode along", async () => {
+    const tail = "TAIL-B2-THINKING";
+    const finalText = `${"这是一段很长的中文答复，用来验证分段发送与思考块互不影响。".repeat(120)}${tail}`;
+
+    const runTurn = async (reqId: string, withReasoning: boolean) => {
+      mockClient.replyStream.mockClear();
+      mockClient.sendMessage.mockClear();
+      const handle = createBotWsReplyHandle({
+        client: mockClient,
+        frame: {
+          headers: { req_id: reqId },
+          body: { from: { userid: "alice" }, chattype: "single" },
+        } as unknown as ReplyHandleParams["frame"],
+        accountId: "default",
+        inboundKind: "text",
+        autoSendPlaceholder: false,
+      });
+      if (withReasoning) {
+        await handle.deliver(
+          { text: `【长思考】${"推理正文".repeat(1_200)}`, isReasoning: true },
+          { kind: "block" },
+        );
+        await vi.advanceTimersByTimeAsync(3_500);
+        await flushPromises();
+      }
+      const deliverPromise = handle.deliver({ text: finalText }, { kind: "final" });
+      await drainChunkTimers();
+      await deliverPromise;
+      const streamFrames = mockClient.replyStream.mock.calls.map((call) => String(call[2] ?? ""));
+      const pushes = mockClient.sendMessage.mock.calls.map((call) =>
+        String((call[1] as any).markdown.content),
+      );
+      return { streamFrames, pushes };
+    };
+
+    const withThinking = await runTurn("req-b2-with-thinking", true);
+    const withoutThinking = await runTurn("req-b2-plain", false);
+
+    const finalFrame = withThinking.streamFrames.at(-1) ?? "";
+    // 第一段走被动流，其余分段主动推送——阈值以上必须分段，不能只发一段。
+    expect(finalFrame).toContain("【第1/");
+    expect(finalFrame).not.toContain(tail);
+    expect(withThinking.pushes.length).toBeGreaterThan(0);
+    expect(withThinking.pushes.join("\n")).toContain(tail);
+    expect(withThinking.pushes.join("\n")).toMatch(/【第\d+\/\d+段】/);
+    // 成功 final 只留答案，思考块不占它的分段预算（禁改 v147）。
+    expect(finalFrame).not.toContain("<think>");
+    const segmentsOf = (text: string) => text.match(/【第\d+\/(\d+)段】/)?.[1];
+    expect(segmentsOf(finalFrame)).toBe(segmentsOf(withoutThinking.streamFrames.at(-1) ?? ""));
+    expect(withThinking.pushes.length).toBe(withoutThinking.pushes.length);
   });
 
   // 现网反馈：「思考块内容过长时消息回复失败——气泡里只有思考块，没有答案」。
@@ -1080,8 +1256,9 @@ describe("createBotWsReplyHandle", () => {
       autoSendPlaceholder: false,
     });
     const hiddenSentinel = "FAST-HIDDEN-SENTINEL";
-    const bodyText = `${"A".repeat(460)}${hiddenSentinel}${"B".repeat(200)}`;
+    const bodyText = `${"A".repeat(2_000)}${hiddenSentinel}${"B".repeat(600)}`;
     const fastText = "💨Fast: auto-off(62s>=60s)";
+    const stepText = `正在核对第一批配置项与运行记录，${"逐条比对默认值。".repeat(100)}`;
 
     await handle.deliver({ text: "r".repeat(3_000), isReasoning: true }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(3_000);
@@ -1089,6 +1266,19 @@ describe("createBotWsReplyHandle", () => {
     const bodyPreview = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(bodyPreview).toContain(hiddenSentinel);
 
+    // The transient lane owns the frame: log tail plus the Fast banner push the
+    // body's tail off this revision, and the bookmark has to follow it back.
+    await handle.deliver(
+      {
+        text: stepText,
+        channelData: {
+          openclawProgressKind: "preamble",
+          openclawProgressSteps: [stepText],
+          openclawProgressDroppedSteps: 0,
+        },
+      },
+      { kind: "block" },
+    );
     await handle.deliver(
       { text: fastText, channelData: { openclawProgressKind: "fast-mode-auto" } },
       { kind: "block" },

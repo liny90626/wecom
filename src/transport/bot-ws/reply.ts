@@ -35,6 +35,16 @@ const WECOM_PENDING_ACK_GRACE_MS = 5_500;
 const WECOM_PENDING_ACK_POLL_MS = 100;
 const THINKING_BLOCK_MAX_CHARS = 3_000;
 const THINKING_BLOCK_MAX_BYTES = 8_000;
+/**
+ * The thinking block and the answer share ONE frame budget, so an ample block
+ * cuts the visible answer down to a sliver — 3 000 chars of reasoning used to
+ * leave the body 484. Once there is an answer on screen the block yields to it,
+ * the same rule the process log follows.
+ */
+const THINKING_BLOCK_WITH_BODY_MAX_CHARS = 800;
+const THINKING_BLOCK_WITH_BODY_MAX_BYTES = 2_400;
+/** Shown when the block holds only the newest slice of a long reasoning run. */
+const THINKING_ELISION_MARKER = "…（较早的思考已省略）\n";
 /** `<think></think>` plus its trailing newline costs around the content. */
 const THINK_BLOCK_WRAPPER_CHARS = 16;
 const THINK_BLOCK_WRAPPER_BYTES = 16;
@@ -902,15 +912,15 @@ function escapeThinkBlockText(text: string): string {
   return toWeComMarkdownV2(text, null).replace(/</g, "&lt;").trim();
 }
 
-/** Truncation happens after escaping, so the tail can hold half an entity or
- *  an opened code fence — and an unclosed fence swallows the answer just like
- *  an unclosed tag did. */
+/** The block is cut on both ends, so the tail can hold half an entity and
+ *  either end half a code fence. Any ``` still standing after normalization is
+ *  unpaired by construction — paired ones were converted away — and an unpaired
+ *  fence swallows the closing tag exactly like an unpaired tag did. */
 function stripDanglingThinkMarkup(text: string): string {
-  let out = text.replace(/&[a-zA-Z#0-9]{0,6}$/, "").trimEnd();
-  if ((out.match(/```/g)?.length ?? 0) % 2 === 1) {
-    out = out.slice(0, out.lastIndexOf("```")).trimEnd();
-  }
-  return out;
+  return text
+    .replace(/&[a-zA-Z#0-9]{0,6}$/, "")
+    .replaceAll("```", "")
+    .trim();
 }
 
 function trimToUtf8Bytes(value: string, maxBytes: number): string {
@@ -927,6 +937,37 @@ function trimToUtf8Bytes(value: string, maxBytes: number): string {
   return out;
 }
 
+function sliceUtf16SafeSuffix(value: string, maxCodeUnits: number): string {
+  if (value.length <= maxCodeUnits) {
+    return value;
+  }
+  let start = value.length - Math.max(0, maxCodeUnits);
+  const previous = value.charCodeAt(start - 1);
+  const first = value.charCodeAt(start);
+  if (previous >= 0xd800 && previous <= 0xdbff && first >= 0xdc00 && first <= 0xdfff) {
+    start += 1;
+  }
+  return value.slice(start);
+}
+
+function trimToUtf8BytesFromEnd(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) {
+    return value;
+  }
+  const chars = [...value];
+  let bytes = 0;
+  let start = chars.length;
+  while (start > 0) {
+    const size = Buffer.byteLength(chars[start - 1]!, "utf8");
+    if (bytes + size > maxBytes) {
+      break;
+    }
+    bytes += size;
+    start -= 1;
+  }
+  return chars.slice(start).join("");
+}
+
 function sliceUtf16SafePrefix(value: string, maxCodeUnits: number): string {
   if (value.length <= maxCodeUnits) {
     return value;
@@ -940,23 +981,46 @@ function sliceUtf16SafePrefix(value: string, maxCodeUnits: number): string {
   return value.slice(0, end);
 }
 
+/**
+ * Renders the NEWEST slice of the reasoning. A head-truncated block stops
+ * changing the moment the reasoning passes the cap, and an unchanged frame is
+ * dropped as a duplicate — which is how a long thinking block silenced the
+ * whole preview lane and left the bubble frozen at "a certain length". The tail
+ * is also the useful half: it is what the model is working through now.
+ *
+ * Normalizing only the window that can possibly fit keeps this O(budget) on a
+ * stream that grows without bound; the 4x window leaves the normalizer room to
+ * shrink the text and still fill the budget.
+ */
 function renderThinkContent(
   text: string,
   maxBytes = THINKING_BLOCK_MAX_BYTES,
   maxChars = THINKING_BLOCK_MAX_CHARS,
 ): string {
   const charBudget = Math.min(THINKING_BLOCK_MAX_CHARS, Math.max(0, maxChars));
-  // Only a bounded head of the reasoning can ever fit the budget, and this runs
-  // on every frame of a stream that grows without limit — normalizing the whole
-  // accumulated text would be work the wire throws away. The 4x window leaves
-  // room for the normalizer to shrink the text and still fill the budget.
-  const source = sliceUtf16SafePrefix(text || "progress", Math.max(charBudget * 4, 1_000));
-  return stripDanglingThinkMarkup(
-    trimToUtf8Bytes(
-      sliceUtf16SafePrefix(escapeThinkBlockText(source), charBudget),
-      Math.min(THINKING_BLOCK_MAX_BYTES, maxBytes),
-    ).trim(),
+  const byteBudget = Math.min(THINKING_BLOCK_MAX_BYTES, maxBytes);
+  const source = text || "progress";
+  const window = sliceUtf16SafeSuffix(source, Math.max(charBudget * 4, 1_000));
+  const normalized = escapeThinkBlockText(window);
+  const fitTail = (chars: number, bytes: number): string =>
+    stripDanglingThinkMarkup(
+      trimToUtf8BytesFromEnd(
+        sliceUtf16SafeSuffix(normalized, Math.max(0, chars)),
+        Math.max(0, bytes),
+      ),
+    );
+  if (
+    window.length >= source.length &&
+    normalized.length <= charBudget &&
+    Buffer.byteLength(normalized, "utf8") <= byteBudget
+  ) {
+    return fitTail(charBudget, byteBudget);
+  }
+  const content = fitTail(
+    charBudget - THINKING_ELISION_MARKER.length,
+    byteBudget - Buffer.byteLength(THINKING_ELISION_MARKER, "utf8"),
   );
+  return content ? `${THINKING_ELISION_MARKER}${content}` : "";
 }
 
 function renderInlineThinkBlock(
@@ -971,16 +1035,27 @@ function renderInlineThinkBlock(
   return escaped ? `<think>${escaped}</think>` : "";
 }
 
-function resolveThinkingAwareBodyLimits(thinkingText: string): {
-  maxChars: number;
-  maxBytes: number;
-} {
-  const inlineBlock = renderInlineThinkBlock(thinkingText);
-  if (!inlineBlock) {
-    return { maxChars: WECOM_STREAM_MAX_CHARS, maxBytes: WECOM_STREAM_MAX_BYTES };
+/**
+ * How one preview frame is divided between the reasoning block and the answer.
+ * Both halves come from the same call on purpose: when the rendered block and
+ * the body budget were computed separately they could disagree, and the frame
+ * that went out was the sum of two different assumptions.
+ */
+function resolveThinkingFrameLayout(
+  thinkingText: string,
+  hasBody: boolean,
+): { block: string; maxChars: number; maxBytes: number } {
+  const block = renderInlineThinkBlock(
+    thinkingText,
+    hasBody ? THINKING_BLOCK_WITH_BODY_MAX_BYTES : THINKING_BLOCK_MAX_BYTES,
+    hasBody ? THINKING_BLOCK_WITH_BODY_MAX_CHARS : THINKING_BLOCK_MAX_CHARS,
+  );
+  if (!block) {
+    return { block: "", maxChars: WECOM_STREAM_MAX_CHARS, maxBytes: WECOM_STREAM_MAX_BYTES };
   }
-  const prefix = `${inlineBlock}\n`;
+  const prefix = `${block}\n`;
   return {
+    block,
     maxChars: Math.max(100, WECOM_STREAM_MAX_CHARS - prefix.length),
     maxBytes: Math.max(512, WECOM_STREAM_MAX_BYTES - Buffer.byteLength(prefix, "utf8")),
   };
@@ -1288,8 +1363,9 @@ export function createBotWsReplyHandle(params: {
   };
 
   const renderLongTaskHeartbeat = (elapsedMs: number): string => {
-    const thinkingBlock = renderInlineThinkBlock(accumulatedThinkingText);
-    const bodyLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
+    const layout = resolveThinkingFrameLayout(accumulatedThinkingText, Boolean(accumulatedText));
+    const thinkingBlock = layout.block;
+    const bodyLimits = { maxChars: layout.maxChars, maxBytes: layout.maxBytes };
     const statusText = formatElapsedStatus(elapsedMs);
     // The status line is this frame's whole purpose (禁改 25) — reserve its
     // budget up front so an ample log can never squeeze it off the wire.
@@ -2305,16 +2381,14 @@ export function createBotWsReplyHandle(params: {
     }
   };
 
-  const prependThinkingToPreviewWire = (bodyText: string): string => {
-    const thinkingBlock = renderInlineThinkBlock(accumulatedThinkingText);
-    return thinkingBlock ? `${thinkingBlock}\n${bodyText}` : bodyText;
-  };
-
   const renderPreviewFrame = (
     sourceText: string,
     now = Date.now(),
   ): { text: string; bodySourceText?: string } => {
-    const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
+    const thinkingLimits = resolveThinkingFrameLayout(
+      accumulatedThinkingText,
+      Boolean(sourceText),
+    );
     const elapsedMs = now - handleStartedAt;
     if (
       sourceText &&
@@ -2359,7 +2433,9 @@ export function createBotWsReplyHandle(params: {
     }
 
     return {
-      text: prependThinkingToPreviewWire(bodyPreview.text),
+      text: thinkingLimits.block
+        ? `${thinkingLimits.block}\n${bodyPreview.text}`
+        : bodyPreview.text,
       bodySourceText: sourceText ? bodyPreview.sourceText : undefined,
     };
   };
@@ -3377,7 +3453,10 @@ export function createBotWsReplyHandle(params: {
         if (await sendForcedTransientProgress()) {
           return;
         }
-        const thinkingLimits = resolveThinkingAwareBodyLimits(accumulatedThinkingText);
+        const thinkingLimits = resolveThinkingFrameLayout(
+          accumulatedThinkingText,
+          Boolean(accumulatedText),
+        );
         const transientView = composeTransientPreviewSuffix(
           accumulatedText ? PROCESS_LOG_TAIL_WITH_BODY_MAX_CHARS : thinkingLimits.maxChars,
           accumulatedText ? PROCESS_LOG_TAIL_WITH_BODY_MAX_CHARS * 3 : thinkingLimits.maxBytes,
@@ -3392,7 +3471,9 @@ export function createBotWsReplyHandle(params: {
           maxChars: thinkingLimits.maxChars,
           maxBytes: thinkingLimits.maxBytes,
         });
-        const progressPreviewText = prependThinkingToPreviewWire(progress.text);
+        const progressPreviewText = thinkingLimits.block
+          ? `${thinkingLimits.block}\n${progress.text}`
+          : progress.text;
         if (!progressPreviewText || progressPreviewText === lastPreviewText) {
           return;
         }

@@ -22,14 +22,29 @@ const PLACEHOLDER_RETRY_MS = 3000;
 const LONG_TASK_STATUS_AFTER_MS = 8 * 60_000;
 const B2_PEER_FINAL_DEDUP_TTL_MS = 120_000;
 const WECOM_STREAM_MAX_CHARS = 3_500;
-const WECOM_STREAM_FINAL_MAX_CHARS = 2_000;
-const WECOM_STREAM_MAX_BYTES = 12_000;
+/**
+ * WeCom documents a 20 480-byte ceiling for a stream frame's `content`. The old
+ * 2 000-char / 12 000-byte pair predates that number and was chosen blind ("避免
+ * 盲目放宽限制引入客户端截断"), leaving half the allowance unused and splitting a
+ * 6 000-char answer into four messages. Both now sit near 75 % of the documented
+ * ceiling: 5 000 Chinese chars is 15 000 bytes, just inside the byte cap.
+ */
+const WECOM_STREAM_FINAL_MAX_CHARS = 5_000;
+const WECOM_STREAM_MAX_BYTES = 15_360;
 const BLOCK_PREVIEW_MAX_MS = 300_000;
 const BLOCK_PREVIEW_MAX_CHARS = 3_000;
 const BLOCK_PREVIEW_MIN_UPDATE_MS = 1_500;
 /** How often the long-task status line may repaint, on ANY lane. */
 const LONG_TASK_STATUS_INTERVAL_MS = 60_000;
 const THINKING_PREVIEW_MIN_UPDATE_MS = 3_000;
+/**
+ * How long the bubble may sit unchanged once the run has moved into tool work.
+ * Reasoning ends, tools run for minutes, and nothing repaints: the heartbeat is
+ * scheduled straight to the 8-minute gate, so the turn LOOKS hung well before
+ * it is a long task. This is the liveness clock; the long-task copy still waits
+ * for its absolute threshold.
+ */
+const PREVIEW_SILENCE_MAX_MS = 90_000;
 const WECOM_REPLY_SEND_TIMEOUT_MS = 8_000;
 const WECOM_PENDING_ACK_GRACE_MS = 5_500;
 const WECOM_PENDING_ACK_POLL_MS = 100;
@@ -53,6 +68,9 @@ const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const STRUCTURED_TAIL_MIN_DUPLICATE_LINES = 4;
 const FINAL_COMPLETION_MARKER = "（回复完毕）";
 const LONG_TASK_STATUS_PREFIX = "【长任务处理中，请勿打断，已用时";
+/** Before the long-task threshold "still working" must not ask the user to
+ *  change their behaviour — a 90-second turn is not a long task. */
+const RUN_ALIVE_STATUS_PREFIX = "【处理中，已用时";
 const PREVIEW_WATCHDOG_MAX_MS = 60 * 60 * 1000;
 const PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS = LONG_TASK_STATUS_AFTER_MS;
 /** With answer text on screen the log tail yields the bubble to the answer. */
@@ -749,8 +767,9 @@ function formatElapsedDuration(elapsedMs: number): string {
   return `${elapsedMinutes}m${String(remainingSeconds).padStart(2, "0")}s`;
 }
 
-function formatElapsedStatus(elapsedMs: number): string {
-  return `${LONG_TASK_STATUS_PREFIX}${formatElapsedDuration(elapsedMs)}】`;
+function formatElapsedStatus(elapsedMs: number, longTask = true): string {
+  const prefix = longTask ? LONG_TASK_STATUS_PREFIX : RUN_ALIVE_STATUS_PREFIX;
+  return `${prefix}${formatElapsedDuration(elapsedMs)}】`;
 }
 
 function appendFinalCompletionMarker(text: string): string {
@@ -1366,7 +1385,10 @@ export function createBotWsReplyHandle(params: {
     const layout = resolveThinkingFrameLayout(accumulatedThinkingText, Boolean(accumulatedText));
     const thinkingBlock = layout.block;
     const bodyLimits = { maxChars: layout.maxChars, maxBytes: layout.maxBytes };
-    const statusText = formatElapsedStatus(elapsedMs);
+    const statusText = formatElapsedStatus(
+      elapsedMs,
+      elapsedMs >= LONG_TASK_STATUS_AFTER_MS,
+    );
     // The status line is this frame's whole purpose (禁改 25) — reserve its
     // budget up front so an ample log can never squeeze it off the wire.
     const statusReserveChars = statusText.length + 2;
@@ -1408,7 +1430,12 @@ export function createBotWsReplyHandle(params: {
     // Before the long-task gate, real process text owns the bubble. Once the
     // gate is reached, reasoning/preamble-only turns still need the same timed
     // status; body previews use their dedicated frozen-status lane.
-    if (lastPreviewText && (elapsedMs < LONG_TASK_STATUS_AFTER_MS || previewFrozen)) {
+    const bubbleIsStale = elapsedMs >= 0 && Date.now() >= bubbleSilenceDueAt();
+    if (
+      lastPreviewText &&
+      !bubbleIsStale &&
+      (elapsedMs < LONG_TASK_STATUS_AFTER_MS || previewFrozen)
+    ) {
       return false;
     }
     // Re-check the shared clock at paint time, not just at schedule time: the
@@ -1431,13 +1458,16 @@ export function createBotWsReplyHandle(params: {
     // A turn that produces nothing (all tool work, and OpenClaw's reasoning
     // stream is off by default) has no other feedback: repeating one static
     // line taught the user nothing, so show the clock instead.
+    // The static placeholder is only right for a bubble that has never shown
+    // anything. Repainting a stale one with it would wipe the reasoning and the
+    // step log off the screen, so that case renders the full frame plus clock.
     const showsLongTaskStatus = elapsedMs >= LONG_TASK_STATUS_AFTER_MS;
-    const heartbeatText = showsLongTaskStatus
-      ? renderLongTaskHeartbeat(elapsedMs)
-      : placeholderText;
-    const releaseLongTaskStatusSlot = showsLongTaskStatus
-      ? claimLongTaskStatusSlot()
-      : undefined;
+    const heartbeatText =
+      showsLongTaskStatus || bubbleIsStale
+        ? renderLongTaskHeartbeat(elapsedMs)
+        : placeholderText;
+    const releaseLongTaskStatusSlot =
+      showsLongTaskStatus || bubbleIsStale ? claimLongTaskStatusSlot() : undefined;
     withHandleSendTimeout(
       params.client.replyStream(params.frame, resolveStreamId(), heartbeatText, false),
       "stream placeholder",
@@ -1594,6 +1624,8 @@ export function createBotWsReplyHandle(params: {
   /** Set when the bubble stops being repaintable: from then on the push lane is
    *  the only channel, so the shared grid starts there instead of at 8 minutes. */
   let longTaskStatusGateOverrideAt: number | undefined;
+  /** Set once the run reports tool work (禁改 35: evidence only, never content). */
+  let toolActivityObserved = false;
   let previewExpiredNoticeInFlight = false;
   let previewExpiredNoticeCancelled = false;
   let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -3236,6 +3268,23 @@ export function createBotWsReplyHandle(params: {
   };
 
   /**
+   * When the bubble becomes stale enough to look hung. Only armed once the run
+   * has reported tool work: that is the shape this exists for (reasoning ends,
+   * tools run, nothing repaints). A turn that has shown nothing at all keeps the
+   * absolute long-task path untouched (禁改 25).
+   */
+  const bubbleSilenceDueAt = (): number => {
+    if (!toolActivityObserved || !lastPreviewText || previewFrozen) {
+      return Number.POSITIVE_INFINITY;
+    }
+    // Measured from the last time ANY lane put something on the bubble. A
+    // heartbeat repaint is not a confirmed preview, so counting only those
+    // would leave the deadline in the past and re-fire the timer on a zero
+    // delay — the busy loop 禁改 38 already cost us once.
+    return Math.max(lastPreviewUpdateAt, longTaskStatusPaintedAt) + PREVIEW_SILENCE_MAX_MS;
+  };
+
+  /**
    * The bubble can no longer be repainted, so the push lane takes over now
    * rather than at the 8-minute mark — the gap between the ~6-minute stream
    * window and that mark was pure silence for the user.
@@ -3302,7 +3351,9 @@ export function createBotWsReplyHandle(params: {
     }
     // One shared schedule, so an unrelated frame can neither delay the next
     // status nor let a second lane sneak one in early.
-    const delayMs = retryDelayMs ?? Math.max(0, nextLongTaskStatusDueAt() - Date.now());
+    const delayMs =
+      retryDelayMs ??
+      Math.max(0, Math.min(nextLongTaskStatusDueAt(), bubbleSilenceDueAt()) - Date.now());
     placeholderKeepalive = setTimeout(
       () => {
         placeholderKeepalive = undefined;
@@ -3926,6 +3977,19 @@ export function createBotWsReplyHandle(params: {
         return;
       }
       params.onFail?.(error);
+    },
+    markRunActivity: () => {
+      if (toolActivityObserved || streamSettled || isEvent || supersededByNewInbound) {
+        return;
+      }
+      // The bubble's next repaint may now be due much sooner than the 8-minute
+      // gate the pending timer was armed for, so re-arm from the clock.
+      toolActivityObserved = true;
+      if (placeholderKeepalive) {
+        clearTimeout(placeholderKeepalive);
+        placeholderKeepalive = undefined;
+      }
+      scheduleHeartbeat();
     },
     markExternalActivity: () => {
       notifyPeerActive();

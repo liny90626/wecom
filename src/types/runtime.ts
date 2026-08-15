@@ -106,6 +106,12 @@ export type ReplyHandle = {
   deliver: (payload: ReplyPayload, info: ReplyDeliveryInfo) => Promise<void>;
   fail?: (error: unknown) => Promise<void>;
   markExternalActivity?: () => void;
+  /**
+   * The run started tool work: proof it is alive and has stopped narrating, so
+   * the bubble is about to go stale. Carries no content of its own (禁改 35) —
+   * the transport only uses it to decide when its own clock may repaint.
+   */
+  markRunActivity?: () => void;
   /** Registers cleanup for the Bot WS runtime instance that owns this reply. */
   onTransportRetired?: (listener: () => void) => () => void;
   /** Releases transport-owner tracking after the OpenClaw dispatch has ended. */

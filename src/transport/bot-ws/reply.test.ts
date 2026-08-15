@@ -864,7 +864,7 @@ describe("createBotWsReplyHandle", () => {
     );
     expect(finalFrame).toContain("<think>");
     expect(finalFrame).toContain("E".repeat(1_500));
-    expect(finalFrame.length).toBeLessThanOrEqual(2_000);
+    expect(finalFrame.length).toBeLessThanOrEqual(5_000);
     expect(Buffer.byteLength(finalFrame, "utf8")).toBeLessThanOrEqual(12_000);
   });
 
@@ -1007,11 +1007,124 @@ describe("createBotWsReplyHandle", () => {
     for (const call of mockClient.replyStream.mock.calls) {
       const content = String(call[2] ?? "");
       expect(content.length).toBeLessThanOrEqual(3_500);
-      expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(12_000);
+      expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(15_360);
     }
     const frame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(frame).toContain("&lt;");
     expect(frame).toContain("</think>");
+  });
+
+  // 现网反馈的第二个静止场景：思考结束、工具跑很久。心跳原本被直接排到第 8
+  // 分钟，于是这段时间气泡在代码层面就是不动的，用户当它卡死。
+  it("repaints a bubble that went stale while the run is doing tool work", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-tool-phase-silence" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "先梳理一下已知条件", isReasoning: true }, { kind: "block" });
+    await flushPromises();
+    const afterThinking = mockClient.replyStream.mock.calls.length;
+    expect(afterThinking).toBeGreaterThan(0);
+
+    // 思考结束，工具开始跑：这一刻之后气泡不会再有自发变化。
+    handle.markRunActivity?.();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushPromises();
+    expect(mockClient.replyStream.mock.calls.length).toBe(afterThinking);
+
+    await vi.advanceTimersByTimeAsync(31_000);
+    await flushPromises();
+    const frames = mockClient.replyStream.mock.calls.map((call) => String(call[2] ?? ""));
+    // Exactly one repaint — a heartbeat that does not reset its own clock spins.
+    expect(frames.length).toBe(afterThinking + 1);
+    const stale = frames.at(-1) ?? "";
+    // 计时上屏，而且已有内容一个都没丢。
+    expect(stale).toContain("【处理中，已用时");
+    expect(stale).toContain("先梳理一下已知条件");
+    // 还没到长任务门槛，不能要求用户「请勿打断」。
+    expect(stale).not.toContain("请勿打断");
+    // 工具事件本身不得渲染成任何用户可见文字（禁改 35）。
+    expect(stale).not.toMatch(/Tool Call|Exec|🧰/);
+
+    // 之后按同一节奏继续，不空转也不加速。
+    await vi.advanceTimersByTimeAsync(90_000);
+    await flushPromises();
+    expect(mockClient.replyStream.mock.calls.length).toBe(afterThinking + 2);
+  });
+
+  it("leaves a turn without tool work on the absolute long-task path", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-no-tool-silence" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "正在整理答案", isReasoning: true }, { kind: "block" });
+    await flushPromises();
+    const afterThinking = mockClient.replyStream.mock.calls.length;
+
+    // 没有工具活动 ⇒ 沉默看门狗不上岗，回合仍按 8 分钟绝对门槛（v150 保底不变）。
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await flushPromises();
+    expect(mockClient.replyStream.mock.calls.length).toBe(afterThinking);
+
+    await vi.advanceTimersByTimeAsync(3 * 60_000 + 1_000);
+    await flushPromises();
+    const frames = mockClient.replyStream.mock.calls.map((call) => String(call[2] ?? ""));
+    expect(frames.length).toBeGreaterThan(afterThinking);
+    expect(frames.at(-1)).toContain("【长任务处理中，请勿打断，已用时");
+  });
+
+  it("lets real progress reset the staleness clock instead of stacking a status on it", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-tool-phase-progress" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "开始分析", isReasoning: true }, { kind: "block" });
+    await flushPromises();
+    handle.markRunActivity?.();
+
+    // 每 60 秒来一条真实自述：气泡一直在动，看门狗永远不该插话。
+    const steps: string[] = [];
+    for (let i = 1; i <= 4; i += 1) {
+      await vi.advanceTimersByTimeAsync(60_000);
+      steps.push(`第 ${i} 步已完成`);
+      await handle.deliver(
+        {
+          text: steps.join("\n"),
+          channelData: {
+            openclawProgressKind: "preamble",
+            openclawProgressSteps: [...steps],
+            openclawProgressDroppedSteps: 0,
+          },
+        },
+        { kind: "block" },
+      );
+      await flushPromises();
+    }
+
+    const frames = mockClient.replyStream.mock.calls.map((call) => String(call[2] ?? ""));
+    expect(frames.some((frame) => frame.includes("【处理中，已用时"))).toBe(false);
+    expect(frames.at(-1)).toContain("4）第 4 步已完成");
   });
 
   // 思考块与正文共用同一帧预算（3500 字符 / 12000 字节）。正文一旦在场，思考块
@@ -1049,7 +1162,7 @@ describe("createBotWsReplyHandle", () => {
     expect(frames.length).toBeGreaterThanOrEqual(8);
     for (const frame of frames) {
       expect(frame.length).toBeLessThanOrEqual(3_500);
-      expect(Buffer.byteLength(frame, "utf8")).toBeLessThanOrEqual(12_000);
+      expect(Buffer.byteLength(frame, "utf8")).toBeLessThanOrEqual(15_360);
       const think = frame.match(/<think>([\s\S]*?)<\/think>/)?.[1] ?? "";
       const bodyPart = frame.replace(/^[\s\S]*?<\/think>\n/, "");
       // With an answer on screen the block is held to its reduced share; before
@@ -1073,7 +1186,7 @@ describe("createBotWsReplyHandle", () => {
   // B2：正文超过气泡阈值必须分段发送，且思考块不得改变正文的分段。
   it("segments a long final the same way whether or not a long thinking block rode along", async () => {
     const tail = "TAIL-B2-THINKING";
-    const finalText = `${"这是一段很长的中文答复，用来验证分段发送与思考块互不影响。".repeat(120)}${tail}`;
+    const finalText = `${"这是一段很长的中文答复，用来验证分段发送与思考块互不影响。".repeat(320)}${tail}`;
 
     const runTurn = async (reqId: string, withReasoning: boolean) => {
       mockClient.replyStream.mockClear();
@@ -1193,7 +1306,7 @@ describe("createBotWsReplyHandle", () => {
     expect(visibleBodyChars).toBeGreaterThan(0);
     expect(visibleBodyChars).toBeLessThan(body.length);
     expect(preview.length).toBeLessThanOrEqual(3_500);
-    expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(12_000);
+    expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(15_360);
 
     const pushed = mockClient.sendMessage.mock.calls
       .map((call) => String((call[1] as any).markdown.content))
@@ -1231,7 +1344,7 @@ describe("createBotWsReplyHandle", () => {
     const fastPreview = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(fastPreview).toContain(fastText);
     expect(fastPreview.length).toBeLessThanOrEqual(3_500);
-    expect(Buffer.byteLength(fastPreview, "utf8")).toBeLessThanOrEqual(12_000);
+    expect(Buffer.byteLength(fastPreview, "utf8")).toBeLessThanOrEqual(15_360);
   });
 
   it("re-sends body text replaced by a Fast status before stream expiry", async () => {
@@ -1523,7 +1636,7 @@ describe("createBotWsReplyHandle", () => {
     const preview = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(preview).toContain("&lt;think&gt;");
     expect(preview.length).toBeLessThanOrEqual(3_500);
-    expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(12_000);
+    expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(15_360);
 
     const finalDelivery = handle.deliver({ text }, { kind: "final" });
     await drainChunkTimers();
@@ -1536,13 +1649,13 @@ describe("createBotWsReplyHandle", () => {
     );
     expect(finalFrames.length).toBeGreaterThan(0);
     for (const frame of finalFrames) {
-      expect(frame.length).toBeLessThanOrEqual(2_000);
-      expect(Buffer.byteLength(frame, "utf8")).toBeLessThanOrEqual(12_000);
+      expect(frame.length).toBeLessThanOrEqual(5_000);
+      expect(Buffer.byteLength(frame, "utf8")).toBeLessThanOrEqual(15_360);
     }
     expect(pushedFrames.length).toBeGreaterThan(0);
     for (const frame of pushedFrames) {
-      expect(frame.length).toBeLessThanOrEqual(3_500);
-      expect(Buffer.byteLength(frame, "utf8")).toBeLessThanOrEqual(12_000);
+      expect(frame.length).toBeLessThanOrEqual(5_000);
+      expect(Buffer.byteLength(frame, "utf8")).toBeLessThanOrEqual(15_360);
     }
   });
 
@@ -1814,7 +1927,7 @@ describe("createBotWsReplyHandle", () => {
       inboundKind: "text",
       autoSendPlaceholder: false,
     });
-    const longBlock = "预览内容。".repeat(620);
+    const longBlock = "预览内容。".repeat(1_800);
 
     await handle.deliver({ text: longBlock, isReasoning: false }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(8 * 60_000);
@@ -2149,7 +2262,7 @@ describe("createBotWsReplyHandle", () => {
       inboundKind: "text",
       autoSendPlaceholder: false,
     });
-    const text = `${"已有正文。".repeat(900)}\n\n${FINAL_COMPLETION_MARKER}`;
+    const text = `${"已有正文。".repeat(2_200)}\n\n${FINAL_COMPLETION_MARKER}`;
 
     const delivery = handle.deliver({ text }, { kind: "final" });
     await drainChunkTimers();
@@ -5430,7 +5543,7 @@ describe("createBotWsReplyHandle", () => {
 
     const preview = String(pendingClient.replyStreamNonBlocking.mock.calls[0]?.[2] ?? "");
     expect(preview.length).toBeLessThanOrEqual(3_500);
-    expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(12_000);
+    expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(15_360);
 
     await handle.deliver({ text: `${bodyText}\n最终新增内容` }, { kind: "final" });
     const pushed = mockClient.sendMessage.mock.calls.map((call) =>
@@ -5464,7 +5577,7 @@ describe("createBotWsReplyHandle", () => {
     const preview = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(preview).toContain("&lt;think&gt;");
     expect(preview.length).toBeLessThanOrEqual(3_500);
-    expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(12_000);
+    expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(15_360);
   });
 
   it("keeps the body bookmark when preamble markup renders empty", async () => {
@@ -5828,7 +5941,7 @@ describe("createBotWsReplyHandle", () => {
       autoSendPlaceholder: false,
     });
 
-    const finalText = `HEAD-MARK${"正文内容。".repeat(500)}TAIL-MARK`;
+    const finalText = `HEAD-MARK${"正文内容。".repeat(1_400)}TAIL-MARK`;
     const delivery = handle.deliver({ text: finalText, isReasoning: false }, { kind: "final" });
     await vi.advanceTimersByTimeAsync(800);
     await delivery;

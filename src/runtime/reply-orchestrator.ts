@@ -411,6 +411,9 @@ export async function dispatchRuntimeReply(params: {
         allowToolLifecycleWhenProgressHidden: true,
         onToolStart: () => {
           runActivityObserved = true;
+          // Also tells the transport the turn has moved from narrating to tool
+          // work — that is when its bubble stops changing on its own.
+          replyHandle.markRunActivity?.();
         },
         onToolResult: (payload) => {
           if (

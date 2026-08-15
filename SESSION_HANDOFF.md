@@ -497,7 +497,7 @@ const emitCliCommentaryText = (text) => {
   5. 继续观察：相邻气泡、复用 `req_id`、迟到 ACK、emoji 边界、群聊接管。
 - **上游 `YanHaidao/wecom` 已有新提交未合并**（markdown 子集拆分、多分片发送节流、agent-api 骨架重构、零引用清理等）：本轮任务范围不含上游同步，合并时按第 2f 节对照表处理 `package.json`，并注意上游的多分片节流可能与本仓库的分段/书签逻辑相互影响。
 - `npm audit --omit=dev` 当前仍报告直接生产依赖 `undici@7.28.0` 的 1 个 high 告警，已知修复版本为 7.29.0；本次发布没有扩大到依赖升级。
-- 发布 tarball 不入 git（*.tgz 未跟踪），以 changelog 打包记录的 shasum 为准。
+- 发布 tarball 不入 git（*.tgz 未跟踪），以 changelog 打包记录的 shasum 为准。**打包必须在文档写完、tag 打好之后再做**：`README.md` / `SESSION_HANDOFF.md` / `changelog/` 都在包内，先打包会得到一个与发布态不符的指纹（`2.7.260-11` 踩过一次）。打包记录本身写在 tag **之后**的提交里——把哈希写回包内文件会自我指涉。`npm pack` 对同一棵树是确定性的，可用「从 tag 重打得到同一 SHA-256」来复核。
 
 ## 7. 版本脉络备忘
 

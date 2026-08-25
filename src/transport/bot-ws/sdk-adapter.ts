@@ -454,12 +454,12 @@ export class BotWsSdkAdapter {
       // either — the new owner would kick us straight back.
       if (isServerHandoverEvent(frame)) {
         this.log.warn?.(
-          `[wecom-ws] handed over account=${this.runtime.account.accountId} reason=disconnected_event`,
+          `[wecom-ws] handed-over account=${this.runtime.account.accountId} reason=disconnected_event`,
         );
         this.runtime.recordOperationalIssue({
           transport: "bot-ws",
           category: "ws-kicked",
-          summary: "另一个连接已接管该机器人，本连接被企微断开，且不会自动重连",
+          summary: "ws handed over: another connection took this bot; no auto-reconnect",
           error: "disconnected_event",
         });
         return;

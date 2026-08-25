@@ -207,7 +207,7 @@ doc 62158（2026-08-12）：`body.chat_type`「1 单聊 / 2 群聊 / **0 或不�
 | --- | --- |
 | `src/app/index.ts:15` | `sendMarkdown: (chatId, content, chatType?: "direct" \| "group") => Promise<void>`，参数**可选** |
 | `sdk-adapter.ts:246` | `chatType` 存在时映射 `chat_type: chatType === "group" ? 2 : 1`；不存在则**一个字段都不加** |
-| `reply.ts:1861` | 传入 `peerKind`（`reply.ts:1306` 已算好，源自入站帧 `chattype`，权威值） |
+| `reply.ts` 四处 | 传入/带上 `peerKind`（`reply.ts:1306` 已算好，源自入站帧 `chattype`，权威值）：push handle 路径、`sendViaClient` 回落、事件回复的正常与错误分支 |
 | `outbound.ts:398` | **不动**——那条路径只有 `to`，拿不到可靠会话类型，猜不如不猜；参数可选正是为了让它逐字节不变 |
 
 SDK 无需等新版本：`sendMessage(chatid, body)` 内部 `{ chatid, ...body }`、`sendReply` 原样入帧（两处源码已确认），多带字段即可上线；`SendMsgBody` 未声明该字段，**只在这一个调用点断言**，不全局放宽类型。

@@ -24,7 +24,11 @@ const sdkMockState = vi.hoisted(() => {
       }
     }
 
-    connect(): void {}
+    connectCalls = 0;
+
+    connect(): void {
+      this.connectCalls += 1;
+    }
 
     disconnect(): void {}
   }
@@ -1586,6 +1590,143 @@ describe("BotWsSdkAdapter", () => {
     expect(log.info).toHaveBeenCalledWith(
       expect.stringContaining("static welcome delivered account=acc-1 messageId=msg-welcome"),
     );
+    expect(unhandledRejections).toHaveLength(0);
+  });
+
+  it("does not start an agent run when WeCom hands this bot to a new connection", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+
+    // WeCom pushes this to the OLD connection right before terminating it.
+    // It carries no sender and no chat, so a dispatch would land on "unknown".
+    sdkMockState.client?.emit("event", {
+      cmd: "aibot_event_callback",
+      headers: { req_id: "req-kick" },
+      body: {
+        msgid: "msg-kick",
+        create_time: 1700000000,
+        aibotid: "AIBOTID",
+        msgtype: "event",
+        event: { eventtype: "disconnected_event" },
+      },
+    });
+
+    await waitForAsyncCallbacks();
+
+    expect(runtime.handleEvent).not.toHaveBeenCalled();
+    expect(sdkMockState.client?.sendMessage).not.toHaveBeenCalled();
+    expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
+    expect(unhandledRejections).toHaveLength(0);
+  });
+
+  it("records ws-kicked and never reconnects when a new connection takes over", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+    const connectsAfterStart = sdkMockState.client?.connectCalls ?? 0;
+
+    sdkMockState.client?.emit("event", {
+      cmd: "aibot_event_callback",
+      headers: { req_id: "req-kick" },
+      body: {
+        msgid: "msg-kick",
+        msgtype: "event",
+        event: { eventtype: "disconnected_event" },
+      },
+    });
+    // The SDK follows the event with its own disconnect notice, whose reason
+    // text matches none of the legacy kicked keywords.
+    sdkMockState.client?.emit(
+      "disconnected",
+      "New connection established, server disconnected this connection",
+    );
+
+    await waitForAsyncCallbacks();
+
+    expect(runtime.recordOperationalIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: "bot-ws",
+        category: "ws-kicked",
+        error: "disconnected_event",
+      }),
+    );
+    // Reconnecting would take the bot back from whoever now owns it, and that
+    // owner would kick us again: the two instances would trade the connection
+    // forever.
+    expect(sdkMockState.client?.connectCalls).toBe(connectsAfterStart);
+    expect(runtime.updateTransportSession).toHaveBeenCalledWith(
+      expect.objectContaining({ connected: false, running: false }),
+    );
+    expect(unhandledRejections).toHaveLength(0);
+  });
+
+  it("still dispatches ordinary events after the disconnect filter", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+
+    sdkMockState.client?.emit("event", {
+      cmd: "aibot_event_callback",
+      headers: { req_id: "req-card" },
+      body: {
+        msgid: "msg-card",
+        msgtype: "event",
+        chattype: "single",
+        from: { userid: "user-1" },
+        event: {
+          eventtype: "template_card_event",
+          template_card_event: { card_type: "button_interaction", event_key: "confirm" },
+        },
+      },
+    });
+
+    await waitForAsyncCallbacks();
+
+    expect(runtime.handleEvent).toHaveBeenCalledTimes(1);
+    expect(runtime.recordOperationalIssue).not.toHaveBeenCalled();
     expect(unhandledRejections).toHaveLength(0);
   });
 

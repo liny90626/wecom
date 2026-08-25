@@ -99,6 +99,10 @@ function isStandaloneMediaEvent(event: UnifiedInboundEvent): boolean {
   );
 }
 
+function isServerHandoverEvent(frame: WsFrame<BaseMessage | EventMessage>): boolean {
+  return (frame.body as EventMessage | undefined)?.event?.eventtype === "disconnected_event";
+}
+
 function resolveMergeCandidateKind(event: UnifiedInboundEvent): MergeCandidateKind | undefined {
   if (isStandaloneMediaEvent(event)) return "media";
   if (
@@ -436,6 +440,24 @@ export class BotWsSdkAdapter {
     };
 
     const handleFrame = async (frame: WsFrame<BaseMessage | EventMessage>) => {
+      // WeCom allows one live connection per bot: when a second one subscribes,
+      // this one is told and then terminated. The notice arrives on the same
+      // event channel as user events, but it carries no sender and no chat, so
+      // dispatching it would start an agent run for "[event:disconnected_event]"
+      // on a socket that is already going away. Reconnecting is not an option
+      // either — the new owner would kick us straight back.
+      if (isServerHandoverEvent(frame)) {
+        this.log.warn?.(
+          `[wecom-ws] handed over account=${this.runtime.account.accountId} reason=disconnected_event`,
+        );
+        this.runtime.recordOperationalIssue({
+          transport: "bot-ws",
+          category: "ws-kicked",
+          summary: "另一个连接已接管该机器人，本连接被企微断开，且不会自动重连",
+          error: "disconnected_event",
+        });
+        return;
+      }
       const botAccount = this.runtime.account.bot;
       if (!botAccount) {
         return;

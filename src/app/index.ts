@@ -12,7 +12,11 @@ const activeBotWsReplyHandlesByPeer = new Map<string, ReplyHandle>();
 export type BotWsPushHandle = {
   ownerId?: string;
   isConnected: () => boolean;
-  sendMarkdown: (chatId: string, content: string) => Promise<void>;
+  sendMarkdown: (
+    chatId: string,
+    content: string,
+    chatType?: "direct" | "group",
+  ) => Promise<void>;
   replyCommand: (params: {
     cmd: string;
     body?: Record<string, unknown>;

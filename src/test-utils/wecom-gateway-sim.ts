@@ -36,7 +36,7 @@ export type SimChatEntry =
       /** Every rendered revision of this bubble, oldest first. */
       history: string[];
     }
-  | { kind: "push"; content: string };
+  | { kind: "push"; content: string; chatType?: number };
 
 type QueueItem = {
   frame: SimStreamFrame;
@@ -135,8 +135,15 @@ export class WecomGatewaySim {
     return this.replyStream(frame, streamId, content, finish);
   }
 
-  async sendMessage(_chatId: string, body: { markdown?: { content?: string } }): Promise<unknown> {
-    this.chat.push({ kind: "push", content: body.markdown?.content ?? "" });
+  async sendMessage(
+    _chatId: string,
+    body: { markdown?: { content?: string }; chat_type?: number },
+  ): Promise<unknown> {
+    this.chat.push({
+      kind: "push",
+      content: body.markdown?.content ?? "",
+      ...(body.chat_type === undefined ? {} : { chatType: body.chat_type }),
+    });
     return {};
   }
 

@@ -9,10 +9,13 @@ vi.setConfig({ testTimeout: 30_000 });
 
 type Frame = Parameters<typeof createBotWsReplyHandle>[0]["frame"];
 
-const buildFrame = (reqId: string): Frame =>
+const buildFrame = (reqId: string, chatKind: "direct" | "group" = "direct"): Frame =>
   ({
     headers: { req_id: reqId },
-    body: { from: { userid: "user-1" } },
+    body:
+      chatKind === "group"
+        ? { chattype: "group", chatid: "chat-1", from: { userid: "user-1" } }
+        : { from: { userid: "user-1" } },
     cmd: "aibot_msg_callback",
   }) as unknown as Frame;
 
@@ -55,10 +58,14 @@ describe("长任务过程可见性（真实 orchestrator + 网关模拟）", () 
     vi.unstubAllEnvs();
   });
 
-  const startTurn = (sim: WecomGatewaySim, reqId = "req-sim"): ReplyHandle => {
+  const startTurn = (
+    sim: WecomGatewaySim,
+    reqId = "req-sim",
+    chatKind: "direct" | "group" = "direct",
+  ): ReplyHandle => {
     const handle = createBotWsReplyHandle({
       client: asWsClient(sim),
-      frame: buildFrame(reqId),
+      frame: buildFrame(reqId, chatKind),
       accountId: "default",
       inboundKind: "text",
       deferActivation: true,
@@ -362,5 +369,42 @@ describe("长任务过程可见性（真实 orchestrator + 网关模拟）", () 
     // 被正文帧抹掉的那一步没有被当成「已送达」，它随推送补齐。
     expect(joined).toContain("先读取配置文件");
     expect(joined).toContain("再核对运行记录");
+  });
+
+  it("推送明确带上会话类型：单聊 1、群聊 2", async () => {
+    // 企微文档：chat_type 不填时服务端「优先按群聊处理」再自动兼容。入站帧
+    // 已经告诉了我们这是单聊还是群聊，没有理由让服务端去猜。
+    const pushKindsFor = async (
+      chatKind: "direct" | "group",
+      reqId: string,
+    ): Promise<Array<number | undefined>> => {
+      __resetBotWsReplyTestState();
+      const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 6 * 60_000 });
+      const handle = startTurn(sim, reqId, chatKind);
+      await tick(100);
+      await runTurn(handle, async ({ onItemEvent, deliverFinal }) => {
+        for (let i = 0; i < 3; i += 1) {
+          await tick(150_000);
+          await onItemEvent({
+            itemId: `commentary-chattype-${i + 1}`,
+            kind: "preamble",
+            progressText: `第 ${i + 1} 步：核对第 ${i + 1} 项配置`,
+          });
+        }
+        await tick(90_000);
+        await deliverFinal({ text: ANSWER });
+      });
+      return sim.chat
+        .filter((entry) => entry.kind === "push")
+        .map((entry) => (entry.kind === "push" ? entry.chatType : undefined));
+    };
+
+    const direct = await pushKindsFor("direct", "req-direct");
+    expect(direct.length).toBeGreaterThan(0);
+    expect(direct.every((kind) => kind === 1)).toBe(true);
+
+    const group = await pushKindsFor("group", "req-group");
+    expect(group.length).toBeGreaterThan(0);
+    expect(group.every((kind) => kind === 2)).toBe(true);
   });
 });

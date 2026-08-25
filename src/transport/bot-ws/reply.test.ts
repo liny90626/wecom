@@ -292,6 +292,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: `最终正文\n\n${FINAL_COMPLETION_MARKER}` },
     });
   });
@@ -2117,6 +2118,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
     expect(mockClient.sendMessage).toHaveBeenLastCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: "⚠️ 模型响应超时，本次任务未完成，请稍后重试。" },
     });
   });
@@ -2939,6 +2941,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
     expect(mockClient.sendMessage).toHaveBeenCalledWith("unknown", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: `最终回复\n\n${FINAL_COMPLETION_MARKER}` },
     });
     expect(onFail).not.toHaveBeenCalled();
@@ -2975,6 +2978,7 @@ describe("createBotWsReplyHandle", () => {
     expect(onFail).not.toHaveBeenCalled();
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: expect.objectContaining({
         content: expect.stringContaining(`最终正文\n\n${FINAL_COMPLETION_MARKER}`),
       }),
@@ -3563,6 +3567,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: expect.objectContaining({
         content: expect.stringContaining("继续输出："),
       }),
@@ -3613,6 +3618,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).not.toHaveBeenCalled();
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: expect.objectContaining({
         content: expect.stringContaining("继续输出："),
       }),
@@ -3687,6 +3693,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: `最终短回复\n\n${FINAL_COMPLETION_MARKER}` },
     });
   });
@@ -3783,6 +3790,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: `最终回复\n\n${FINAL_COMPLETION_MARKER}` },
     });
     expect(onFail).toHaveBeenCalledWith(pushError);
@@ -3796,6 +3804,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
     expect(mockClient.sendMessage).toHaveBeenLastCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: `最终回复\n\n${FINAL_COMPLETION_MARKER}` },
     });
     expect(onFail).toHaveBeenCalledTimes(1);
@@ -3839,6 +3848,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
     expect(mockClient.sendMessage).toHaveBeenLastCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: `最终回复\n\n${FINAL_COMPLETION_MARKER}` },
     });
     expect(onDeliver).toHaveBeenCalledTimes(1);
@@ -4135,6 +4145,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
     expect(mockClient.sendMessage).toHaveBeenLastCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: "旧任务合并结果" },
     });
     expect(mockClient.replyStream).not.toHaveBeenCalled();
@@ -5876,6 +5887,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: "A 的最终答案" },
     });
   });
@@ -6607,6 +6619,7 @@ describe("createBotWsReplyHandle", () => {
 
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: "旧回复最终答案" },
     });
   });
@@ -6678,6 +6691,7 @@ describe("createBotWsReplyHandle", () => {
     );
     expect(mockClient.sendMessage).toHaveBeenCalledWith("Alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: "旧请求答案" },
     });
   });
@@ -6717,6 +6731,7 @@ describe("createBotWsReplyHandle", () => {
 
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: "旧请求答案" },
     });
     expect(mockClient.replyStream).toHaveBeenCalledWith(
@@ -6762,6 +6777,7 @@ describe("createBotWsReplyHandle", () => {
 
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: "相同答案" },
     });
     expect(mockClient.replyStream).toHaveBeenCalledWith(
@@ -6886,6 +6902,7 @@ describe("createBotWsReplyHandle", () => {
 
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
+      chat_type: 1,
       markdown: { content: "Event Reply" },
     });
   });

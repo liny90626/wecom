@@ -1832,7 +1832,8 @@ export function createBotWsReplyHandle(params: {
           params.client.sendMessage(peerId, {
             msgtype: "markdown",
             markdown: { content: chunk },
-          }),
+            chat_type: peerKind === "group" ? 2 : 1,
+          } as Parameters<typeof params.client.sendMessage>[1]),
           "client markdown push",
         );
         markChunkDelivered(i);
@@ -1858,7 +1859,10 @@ export function createBotWsReplyHandle(params: {
         console.info(
           `[wecom-b3] active-push account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} reason=${options.reason} chunk=${i + 1}/${markdownChunks.length}`,
         );
-        await withHandleSendTimeout(pushHandle.sendMarkdown(peerId, chunk), "active markdown push");
+        await withHandleSendTimeout(
+          pushHandle.sendMarkdown(peerId, chunk, peerKind),
+          "active markdown push",
+        );
         markChunkDelivered(i);
         throwIfObsolete();
         if (i < markdownChunks.length - 1) {
@@ -3757,7 +3761,8 @@ export function createBotWsReplyHandle(params: {
             params.client.sendMessage(peerId, {
               msgtype: "markdown",
               markdown: { content: toWeComMarkdownV2(finalText) },
-            }),
+              chat_type: peerKind === "group" ? 2 : 1,
+            } as Parameters<typeof params.client.sendMessage>[1]),
             "event markdown push",
           );
         } else if (info.kind === "final" && supersededByNewInbound) {
@@ -3962,7 +3967,8 @@ export function createBotWsReplyHandle(params: {
             params.client.sendMessage(peerId, {
               msgtype: "markdown",
               markdown: { content: text },
-            }),
+              chat_type: peerKind === "group" ? 2 : 1,
+            } as Parameters<typeof params.client.sendMessage>[1]),
             "event error markdown push",
           );
         } else {

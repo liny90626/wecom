@@ -1730,6 +1730,38 @@ describe("BotWsSdkAdapter", () => {
     expect(unhandledRejections).toHaveLength(0);
   });
 
+  it("tags an active push with the conversation kind, and omits it when unknown", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: {
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+    const handle = getBotWsPushHandle("acc-1");
+
+    await handle?.sendMarkdown("user-1", "direct push", "direct");
+    await handle?.sendMarkdown("chat-1", "group push", "group");
+    // Callers that cannot tell keep the previous wire shape.
+    await handle?.sendMarkdown("user-1", "unspecified push");
+
+    const calls = sdkMockState.client?.sendMessage.mock.calls ?? [];
+    expect(calls).toHaveLength(3);
+    expect(calls[0]?.[1]).toMatchObject({ chat_type: 1, markdown: { content: "direct push" } });
+    expect(calls[1]?.[1]).toMatchObject({ chat_type: 2, markdown: { content: "group push" } });
+    expect(calls[2]?.[1]).not.toHaveProperty("chat_type");
+  });
+
   it("keeps a replacement push handle when the stale adapter stops", () => {
     const createRuntime = () => ({
       account: {

@@ -247,11 +247,17 @@ export class BotWsSdkAdapter {
         });
         return result as unknown as Record<string, unknown>;
       },
-      sendMarkdown: async (chatId, content) => {
-        await client.sendMessage(chatId, {
+      sendMarkdown: async (chatId, content, chatType) => {
+        // An omitted chat_type makes WeCom guess, and it guesses group first.
+        // The inbound frame already told us which kind of conversation this is,
+        // so say it. Callers that genuinely cannot tell leave it off and keep
+        // the previous behaviour.
+        const body = {
           msgtype: "markdown",
           markdown: { content },
-        });
+          ...(chatType ? { chat_type: chatType === "group" ? 2 : 1 } : {}),
+        };
+        await client.sendMessage(chatId, body as Parameters<typeof client.sendMessage>[1]);
         this.runtime.touchTransportSession("bot-ws", {
           ownerId: this.ownerId,
           running: true,

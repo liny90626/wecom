@@ -38,7 +38,7 @@ const BIZ_CACHE_CLEAR_ERROR_CODES = new Set([850001, 851014]);
  */
 const DOC_AUTH_ERROR_CODES = new Set([851013, 851014, 851008]);
 
-type BizError = { errcode: number; errmsg: string };
+type BizError = { errcode: number; errmsg: string; helpMessage?: string };
 
 function renderResultText(data: unknown): string {
   return JSON.stringify(data, null, 2);
@@ -90,14 +90,20 @@ function extractBizError(result: unknown): BizError | undefined {
   if (!Array.isArray(content)) return undefined;
   for (const item of content) {
     if (item.type !== "text" || !item.text) continue;
-    let parsed: { errcode?: unknown; errmsg?: unknown };
+    let parsed: { errcode?: unknown; errmsg?: unknown; help_message?: unknown };
     try {
       parsed = JSON.parse(item.text) as typeof parsed;
     } catch {
       continue;
     }
     if (typeof parsed.errcode === "number" && parsed.errcode !== 0) {
-      return { errcode: parsed.errcode, errmsg: String(parsed.errmsg ?? "") };
+      const helpMessage =
+        typeof parsed.help_message === "string" ? parsed.help_message : undefined;
+      return {
+        errcode: parsed.errcode,
+        errmsg: String(parsed.errmsg ?? ""),
+        ...(helpMessage ? { helpMessage } : {}),
+      };
     }
   }
   return undefined;
@@ -178,10 +184,20 @@ async function handleCall(
         text: renderResultText({
           errcode: failure.errcode,
           errmsg: failure.errmsg || "authorization error",
+          // 企微在返回里带 help_instruction，要求 help_message 逐字原样展示给用户。
+          // 官方 2026.7.2 的拦截器把它丢掉了——那版代码早于这个字段。服务端对自己
+          // 的载荷有最终解释权，这里保留原文，卡片只是额外的引导。
+          ...(failure.helpMessage ? { help_message: failure.helpMessage } : {}),
+          ...(failure.helpMessage
+            ? {
+                help_instruction:
+                  "请将 help_message 字段的值逐字原样展示给用户，不要改写、删减或翻译。",
+              }
+            : {}),
           _biz_msg_sent: cardSent,
           _user_hint: cardSent
-            ? "文档授权提示卡片已直接发送给用户，无需再向用户转述任何授权相关的信息。请告知用户：已发送授权引导，请按提示完成授权后重试。"
-            : "文档授权失败，且授权引导卡片未能发出。请让用户到企业微信「工作台 → 智能机器人 → 可使用权限」重新授权后重试。",
+            ? "授权引导卡片已直接发送给用户；如上有 help_message，仍需按其要求逐字原样转达。"
+            : "授权引导卡片未能发出。若上方有 help_message 请逐字原样转达；否则请让用户到企业微信「工作台 → 智能机器人 → 可使用权限」重新授权后重试。",
         }),
       },
     ],

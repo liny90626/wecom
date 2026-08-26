@@ -262,8 +262,9 @@ describe("wecom_mcp", () => {
         expect(inner._biz_msg_sent).toBe(true);
         expect(inner.errcode).toBe(errcode);
         // 授权步骤由卡片承担，转述只会走样。
-        expect(JSON.stringify(parsed)).not.toContain("help_message");
-        expect(JSON.stringify(parsed)).not.toContain("example.com/auth");
+        // 企微用 help_instruction 明确要求 help_message 逐字原样展示给用户，
+        // 官方 2026.7.2 的拦截器把它丢掉了——那版代码早于这个字段。
+        expect(inner.help_message).toBe("请打开链接 https://example.com/auth 完成授权");
       },
     );
 

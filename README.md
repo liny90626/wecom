@@ -145,6 +145,62 @@ npx vitest run
 - 触发条件：当前会话必须来自 `Bot WS`
 - 更适合的场景：个人身份读写文档、查询通讯录、处理待办、操作会议等轻量协作场景
 
+#### 接入地址：优先配 `bot.mcpServers`（强烈建议）
+
+企微有**两条**签发 MCP 地址的路径，它们指向的是**两台不同的 Server**：
+
+| 来源 | 对端 | 授权 |
+| --- | --- | --- |
+| 后台「可使用权限 → 查看使用方式」的 `https://qyapi.weixin.qq.com/mcp/v2/bot/<biz_type>?apikey=…` | 「动态\* MCP」v1.0.5，`doc` 有 62 个工具 | **apikey 内嵌了授权真人用户**，该用户拥有的文档可读可查可下载 |
+| 插件默认走的 `aibot_get_mcp_config` | 旧一代，`doc` 只有 19 个工具 | **未绑定真人用户** → 成员拥有的文档一律 `851003 no authority` |
+
+所以**只要能拿到后台地址，就应该配上**。否则会出现「`action=list` 能列出工具，但一读具体文档就 `851003`」这种极易误判成权限问题的现象。
+
+配置位置 `channels.wecom.accounts.<账号>.bot.mcpServers`，按 `biz_type` 一一对应：
+
+```jsonc
+{
+  "channels": {
+    "wecom": {
+      "accounts": {
+        "project": {                       // ← 换成你的账号 id
+          "bot": {
+            "ws": { "botId": "…", "secret": "…" },   // 原有配置不动
+            "mcpServers": {
+              "doc":      "https://qyapi.weixin.qq.com/mcp/v2/bot/doc?apikey=…",
+              "msg":      "https://qyapi.weixin.qq.com/mcp/v2/bot/msg?apikey=…",
+              "mail":     "https://qyapi.weixin.qq.com/mcp/v2/bot/mail?apikey=…",
+              "todo":     "https://qyapi.weixin.qq.com/mcp/v2/bot/todo?apikey=…",
+              "schedule": "https://qyapi.weixin.qq.com/mcp/v2/bot/schedule?apikey=…",
+              "meeting":  "https://qyapi.weixin.qq.com/mcp/v2/bot/meeting?apikey=…",
+              "disk":     "https://qyapi.weixin.qq.com/mcp/v2/bot/disk?apikey=…",
+              "contact":  "https://qyapi.weixin.qq.com/mcp/v2/bot/contact?apikey=…"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+要点：
+
+- **只配需要的品类**即可，没配的仍走 `aibot_get_mcp_config`，行为不变。
+- 地址来自：工作台 → 智能机器人 → 对应机器人 → 详情页「可使用权限」→ 逐个能力点「授权」→「查看使用方式」→ 复制 **streamableHTTP URL**（JSON Config 里的 `url` 字段与之相同）。
+- **每个能力要单独授权**，各自有独立的 apikey。
+- `apikey` 是**授权凭证**：取消授权再重新授权不会改变它，但请按密钥对待，不要提交到代码仓库或公开渠道。
+- 还需确保 `wecom_mcp` 在 OpenClaw 的工具白名单里（`tools.alsoAllow` 含 `wecom_mcp`，或 `tools.profile` 为 `full`）。
+
+配好后重启，日志里会看到对端是谁：
+
+```
+[wecom-mcp] config from account settings account=project category=doc url=https://qyapi.weixin.qq.com/mcp/v2/bot/doc
+[wecom-mcp] initialized account=project category=doc server=动态文档 MCP/1.0.5
+```
+
+`server=` 那行就是判断有没有配对的最快方式——走旧路径时它不会是「动态\* MCP/1.0.5」。
+
 它的价值在于：
 
 - **门槛低**：无需先走完整的自建应用接入流程

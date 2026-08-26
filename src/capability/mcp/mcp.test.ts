@@ -490,34 +490,37 @@ describe("wecom_mcp", () => {
     });
   });
 
-  it("把配置响应的字段名打进日志，但不打任何值", async () => {
-    // 这条命令的响应体里除了 url 还有什么，我们一直没看过；若带 expires_in /
-    // apikey 之类，说明它本来支持更完整的协商，是我们漏读了。
+  it("把配置响应里的 type / is_authed 打进日志，其余键只打名字", async () => {
+    // 现网实测响应是 { url, type, is_authed }。这两个是枚举/布尔不是凭证，
+    // 直接打出来能在调用前说明状态；未知字段仍只打键名，值一律不外发。
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     runtimeMock.replyCommand.mockResolvedValue({
       errcode: 0,
-      body: { url: CONFIG_URL, expires_in: 604800, apikey: "SHOULD_NOT_BE_LOGGED" },
+      body: { url: CONFIG_URL, type: 3, is_authed: true, apikey: "SHOULD_NOT_BE_LOGGED" },
     });
     queueCall(okResult("ok"));
 
     await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
 
     const logged = log.mock.calls.map((call) => String(call[0])).join("\n");
-    expect(logged).toContain("bodyKeys=[url,expires_in,apikey]");
+    expect(logged).toContain("type=3");
+    expect(logged).toContain("isAuthed=true");
+    expect(logged).toContain("otherKeys=[apikey]");
     expect(logged).not.toContain("SHOULD_NOT_BE_LOGGED");
-    expect(logged).not.toContain("604800");
   });
 
-  it("把对端 Server 的名字与版本打进日志", async () => {
-    // 现网出现过「两条签发路径指向两台不同 Server」，有这行当初一眼就能看出来。
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    httpMock.queue.push({ protocolVersion: "2025-03-26", serverInfo: { name: "动态文档 MCP", version: "1.0.5" } });
-    httpMock.queue.push(okResult("ok"));
+  it("is_authed=false 时直接告诉用户去后台授权", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    runtimeMock.replyCommand.mockResolvedValue({
+      errcode: 0,
+      body: { url: CONFIG_URL, type: 3, is_authed: false },
+    });
+    queueCall(okResult("ok"));
 
     await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
 
-    const logged = log.mock.calls.map((call) => String(call[0])).join("\n");
-    expect(logged).toContain("initialized");
-    expect(logged).toContain("动态文档 MCP/1.0.5");
+    const warned = warn.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(warned).toContain("尚未授权");
+    expect(warned).toContain("可使用权限");
   });
 });

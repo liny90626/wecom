@@ -174,7 +174,8 @@ async function fetchMcpConfig(
     );
   }
 
-  const body = (response as { body?: { url?: string } }).body;
+  // 现网实测的响应体：{ url, type, is_authed }。
+  const body = (response as { body?: { url?: string; type?: unknown; is_authed?: unknown } }).body;
   if (!body?.url) {
     throw new Error(`MCP 配置响应缺少 url 字段 (account=${accountId}, category=${category})`);
   }
@@ -191,12 +192,23 @@ async function fetchMcpConfig(
     );
   }
 
-  // 只打**键名**，不打值：这份响应里除了 url 还有什么，我们从来没看过。
-  // 如果它带着 expires_in / apikey / userid 之类的字段，就说明这条命令本来
-  // 支持更完整的协商，是我们漏读了。
+  // 现网实测这份响应是 { url, type, is_authed }。type 与 is_authed 是枚举/布尔，
+  // 不是凭证，直接打出来——它们能在**调用前**就说明状态，不必等到 851003。
+  // 其余键名仍只打名字，值一律不打。
+  const knownKeys = new Set(["url", "type", "is_authed"]);
+  const extraKeys = Object.keys(body).filter((key) => !knownKeys.has(key));
   console.log(
-    `${LOG_TAG} config ready account=${accountId} category=${category} pluginVersion=${PLUGIN_VERSION} bodyKeys=[${Object.keys(body).join(",")}] url=${redactUrl(String(body.url))}`,
+    `${LOG_TAG} config ready account=${accountId} category=${category} pluginVersion=${PLUGIN_VERSION}` +
+      ` type=${String(body.type ?? "n/a")} isAuthed=${String(body.is_authed ?? "n/a")}` +
+      (extraKeys.length > 0 ? ` otherKeys=[${extraKeys.join(",")}]` : "") +
+      ` url=${redactUrl(String(body.url))}`,
   );
+  if (body.is_authed === false) {
+    console.warn(
+      `${LOG_TAG} 该品类尚未授权（is_authed=false，account=${accountId} category=${category}）——` +
+        "请到机器人管理后台「可使用权限」为该能力完成成员授权后再试。",
+    );
+  }
   return body as Record<string, unknown>;
 }
 

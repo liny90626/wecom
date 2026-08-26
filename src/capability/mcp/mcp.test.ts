@@ -56,6 +56,7 @@ vi.mock("undici", () => ({
 
 import { createWeComMcpToolFactory } from "./tool.js";
 import { clearWecomMcpAccountCache } from "./transport.js";
+import { PLUGIN_VERSION } from "../../version.js";
 
 const CONFIG_URL = "https://mcp.example.com/stream/abc?token=SUPER_SECRET_TOKEN";
 
@@ -392,5 +393,26 @@ describe("wecom_mcp", () => {
     expect(String(parsed.error)).toContain("category");
     expect(runtimeMock.replyCommand).not.toHaveBeenCalled();
     expect(httpMock.calls).toHaveLength(0);
+  });
+
+  it("鉴权初始化的两个版本字段与官方语义一致", async () => {
+    // aibot_get_mcp_config 是签发授权 URL 的那次调用：官方发插件真实版本号，
+    // 我们此前发的是魔法串 "wecom-dual-plane"（根本不是版本号）。
+    // initialize 的 clientInfo 官方硬编码 "1.0.0"，与 plugin_version 是两个值。
+    queueCall(okResult("ok"));
+    await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
+
+    const config = runtimeMock.replyCommand.mock.calls[0]?.[0] as {
+      body: Record<string, unknown>;
+    };
+    expect(config.body.plugin_version).toBe(PLUGIN_VERSION);
+    expect(config.body.plugin_version).not.toBe("wecom-dual-plane");
+
+    const init = httpMock.calls[0]?.body as {
+      method: string;
+      params: { clientInfo: { name: string; version: string } };
+    };
+    expect(init.method).toBe("initialize");
+    expect(init.params.clientInfo).toEqual({ name: "wecom_mcp", version: "1.0.0" });
   });
 });

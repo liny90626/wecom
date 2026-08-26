@@ -27,7 +27,11 @@ const OFFICIAL_BIZ_TYPES = new Set([
 const BIZ_MSG_SEND_TIMEOUT_MS = 10_000;
 /** `AiBotBizMsgType`：1 = 文档权限。 */
 const AIBOT_BIZ_MSG_TYPE_DOC_READ_AUTH = 1;
-const MCP_PLUGIN_VERSION = "wecom-dual-plane";
+/**
+ * `initialize` 里的 clientInfo 版本，与官方插件逐字相同（官方硬编码 "1.0.0"）。
+ * 这里不用插件版本——官方在 clientInfo 与 plugin_version 上发的是两个不同的值。
+ */
+const MCP_CLIENT_INFO_VERSION = "1.0.0";
 const LOG_TAG = "[wecom-mcp]";
 
 /**
@@ -132,7 +136,10 @@ async function fetchMcpConfig(
       cmd: MCP_GET_CONFIG_CMD,
       body: {
         biz_type: category,
-        plugin_version: MCP_PLUGIN_VERSION,
+        // 官方发的是插件的真实版本号（运行时读 package.json）。我们此前发的是
+        // 一个根本不是版本号的魔法串 "wecom-dual-plane"——而这次调用正是签发
+        // 授权 URL 的那次，服务端若按它分档，非版本值很可能被归到最老的档位。
+        plugin_version: PLUGIN_VERSION,
       },
       headers: {
         req_id: generateReqId("mcp_config"),
@@ -155,7 +162,7 @@ async function fetchMcpConfig(
   }
 
   console.log(
-    `${LOG_TAG} config ready account=${accountId} category=${category} url=${redactUrl(String(body.url))}`,
+    `${LOG_TAG} config ready account=${accountId} category=${category} pluginVersion=${PLUGIN_VERSION} url=${redactUrl(String(body.url))}`,
   );
   return body as Record<string, unknown>;
 }
@@ -316,7 +323,7 @@ async function initializeSession(
     params: {
       protocolVersion: "2025-03-26",
       capabilities: {},
-      clientInfo: { name: "wecom_mcp", version: MCP_PLUGIN_VERSION },
+      clientInfo: { name: "wecom_mcp", version: MCP_CLIENT_INFO_VERSION },
     },
   };
 

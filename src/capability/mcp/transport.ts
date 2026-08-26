@@ -357,6 +357,14 @@ async function initializeSession(
   };
 
   const initResult = await sendRawJsonRpc(url, session, initializeRequest, requesterUserId);
+  // 打出对端是谁：现网曾经出现「后台签发的地址与 aibot_get_mcp_config 签发的
+  // 地址是两台不同 Server」（一台 62 个新一代工具、一台 19 个旧一代），有这行
+  // 当初一眼就能看出来。
+  const serverInfo = (initResult.rpcResult as { serverInfo?: { name?: string; version?: string } } | undefined)
+    ?.serverInfo;
+  console.log(
+    `${LOG_TAG} initialized account=${accountId} category=${category} server=${serverInfo?.name ?? "?"}/${serverInfo?.version ?? "?"}`,
+  );
   if (initResult.newSessionId) {
     session.sessionId = initResult.newSessionId;
   }

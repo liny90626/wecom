@@ -356,15 +356,30 @@ describe("wecom_mcp", () => {
       expect(JSON.stringify(parsed)).toContain("inputSchema");
     });
 
-    it("清单再大也照原样给出完整 schema——现网 19 个工具就会被限幅误伤", async () => {
-      // 官方没有上限。我曾加过 32KB 限幅，结果现网只有 19 个工具就触发，
-      // 模型因此拿不到 inputSchema、只能猜参数名。
-      queueCall({ tools: Array.from({ length: 60 }, (_, i) => tool(`smartsheet_tool_${i}`, 12)) });
-      const parsed = await runTool({ action: "list", category: "doc" });
+    it("小品类照原样给出完整 schema（实测最大的 mail 也才 12.8KB）", async () => {
+      queueCall({ tools: Array.from({ length: 10 }, (_, i) => tool(`todo_${i}`)) });
+      const parsed = await runTool({ action: "list", category: "todo" });
 
-      expect(parsed.count).toBe(60);
       expect(parsed.truncated).toBeUndefined();
       expect(JSON.stringify(parsed)).toContain("inputSchema");
+    });
+
+    it("doc 那种 289KB 的清单退回名称索引，并列出可用前缀", async () => {
+      // 实测 doc 完整 289KB / 仅名称 8.3KB；阈值 48KB 落在它与次大的 mail
+      // （12.8KB）之间，间隔极宽。
+      queueCall({
+        tools: [
+          ...Array.from({ length: 28 }, (_, i) => tool(`smartsheet_${i}`, 20)),
+          ...Array.from({ length: 10 }, (_, i) => tool(`sheet_${i}`, 20)),
+        ],
+      });
+      const parsed = await runTool({ action: "list", category: "doc" });
+
+      expect(parsed.truncated).toBe(true);
+      expect(parsed.count).toBe(38);
+      expect(String(parsed.note)).toContain("smartsheet_");
+      expect(String(parsed.note)).toContain("sheet_");
+      expect(JSON.stringify(parsed)).not.toContain("inputSchema");
     });
 
     it("method 作为前缀过滤，把大品类切成能装下的一组", async () => {
@@ -491,5 +506,18 @@ describe("wecom_mcp", () => {
     expect(logged).toContain("bodyKeys=[url,expires_in,apikey]");
     expect(logged).not.toContain("SHOULD_NOT_BE_LOGGED");
     expect(logged).not.toContain("604800");
+  });
+
+  it("把对端 Server 的名字与版本打进日志", async () => {
+    // 现网出现过「两条签发路径指向两台不同 Server」，有这行当初一眼就能看出来。
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    httpMock.queue.push({ protocolVersion: "2025-03-26", serverInfo: { name: "动态文档 MCP", version: "1.0.5" } });
+    httpMock.queue.push(okResult("ok"));
+
+    await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
+
+    const logged = log.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("initialized");
+    expect(logged).toContain("动态文档 MCP/1.0.5");
   });
 });

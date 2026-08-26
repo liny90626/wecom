@@ -40,6 +40,21 @@ const DOC_AUTH_ERROR_CODES = new Set([851013, 851014, 851008]);
 
 type BizError = { errcode: number; errmsg: string; helpMessage?: string };
 
+/**
+ * `tools/list` 的完整 schema 输出上限。
+ *
+ * **阈值来自实测**（2026-08-26，`/mcp/v2/bot/*` 各能力）：
+ *   contact 0.5KB · msg 5.8KB · todo 6.0KB · disk 6.4KB · schedule 8.8KB
+ *   meeting 11.4KB · mail 12.8KB · **doc 289KB**（62 个工具）
+ * 也就是说除 `doc` 外最大的也才 12.8KB，而 `doc` 是它的 22 倍——两者之间
+ * 留出极宽的间隔。`doc` 只给名称+说明是 8.3KB，按前缀取则：smartpage_ 8.5KB、
+ * doc_ 38KB、sheet_ 50KB、smartsheet_ 191KB。
+ *
+ * 上一版我按官方文档"估算"定过一个 32KB 的阈值，结果在旧一代 Server 的 19 个
+ * 工具上就误伤了。这一版的数字是量出来的，不是猜的。
+ */
+const LIST_MAX_BYTES = 48_000;
+
 function renderResultText(data: unknown): string {
   return JSON.stringify(data, null, 2);
 }
@@ -122,7 +137,7 @@ async function handleList(
   const prefix = namePrefix?.trim();
   const selected = prefix ? all.filter((tool) => tool.name.startsWith(prefix)) : all;
 
-  return {
+  const detailed = {
     accountId,
     category,
     count: selected.length,
@@ -131,6 +146,30 @@ async function handleList(
       name: tool.name,
       description: tool.description ?? "",
       inputSchema: tool.inputSchema ? cleanSchemaForGemini(tool.inputSchema) : undefined,
+    })),
+  };
+  if (Buffer.byteLength(renderResultText(detailed), "utf8") <= LIST_MAX_BYTES) {
+    return detailed;
+  }
+
+  // 装不下就只给索引，并说清楚怎么按前缀取回完整 schema——直接截断会让模型
+  // 以为参数就长这样。前缀分组是天然的切法：doc_ / sheet_ / smartsheet_ /
+  // smartpage_ / media_ 各自都能装下。
+  const prefixes = [...new Set(selected.map((tool) => tool.name.split("_")[0] ?? ""))].filter(
+    Boolean,
+  );
+  console.warn(
+    `${LOG_TAG} tools/list compacted account=${accountId} category=${category} count=${selected.length}`,
+  );
+  return {
+    accountId,
+    category,
+    count: selected.length,
+    truncated: true,
+    note: `完整 schema 超过 ${LIST_MAX_BYTES} 字节，此处只列名称与说明。把 method 设为名称前缀（可用前缀：${prefixes.map((item) => `${item}_`).join(" / ")}）再调一次 action=list，即可取到该组工具的完整参数结构。`,
+    tools: selected.map((tool) => ({
+      name: tool.name,
+      description: tool.description ?? "",
     })),
   };
 }

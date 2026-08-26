@@ -38,9 +38,6 @@ const BIZ_CACHE_CLEAR_ERROR_CODES = new Set([850001, 851014]);
  */
 const DOC_AUTH_ERROR_CODES = new Set([851013, 851014, 851008]);
 
-/** 工具清单的输出上限。`doc` 一个品类就有 60+ 个工具，全量 schema 能吃掉一大块上下文。 */
-const LIST_MAX_BYTES = 32_000;
-
 type BizError = { errcode: number; errmsg: string };
 
 function renderResultText(data: unknown): string {
@@ -119,7 +116,7 @@ async function handleList(
   const prefix = namePrefix?.trim();
   const selected = prefix ? all.filter((tool) => tool.name.startsWith(prefix)) : all;
 
-  const detailed = {
+  return {
     accountId,
     category,
     count: selected.length,
@@ -128,25 +125,6 @@ async function handleList(
       name: tool.name,
       description: tool.description ?? "",
       inputSchema: tool.inputSchema ? cleanSchemaForGemini(tool.inputSchema) : undefined,
-    })),
-  };
-  if (Buffer.byteLength(renderResultText(detailed), "utf8") <= LIST_MAX_BYTES) {
-    return detailed;
-  }
-
-  // 装不下就只给索引，并说清楚怎么拿到完整 schema——直接截断会让模型以为参数就长这样。
-  console.warn(
-    `${LOG_TAG} tools/list truncated account=${accountId} category=${category} count=${selected.length}`,
-  );
-  return {
-    accountId,
-    category,
-    count: selected.length,
-    truncated: true,
-    note: `完整 schema 超过 ${LIST_MAX_BYTES} 字节，此处只列出名称与说明。把 method 设为名称前缀（如 smartsheet_）再调用一次 action=list 可取到该组工具的完整参数结构。`,
-    tools: selected.map((tool) => ({
-      name: tool.name,
-      description: tool.description ?? "",
     })),
   };
 }

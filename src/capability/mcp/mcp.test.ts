@@ -344,14 +344,15 @@ describe("wecom_mcp", () => {
       expect(JSON.stringify(parsed)).toContain("inputSchema");
     });
 
-    it("清单超预算时退回名称索引，并说明怎么取完整 schema", async () => {
+    it("清单再大也照原样给出完整 schema——现网 19 个工具就会被限幅误伤", async () => {
+      // 官方没有上限。我曾加过 32KB 限幅，结果现网只有 19 个工具就触发，
+      // 模型因此拿不到 inputSchema、只能猜参数名。
       queueCall({ tools: Array.from({ length: 60 }, (_, i) => tool(`smartsheet_tool_${i}`, 12)) });
       const parsed = await runTool({ action: "list", category: "doc" });
 
-      expect(parsed.truncated).toBe(true);
       expect(parsed.count).toBe(60);
-      expect(String(parsed.note)).toContain("前缀");
-      expect(JSON.stringify(parsed)).not.toContain("inputSchema");
+      expect(parsed.truncated).toBeUndefined();
+      expect(JSON.stringify(parsed)).toContain("inputSchema");
     });
 
     it("method 作为前缀过滤，把大品类切成能装下的一组", async () => {

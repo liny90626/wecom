@@ -71,12 +71,17 @@ function queueCall(result: unknown): void {
   httpMock.queue.push({ protocolVersion: "2025-03-26" }, result);
 }
 
+let ctxOverrides: { requesterSenderId?: string } = {};
+
 async function runTool(params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const tool = createWeComMcpToolFactory()({
     messageChannel: "wecom",
     accountId: "acc-1",
     sessionKey: "s",
     sessionId: "s",
+    ...(ctxOverrides.requesterSenderId === undefined
+      ? {}
+      : { requesterSenderId: ctxOverrides.requesterSenderId }),
   } as never);
   if (!tool) throw new Error("tool factory returned null");
   const result = (await tool.execute("call-1", params)) as { content: Array<{ text: string }> };
@@ -112,6 +117,7 @@ describe("wecom_mcp", () => {
     runtimeMock.isConnected.mockReturnValue(true);
     runtimeMock.replyCommand.mockReset();
     runtimeMock.replyCommand.mockResolvedValue({ errcode: 0, body: { url: CONFIG_URL } });
+    ctxOverrides = { requesterSenderId: "ZhangSan" };
   });
 
   afterEach(() => {
@@ -140,11 +146,35 @@ describe("wecom_mcp", () => {
     });
 
     it("拿不到发起人时不带该 header，而不是发一个空值", async () => {
+      ctxOverrides = {};
       sourceMock.snapshot = { source: "bot-ws" };
       queueCall(okResult("ok"));
       await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
 
       expect(httpMock.calls[0]?.headers).not.toHaveProperty("x-openclaw-wecom-userid");
+    });
+
+    it("身份优先取 OpenClaw core 的 requesterSenderId（官方来源）", async () => {
+      // core 标注它是 trusted sender id；我们自己 registry 里那份只作兜底。
+      ctxOverrides = { requesterSenderId: "CoreTrustedId" };
+      sourceMock.snapshot = {
+        source: "bot-ws",
+        requesterUserId: "StaleRegistryId",
+        chatId: "wrABCDefGH",
+        peerKind: "group",
+      };
+      queueCall(okResult("ok"));
+      await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
+
+      expect(httpMock.calls[0]?.headers["x-openclaw-wecom-userid"]).toBe("CoreTrustedId");
+    });
+
+    it("core 没给时回落到入站记录里的原文 userid", async () => {
+      ctxOverrides = {};
+      queueCall(okResult("ok"));
+      await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
+
+      expect(httpMock.calls[0]?.headers["x-openclaw-wecom-userid"]).toBe("ZhangSan");
     });
 
     it("带上官方形态的 User-Agent", async () => {

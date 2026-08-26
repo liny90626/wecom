@@ -8,6 +8,22 @@ const HTTP_REQUEST_TIMEOUT_MS = 30_000;
 const MCP_CONFIG_FETCH_TIMEOUT_MS = 15_000;
 const MCP_GET_CONFIG_CMD = "aibot_get_mcp_config";
 const AIBOT_SEND_BIZ_MSG_CMD = "aibot_send_biz_msg";
+
+/**
+ * 官方 CLI 概述（doc 61944）列出的 `biz_type` 取值。**只用于日志提示**——
+ * category 一律原样透传给企微（官方如此），这里不做任何改写。
+ */
+const OFFICIAL_BIZ_TYPES = new Set([
+  "doc",
+  "msg",
+  "mail",
+  "todo",
+  "schedule",
+  "meeting",
+  "disk",
+  "contact",
+  "media",
+]);
 const BIZ_MSG_SEND_TIMEOUT_MS = 10_000;
 /** `AiBotBizMsgType`：1 = 文档权限。 */
 const AIBOT_BIZ_MSG_TYPE_DOC_READ_AUTH = 1;
@@ -224,6 +240,11 @@ async function sendRawJsonRpc(
     if (normalizedRequesterUserId) {
       headers[WECOM_USERID_HEADER] = normalizedRequesterUserId;
     }
+
+    // 官方在这里打了同样一行：出问题时第一件要确认的就是「这次到底带没带身份」。
+    console.log(
+      `${LOG_TAG} rpc → ${body.method} ${WECOM_USERID_HEADER}=${headers[WECOM_USERID_HEADER] ?? "(not set)"}`,
+    );
 
     // 用 undici 的 fetch：Node 18.0–18.17 的原生 fetch 改不了 User-Agent，
     // 而 undici 本来就是本仓库的生产依赖，各版本行为一致。
@@ -445,6 +466,11 @@ export async function sendJsonRpc(
   params?: Record<string, unknown>,
   options?: { requesterUserId?: string },
 ): Promise<unknown> {
+  if (!OFFICIAL_BIZ_TYPES.has(category.trim().toLowerCase())) {
+    console.warn(
+      `${LOG_TAG} category "${category}" 不在官方 biz_type 取值表内（${[...OFFICIAL_BIZ_TYPES].join("/")}）——已原样发给企微，但这类取值常见的表现就是拿回一个没有作用域的 URL`,
+    );
+  }
   const url = await getMcpUrl(accountId, category);
   const body: JsonRpcRequest = {
     jsonrpc: "2.0",

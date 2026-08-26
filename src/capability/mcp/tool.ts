@@ -169,7 +169,7 @@ async function handleCall(
   const failure = extractBizError(result);
   if (!failure) return result;
   console.warn(
-    `${LOG_TAG} biz error account=${accountId} category=${category} method=${method} errcode=${failure.errcode} errmsg=${failure.errmsg}`,
+    `${LOG_TAG} biz error account=${accountId} category=${category} method=${method} errcode=${failure.errcode} errmsg=${failure.errmsg} userid=${identity.requesterUserId ?? "(not set)"} raw=${JSON.stringify(result).slice(0, 600)}`,
   );
 
   // 机器人授权过期/重置：作废配置与会话，下次调用重新拉取。
@@ -224,12 +224,23 @@ export function createWeComMcpToolFactory(): OpenClawPluginToolFactory {
     if (!source || source.source !== "bot-ws") {
       return null;
     }
-    // 身份必须是入站帧里的原文：企微的 chat_id / userid 大小写敏感。
+    // 发起人 userid 取 OpenClaw core 提供的 requesterSenderId——它被 core 标注为
+    // 「trusted sender id from inbound context」，是官方插件用的同一个来源。我们
+    // 自己 registry 里那份只作兜底：工具注册时机比入站记录更早的话它会是空的。
+    const trustedRequesterUserId =
+      String((toolContext as { requesterSenderId?: string }).requesterSenderId ?? "").trim() ||
+      undefined;
+    const requesterUserId = trustedRequesterUserId ?? source.requesterUserId;
+    // chatId / chatType 只能用我们自己存的原文：core 的 sessionKey 会把 peer id
+    // 强制小写，而企微的 chat_id 大小写敏感（小写后 aibot_send_biz_msg 报 93006）。
     const identity: McpIdentity = {
-      ...(source.requesterUserId ? { requesterUserId: source.requesterUserId } : {}),
+      ...(requesterUserId ? { requesterUserId } : {}),
       ...(source.chatId ? { chatId: source.chatId } : {}),
       ...(source.peerKind ? { chatType: source.peerKind } : {}),
     };
+    console.log(
+      `${LOG_TAG} tool ready account=${accountId ?? "n/a"} userid=${requesterUserId ?? "(none)"} useridFrom=${trustedRequesterUserId ? "ctx.requesterSenderId" : source.requesterUserId ? "source-registry" : "none"} chatId=${source.chatId ?? "(none)"} chatType=${source.peerKind ?? "(none)"}`,
+    );
 
     return {
       name: "wecom_mcp",

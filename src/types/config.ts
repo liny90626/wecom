@@ -61,6 +61,12 @@ export type WecomBotConfig = {
    * `aibot_get_mcp_config` 走的是机器人长连接、另行签发，两者不必然等价。
    *
    * 配置了就直接用它，不再调 `aibot_get_mcp_config`；没配置则行为不变。
+   *
+   * ⚠️ **这是排查探针 / 临时兜底，不是长期方案**：官方说文档权限有效期 7 天、
+   * 到期需重新授权，而重新授权后这个 `apikey` 是否保持不变**没有依据**。若它每次
+   * 授权都变，配在这里就意味着每 7 天要人工回后台重抄一次。长期正解应该是让
+   * `aibot_get_mcp_config` 签发出带成员授权的地址（它的请求体目前只有
+   * `biz_type` + `plugin_version`，不含任何成员身份）。
    */
   mcpServers?: Record<string, string>;
 };

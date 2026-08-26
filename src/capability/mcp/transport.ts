@@ -179,8 +179,11 @@ async function fetchMcpConfig(
     throw new Error(`MCP 配置响应缺少 url 字段 (account=${accountId}, category=${category})`);
   }
 
+  // 只打**键名**，不打值：这份响应里除了 url 还有什么，我们从来没看过。
+  // 如果它带着 expires_in / apikey / userid 之类的字段，就说明这条命令本来
+  // 支持更完整的协商，是我们漏读了。
   console.log(
-    `${LOG_TAG} config ready account=${accountId} category=${category} pluginVersion=${PLUGIN_VERSION} url=${redactUrl(String(body.url))}`,
+    `${LOG_TAG} config ready account=${accountId} category=${category} pluginVersion=${PLUGIN_VERSION} bodyKeys=[${Object.keys(body).join(",")}] url=${redactUrl(String(body.url))}`,
   );
   return body as Record<string, unknown>;
 }

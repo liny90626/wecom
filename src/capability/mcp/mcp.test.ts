@@ -474,4 +474,22 @@ describe("wecom_mcp", () => {
       expect(logged).not.toContain("CONSOLE_ISSUED_KEY");
     });
   });
+
+  it("把配置响应的字段名打进日志，但不打任何值", async () => {
+    // 这条命令的响应体里除了 url 还有什么，我们一直没看过；若带 expires_in /
+    // apikey 之类，说明它本来支持更完整的协商，是我们漏读了。
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    runtimeMock.replyCommand.mockResolvedValue({
+      errcode: 0,
+      body: { url: CONFIG_URL, expires_in: 604800, apikey: "SHOULD_NOT_BE_LOGGED" },
+    });
+    queueCall(okResult("ok"));
+
+    await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
+
+    const logged = log.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("bodyKeys=[url,expires_in,apikey]");
+    expect(logged).not.toContain("SHOULD_NOT_BE_LOGGED");
+    expect(logged).not.toContain("604800");
+  });
 });

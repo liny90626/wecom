@@ -52,6 +52,17 @@ export type WecomBotConfig = {
   receiveId?: string;
   ws?: WecomBotWsConfig;
   webhook?: WecomBotWebhookConfig;
+  /**
+   * 按 `biz_type` 直接指定 MCP Server 的 streamableHTTP URL。
+   *
+   * 取值来自机器人管理后台「可使用权限 → 查看使用方式」里复制的地址，形如
+   * `https://qyapi.weixin.qq.com/mcp/v2/bot/doc?apikey=…`。**这个 `apikey` 是成员
+   * 完成授权之后才签发的**，成员对文档的权限随它一起共享给 MCP 使用者；而
+   * `aibot_get_mcp_config` 走的是机器人长连接、另行签发，两者不必然等价。
+   *
+   * 配置了就直接用它，不再调 `aibot_get_mcp_config`；没配置则行为不变。
+   */
+  mcpServers?: Record<string, string>;
 };
 
 /**

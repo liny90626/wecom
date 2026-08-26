@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const runtimeMock = vi.hoisted(() => ({
   replyCommand: vi.fn(),
   isConnected: vi.fn(() => true),
+  cfg: {} as Record<string, unknown>,
+  mcpServers: undefined as Record<string, string> | undefined,
 }));
 
 const sourceMock = vi.hoisted(() => ({
@@ -23,6 +25,13 @@ vi.mock("../../runtime.js", () => ({
   getBotWsPushHandle: () => ({
     isConnected: runtimeMock.isConnected,
     replyCommand: runtimeMock.replyCommand,
+  }),
+  getWecomRuntime: () => ({ config: { loadConfig: () => runtimeMock.cfg } }),
+}));
+
+vi.mock("../../config/accounts.js", () => ({
+  resolveWecomAccount: () => ({
+    bot: { config: { mcpServers: runtimeMock.mcpServers } },
   }),
 }));
 
@@ -118,6 +127,7 @@ describe("wecom_mcp", () => {
     runtimeMock.isConnected.mockReturnValue(true);
     runtimeMock.replyCommand.mockReset();
     runtimeMock.replyCommand.mockResolvedValue({ errcode: 0, body: { url: CONFIG_URL } });
+    runtimeMock.mcpServers = undefined;
     ctxOverrides = { requesterSenderId: "ZhangSan" };
   });
 
@@ -414,5 +424,54 @@ describe("wecom_mcp", () => {
     };
     expect(init.method).toBe("initialize");
     expect(init.params.clientInfo).toEqual({ name: "wecom_mcp", version: "1.0.0" });
+  });
+
+  describe("显式配置的 MCP Server 地址", () => {
+    // 官方文档列出的两种接入方式之一：后台「查看使用方式」复制的 streamableHTTP
+    // URL，其 apikey 是成员完成授权后才签发的，成员的文档权限随它共享给使用者。
+    const CONSOLE_URL =
+      "https://qyapi.weixin.qq.com/mcp/v2/bot/doc?apikey=CONSOLE_ISSUED_KEY";
+
+    it("配了就直接用它，不再向企微要配置", async () => {
+      runtimeMock.mcpServers = { doc: CONSOLE_URL };
+      queueCall(okResult("ok"));
+
+      await runTool({ action: "call", category: "doc", method: "sheet_get_info", args: "{}" });
+
+      expect(runtimeMock.replyCommand).not.toHaveBeenCalled();
+      expect(httpMock.calls[0]?.url).toBe(CONSOLE_URL);
+      expect(httpMock.calls[1]?.url).toBe(CONSOLE_URL);
+    });
+
+    it("只覆盖配了的品类，其余仍走 aibot_get_mcp_config", async () => {
+      runtimeMock.mcpServers = { doc: CONSOLE_URL };
+      queueCall({ tools: [] });
+
+      await runTool({ action: "list", category: "contact" });
+
+      expect(runtimeMock.replyCommand).toHaveBeenCalledTimes(1);
+      expect(httpMock.calls[0]?.url).toBe(CONFIG_URL);
+    });
+
+    it("身份 header 照常带上", async () => {
+      runtimeMock.mcpServers = { doc: CONSOLE_URL };
+      queueCall(okResult("ok"));
+
+      await runTool({ action: "call", category: "doc", method: "sheet_get_info", args: "{}" });
+
+      expect(httpMock.calls[0]?.headers["x-openclaw-wecom-userid"]).toBe("ZhangSan");
+    });
+
+    it("日志不带出 apikey", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      runtimeMock.mcpServers = { doc: CONSOLE_URL };
+      queueCall(okResult("ok"));
+
+      await runTool({ action: "call", category: "doc", method: "sheet_get_info", args: "{}" });
+
+      const logged = log.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(logged).toContain("https://qyapi.weixin.qq.com/mcp/v2/bot/doc");
+      expect(logged).not.toContain("CONSOLE_ISSUED_KEY");
+    });
   });
 });

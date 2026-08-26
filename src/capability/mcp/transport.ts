@@ -1,7 +1,8 @@
 import { generateReqId } from "@wecom/aibot-node-sdk";
 import { fetch as undiciFetch } from "undici";
 
-import { getBotWsPushHandle } from "../../runtime.js";
+import { resolveWecomAccount } from "../../config/accounts.js";
+import { getBotWsPushHandle, getWecomRuntime } from "../../runtime.js";
 import { PLUGIN_VERSION } from "../../version.js";
 
 const HTTP_REQUEST_TIMEOUT_MS = 30_000;
@@ -122,6 +123,23 @@ export class McpHttpError extends Error {
   }
 }
 
+/**
+ * 读取账号里显式配置的 MCP Server 地址（`bot.mcpServers[bizType]`）。
+ *
+ * 这是官方文档列出的两种接入方式之一：后台「可使用权限 → 查看使用方式」复制的
+ * streamableHTTP URL，形如 `https://qyapi.weixin.qq.com/mcp/v2/bot/doc?apikey=…`。
+ * 那个 `apikey` 是**成员完成授权之后**才签发的，成员对文档的权限随它共享给
+ * MCP 使用者；而 `aibot_get_mcp_config` 是走机器人长连接另行签发的，两者不必然
+ * 等价——现网 `tools/list` 能过、单文档读取 851003，正是这种形态。
+ */
+function resolveConfiguredMcpUrl(accountId: string, bizType: string): string | undefined {
+  const cfg = getWecomRuntime().config.loadConfig();
+  const account = resolveWecomAccount({ cfg, accountId });
+  const configured = account.bot?.config?.mcpServers?.[bizType];
+  const url = String(configured ?? "").trim();
+  return url || undefined;
+}
+
 async function fetchMcpConfig(
   accountId: string,
   category: string,
@@ -220,6 +238,14 @@ async function getMcpUrl(accountId: string, category: string): Promise<string> {
   const cached = mcpConfigCache.get(key);
   if (cached?.url) {
     return String(cached.url);
+  }
+  const configured = resolveConfiguredMcpUrl(accountId, category);
+  if (configured) {
+    console.log(
+      `${LOG_TAG} config from account settings account=${accountId} category=${category} url=${redactUrl(configured)}`,
+    );
+    mcpConfigCache.set(key, { url: configured, source: "account-config" });
+    return configured;
   }
   const body = await fetchMcpConfig(accountId, category);
   mcpConfigCache.set(key, body);

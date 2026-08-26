@@ -42,6 +42,8 @@ export interface BotConfig {
   botIds?: string[];
   ws?: BotWsConfig;
   webhook?: BotWebhookConfig;
+  /** 按 biz_type 直接指定 MCP Server 的 streamableHTTP URL（后台「查看使用方式」复制）。 */
+  mcpServers?: Record<string, string>;
 }
 
 export interface AgentConfig {

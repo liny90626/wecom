@@ -151,8 +151,10 @@ npx vitest run
 
 | 来源 | 对端 | 授权 |
 | --- | --- | --- |
-| 后台「可使用权限 → 查看使用方式」的 `https://qyapi.weixin.qq.com/mcp/v2/bot/<biz_type>?apikey=…` | 「动态\* MCP」v1.0.5，`doc` 有 62 个工具 | **apikey 内嵌了授权真人用户**，该用户拥有的文档可读可查可下载 |
-| 插件默认走的 `aibot_get_mcp_config` | 旧一代，`doc` 只有 19 个工具 | **未绑定真人用户** → 成员拥有的文档一律 `851003 no authority` |
+| 后台「可使用权限 → 查看使用方式」的 `https://qyapi.weixin.qq.com/mcp/v2/bot/<biz_type>?apikey=…` | 「动态\* MCP」，工具名为**新一代**（`doc_create` / `sheet_get` / `smartsheet_records_add`，与官方文档一致） | **apikey 内嵌了授权真人用户**，该用户拥有的文档可读可查可下载 |
+| 插件默认走的 `aibot_get_mcp_config` | 可能是**旧一代**（`create_doc` / `sheet_get_info` / `smartsheet_add_records`，工具更少） | **未绑定真人用户** → 成员拥有的文档一律 `851003 no authority` |
+
+> 上表右侧的差异是在一套现网环境上实测到的（后台地址 `doc` 返回 62 个工具、旧地址 19 个）。不同企业的机器人未必落在同一档，但**判据是通用的**：看工具名是哪一代、看 `initialize` 打出的 `serverInfo`。
 
 所以**只要能拿到后台地址，就应该配上**。否则会出现「`action=list` 能列出工具，但一读具体文档就 `851003`」这种极易误判成权限问题的现象。
 
@@ -163,7 +165,7 @@ npx vitest run
   "channels": {
     "wecom": {
       "accounts": {
-        "project": {                       // ← 换成你的账号 id
+        "default": {                       // ← 你的账号 id（与 accounts 下的键一致）
           "bot": {
             "ws": { "botId": "…", "secret": "…" },   // 原有配置不动
             "mcpServers": {
@@ -195,8 +197,8 @@ npx vitest run
 配好后重启，日志里会看到对端是谁：
 
 ```
-[wecom-mcp] config from account settings account=project category=doc url=https://qyapi.weixin.qq.com/mcp/v2/bot/doc
-[wecom-mcp] initialized account=project category=doc server=动态文档 MCP/1.0.5
+[wecom-mcp] config from account settings account=<账号id> category=doc url=https://qyapi.weixin.qq.com/mcp/v2/bot/doc
+[wecom-mcp] initialized account=<账号id> category=doc server=动态文档 MCP/1.0.5
 ```
 
 `server=` 那行就是判断有没有配对的最快方式——走旧路径时它不会是「动态\* MCP/1.0.5」。

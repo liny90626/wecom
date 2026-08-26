@@ -7,6 +7,7 @@ const sdkMockState = vi.hoisted(() => {
     readonly replyStream = vi.fn().mockResolvedValue(undefined);
     readonly replyWelcome = vi.fn().mockResolvedValue(undefined);
     readonly sendMessage = vi.fn().mockResolvedValue(undefined);
+    readonly reply = vi.fn().mockResolvedValue(undefined);
 
     constructor(_options: unknown) {
       sdkMockState.client = this;
@@ -1760,6 +1761,96 @@ describe("BotWsSdkAdapter", () => {
     expect(calls[0]?.[1]).toMatchObject({ chat_type: 1, markdown: { content: "direct push" } });
     expect(calls[1]?.[1]).toMatchObject({ chat_type: 2, markdown: { content: "group push" } });
     expect(calls[2]?.[1]).not.toHaveProperty("chat_type");
+  });
+
+  it("回复企微的版本握手事件，而不是拿它跑一轮 agent", async () => {
+    // enter_check_update 只在官方源码里出现，文档没写：企微推它，期望插件
+    // 回复自身版本。我们此前会把它当成一条用户消息派发出去。
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+
+    sdkMockState.client?.emit("event", {
+      cmd: "aibot_event_callback",
+      headers: { req_id: "req-check" },
+      body: { msgid: "m1", msgtype: "event", event: { eventtype: "enter_check_update" } },
+    });
+    await waitForAsyncCallbacks();
+
+    expect(runtime.handleEvent).not.toHaveBeenCalled();
+    const replyCall = sdkMockState.client?.reply.mock.calls[0];
+    expect(replyCall?.[1]).toEqual({ version: expect.stringMatching(/^\d/) });
+    expect(replyCall?.[2]).toBe("ww_ai_robot_enter_event");
+  });
+
+  it("不认识的事件类型一律不进 agent 通道（白名单，与官方一致）", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+
+    sdkMockState.client?.emit("event", {
+      cmd: "aibot_event_callback",
+      headers: { req_id: "req-x" },
+      body: { msgid: "m2", msgtype: "event", event: { eventtype: "some_future_event" } },
+    });
+    await waitForAsyncCallbacks();
+
+    expect(runtime.handleEvent).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalledWith(
+      expect.stringContaining("event ignored account=acc-1 eventtype=some_future_event"),
+    );
+  });
+
+  it("授权变更事件照常派发，并作废该账号的 MCP 配置缓存", async () => {
+    // 成员刚在后台改过「可使用权限」，手上那份 MCP 配置与会话可能已不对应。
+    const runtime = {
+      account: {
+        accountId: "acc-1",
+        bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+
+    sdkMockState.client?.emit("event", {
+      cmd: "aibot_event_callback",
+      headers: { req_id: "req-auth" },
+      body: {
+        msgid: "m3",
+        msgtype: "event",
+        chattype: "single",
+        from: { userid: "user-1" },
+        event: { eventtype: "auth_change_event", auth_change_event: { auth_list: [1, 2] } },
+      },
+    });
+    await waitForAsyncCallbacks();
+
+    expect(runtime.handleEvent).toHaveBeenCalledTimes(1);
+    expect(log.info).toHaveBeenCalledWith(
+      expect.stringContaining("auth changed account=acc-1"),
+    );
   });
 
   it("keeps a replacement push handle when the stale adapter stops", () => {

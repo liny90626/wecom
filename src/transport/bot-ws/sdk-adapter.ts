@@ -12,6 +12,7 @@ import {
   type BotWsPushHandle,
 } from "../../app/index.js";
 import { clearWecomMcpAccountCache } from "../../capability/mcp/index.js";
+import { PLUGIN_VERSION } from "../../version.js";
 import type { ReplyHandle, RuntimeLogSink, UnifiedInboundEvent } from "../../types/index.js";
 import { mapBotWsFrameToInboundEvent } from "./inbound.js";
 import { uploadAndSendBotWsMedia } from "./media.js";
@@ -99,8 +100,34 @@ function isStandaloneMediaEvent(event: UnifiedInboundEvent): boolean {
   );
 }
 
-function isServerHandoverEvent(frame: WsFrame<BaseMessage | EventMessage>): boolean {
-  return (frame.body as EventMessage | undefined)?.event?.eventtype === "disconnected_event";
+/** 企微期望插件回复自身版本的握手事件（只在官方源码里有，文档未写）。 */
+const ENTER_CHECK_UPDATE_EVENT = "enter_check_update";
+const ENTER_CHECK_UPDATE_REPLY_CMD = "ww_ai_robot_enter_event";
+
+/**
+ * 允许进入 agent 通道的事件类型。
+ *
+ * 官方插件的通用 `event` 处理用的是**白名单**：只放行它认识的几种，其余一律
+ * 跳过。本插件此前只精确拦了 `disconnected_event`（v12），于是 `enter_check_update`
+ * 这类企微自己会推的事件仍会被当成一条用户消息跑一轮 OpenClaw——正文是
+ * `[event:<类型>]`、peer 常常落成 unknown。改用白名单后，将来新出现的事件类型
+ * 默认不再误入 agent 通道；需要处理时再显式加进来。
+ *
+ * `enter_chat` 是本 fork 的欢迎语入口，必须保留。
+ */
+const DISPATCHABLE_EVENT_TYPES = new Set([
+  "enter_chat",
+  "template_card_event",
+  "auth_change_event",
+]);
+
+function resolveFrameEventType(
+  frame: WsFrame<BaseMessage | EventMessage>,
+): string | undefined {
+  const body = frame.body as EventMessage | undefined;
+  if (body?.msgtype !== "event") return undefined;
+  const eventType = String(body.event?.eventtype ?? "").trim();
+  return eventType || undefined;
 }
 
 function resolveMergeCandidateKind(event: UnifiedInboundEvent): MergeCandidateKind | undefined {
@@ -446,23 +473,49 @@ export class BotWsSdkAdapter {
     };
 
     const handleFrame = async (frame: WsFrame<BaseMessage | EventMessage>) => {
-      // WeCom allows one live connection per bot: when a second one subscribes,
-      // this one is told and then terminated. The notice arrives on the same
-      // event channel as user events, but it carries no sender and no chat, so
-      // dispatching it would start an agent run for "[event:disconnected_event]"
-      // on a socket that is already going away. Reconnecting is not an option
-      // either — the new owner would kick us straight back.
-      if (isServerHandoverEvent(frame)) {
-        this.log.warn?.(
-          `[wecom-ws] handed-over account=${this.runtime.account.accountId} reason=disconnected_event`,
-        );
-        this.runtime.recordOperationalIssue({
-          transport: "bot-ws",
-          category: "ws-kicked",
-          summary: "ws handed over: another connection took this bot; no auto-reconnect",
-          error: "disconnected_event",
-        });
-        return;
+      const eventType = resolveFrameEventType(frame);
+      if (eventType) {
+        // 同一机器人同一时刻只允许一条长连接：新连接订阅成功后，这条会先收到
+        // 通知再被服务端断开。它和用户事件走同一条 event 通道，却没有发送者、
+        // 没有会话，派发出去只会在一条正在终止的连接上跑一轮 agent。也不能重连
+        // ——新 owner 会立刻把我们再踢一次。
+        if (eventType === "disconnected_event") {
+          this.log.warn?.(
+            `[wecom-ws] handed-over account=${this.runtime.account.accountId} reason=disconnected_event`,
+          );
+          this.runtime.recordOperationalIssue({
+            transport: "bot-ws",
+            category: "ws-kicked",
+            summary: "ws handed over: another connection took this bot; no auto-reconnect",
+            error: "disconnected_event",
+          });
+          return;
+        }
+        // 企微的版本握手：回自己的版本号即可，它不是用户消息。
+        if (eventType === ENTER_CHECK_UPDATE_EVENT) {
+          void client
+            .reply(frame as never, { version: PLUGIN_VERSION }, ENTER_CHECK_UPDATE_REPLY_CMD)
+            .catch((error: unknown) => {
+              this.log.warn?.(
+                `[wecom-ws] enter-check-update reply failed account=${this.runtime.account.accountId} error=${error instanceof Error ? error.message : String(error)}`,
+              );
+            });
+          return;
+        }
+        if (!DISPATCHABLE_EVENT_TYPES.has(eventType)) {
+          this.log.info?.(
+            `[wecom-ws] event ignored account=${this.runtime.account.accountId} eventtype=${eventType}`,
+          );
+          return;
+        }
+        // 授权变更：成员刚在后台改过「可使用权限」，手上那份 MCP 配置与会话
+        // 可能已经不对应了，作废掉，让下次调用重新拉取。
+        if (eventType === "auth_change_event") {
+          this.log.info?.(
+            `[wecom-ws] auth changed account=${this.runtime.account.accountId} — clearing MCP config cache`,
+          );
+          clearWecomMcpAccountCache(this.runtime.account.accountId);
+        }
       }
       const botAccount = this.runtime.account.bot;
       if (!botAccount) {

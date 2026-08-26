@@ -179,6 +179,18 @@ async function fetchMcpConfig(
     throw new Error(`MCP 配置响应缺少 url 字段 (account=${accountId}, category=${category})`);
   }
 
+  // 后台签发的地址形如 /mcp/v2/bot/<biz_type>；实测这一代的 apikey 内嵌了
+  // 「授权真人用户」，成员的文档才读得到。aibot_get_mcp_config 若给回别的形态，
+  // 多半是上一代、未绑定真人用户的 Server——那会表现为「tools/list 能过、
+  // 一读具体文档就 851003」。这种情况必须吵出来，否则只能靠猜。
+  if (!String(body.url).includes("/mcp/v2/")) {
+    console.warn(
+      `${LOG_TAG} aibot_get_mcp_config 返回的不是 /mcp/v2/ 形态的地址（account=${accountId} category=${category}）——` +
+        "它可能是未绑定授权真人用户的上一代 Server：品类级 tools/list 能过，但读写成员的文档会返回 851003。" +
+        "若遇到该现象，请在 channels.wecom.accounts.<账号>.bot.mcpServers 里配上后台「查看使用方式」复制的地址。",
+    );
+  }
+
   // 只打**键名**，不打值：这份响应里除了 url 还有什么，我们从来没看过。
   // 如果它带着 expires_in / apikey / userid 之类的字段，就说明这条命令本来
   // 支持更完整的协商，是我们漏读了。

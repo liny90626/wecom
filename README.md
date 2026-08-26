@@ -23,9 +23,9 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-当前已发布版本为 `v2.7.260-14`，发布标签 `released/2.7.260-14`；`v2.7.260-16` 已构建但**尚未打 tag / 未推远端**，等真机验证通过再发布。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留。
+当前已发布版本为 `v2.7.260-17`，发布标签 `released/2.7.260-17`。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留。
 
-本轮把 `wecom_mcp` **严格对齐官方实现**（参考官方插件 `@wecom/wecom-openclaw-plugin@2026.7.2` 保留的 `src/mcp/`，1814 行），并找到了现网 `851003 no authority` 的真正根因：**官方每一次 MCP 请求都带 `x-openclaw-wecom-userid` 透传发起人身份，我们一次都没发过**。MCP 平面是「代替成员」操作的，不带身份服务端就不知道以谁执行，对成员作用域的资源自然返回 no authority——这也解释了「CLI 通」（CLI 绑定扫码成员）与「以前正常」（企微这次更新开始校验身份）。同时补上官方 User-Agent、官方的清缓存错误码集合 `{850001, 851014}`，以及**文档授权引导卡片**（`doc` 品类命中 `851013/851014/851008` 时让企微直接给用户推授权卡片，并把 help_message 拦下不喂给模型）。完整说明见 [`changelog/v2.7.260-14.md`](./changelog/v2.7.260-14.md)。
+本轮收口 `wecom_mcp` 的 `851003 no authority`。根因是**结构性**的：`aibot_get_mcp_config` 签发的是 `/mcp/robot-doc`（「企微机器人文档 MCP」，**只有机器人自身作用域**），而后台「查看使用方式」的 apikey 签发的是 `/mcp/v2/bot/<biz_type>`（「动态文档 MCP」，**内嵌授权真人用户**）——不是授权没生效，是产品定位不同。因此新增 **`bot.mcpServers`** 配置项：按 `biz_type` 直接配后台地址，八个能力全部可用。同时严格对齐官方 MCP 实现（身份头、官方 UA、官方错误码分工、文档授权引导卡片），`tools/list` 按实测体积限幅，并与官方插件仓库同步了事件白名单、`enter_check_update` 版本握手与 `auth_change_event` 清缓存。完整说明见 [`changelog/v2.7.260-17.md`](./changelog/v2.7.260-17.md)。
 
 开发与后续自测统一固定为 OpenClaw `2026.7.1-2`，不再运行其他 OpenClaw 版本或双版本矩阵。`peerDependencies` 继续保留既有 `^2026.6.11` 安装兼容范围，只表示安装兼容声明。
 
@@ -262,6 +262,15 @@ npx vitest run
 ## 📋 本 fork 近期更新
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
+
+#### 📌 v2.7.260-17（2026-08-26，LinKy fork 维护版）
+
+- **[`851003` 的根因是结构性的]**：`aibot_get_mcp_config` → `/mcp/robot-doc`「企微机器人文档 MCP」，**只有机器人自身作用域**；后台 apikey → `/mcp/v2/bot/<biz>`「动态文档 MCP」，**内嵌授权真人用户**。服务端 `help_message`「机器人不允许编辑由成员或其他机器人创建的文档」与之完全吻合。**必须配 `bot.mcpServers`**，使用者已验证取消授权再授权 apikey 不变。
+- **[两个曾被当作根因的假设已证伪]**：缺 `x-openclaw-wecom-userid`（日志证明已发出，错误一字未变）、`plugin_version` 是魔法串导致降档（改成真实版本号后端点毫无变化）。
+- **[严格对齐官方 MCP 实现]**：身份头取 OpenClaw core 的 `ctx.requesterSenderId`（保留原始大小写）、官方 User-Agent + undici fetch、官方错误码分工；**文档授权引导卡片**经 `aibot_send_biz_msg` 直推用户，并**保留 `help_message` 原文**（服务端用 `help_instruction` 要求逐字展示，官方 2026.7.2 那版丢掉了它）。
+- **[`tools/list` 限幅阈值 48KB 来自实测]**：contact 0.5KB … mail 12.8KB / **doc 289KB**（62 工具）。超限退名称索引并列出可用前缀。`-13` 按文档估算的 32KB 曾在旧 Server 的 19 个工具上误伤。
+- **[与官方插件仓库同步]**：`enter_check_update` 版本握手（此前会被当成用户消息跑一轮 agent）、事件改用**白名单**、`auth_change_event` 作废 MCP 配置缓存。
+- **[验证]**：48 文件、652/652；typecheck、build、dist、B1/B2/B3、diff check 全绿；`src/capability/mcp/` 从零测试覆盖补到 31 条；多轮敏感性验证逐条转红后恢复；**现网按 `bot.mcpServers` 配置后功能正常**。完整说明见 [`changelog/v2.7.260-17.md`](./changelog/v2.7.260-17.md)。
 
 #### 📌 v2.7.260-16（2026-08-26，验证版，未打 tag）
 

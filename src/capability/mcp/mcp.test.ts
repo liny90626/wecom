@@ -5,6 +5,20 @@ const runtimeMock = vi.hoisted(() => ({
   isConnected: vi.fn(() => true),
 }));
 
+const sourceMock = vi.hoisted(() => ({
+  snapshot: {
+    source: "bot-ws",
+    requesterUserId: "ZhangSan",
+    chatId: "wrABCDefGH",
+    peerKind: "group",
+  } as Record<string, unknown> | null,
+}));
+
+const httpMock = vi.hoisted(() => ({
+  queue: [] as unknown[],
+  calls: [] as Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }>,
+}));
+
 vi.mock("../../runtime.js", () => ({
   getBotWsPushHandle: () => ({
     isConnected: runtimeMock.isConnected,
@@ -13,52 +27,51 @@ vi.mock("../../runtime.js", () => ({
 }));
 
 vi.mock("../../runtime/source-registry.js", () => ({
-  resolveWecomSourceSnapshot: () => ({ source: "bot-ws" }),
+  resolveWecomSourceSnapshot: () => sourceMock.snapshot,
 }));
 
 vi.mock("@wecom/aibot-node-sdk", () => ({
   generateReqId: (prefix: string) => `${prefix}-1`,
 }));
 
+vi.mock("undici", () => ({
+  fetch: vi.fn(async (url: string, init: { headers: Record<string, string>; body: string }) => {
+    httpMock.calls.push({
+      url,
+      headers: init.headers,
+      body: JSON.parse(init.body) as Record<string, unknown>,
+    });
+    const next = httpMock.queue.shift();
+    if (next === undefined) throw new Error("unexpected extra fetch");
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      // 不返回 mcp-session-id ⇒ 走 stateless 分支，省掉 initialized 通知。
+      headers: new Headers({ "content-type": "application/json" }),
+      text: async () => JSON.stringify({ jsonrpc: "2.0", id: "rpc-1", result: next }),
+    };
+  }),
+}));
+
 import { createWeComMcpToolFactory } from "./tool.js";
-import {
-  clearWecomMcpAccountCache,
-  resolveWecomMcpBizType,
-  sendJsonRpc,
-} from "./transport.js";
+import { clearWecomMcpAccountCache } from "./transport.js";
 
 const CONFIG_URL = "https://mcp.example.com/stream/abc?token=SUPER_SECRET_TOKEN";
 
-/** 队列化的 MCP HTTP 应答：每次 fetch 取一条。 */
-const httpQueue: unknown[] = [];
-const fetchCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
-
-function jsonResponse(result: unknown): Response {
-  return {
-    ok: true,
-    status: 200,
-    statusText: "OK",
-    // 没有 mcp-session-id ⇒ 走 stateless 分支，省掉一次 initialized 通知。
-    headers: new Headers({ "content-type": "application/json" }),
-    text: async () => JSON.stringify({ jsonrpc: "2.0", id: "rpc-1", result }),
-  } as unknown as Response;
-}
-
 /** 企微把业务错误装在成功的 MCP 结果里。 */
-function bizErrorResult(errcode: number, errmsg: string): unknown {
-  return { content: [{ type: "text", text: JSON.stringify({ errcode, errmsg }) }] };
-}
+const bizError = (errcode: number, errmsg: string, extra: Record<string, unknown> = {}) => ({
+  content: [{ type: "text", text: JSON.stringify({ errcode, errmsg, ...extra }) }],
+});
 
-function okResult(text: string): unknown {
-  return { content: [{ type: "text", text }] };
-}
+const okResult = (text: string) => ({ content: [{ type: "text", text }] });
 
+/** 冷启动一次调用要两次 HTTP：initialize + 真正的请求。 */
 function queueCall(result: unknown): void {
-  // 每次 sendJsonRpc 冷启动要两次 HTTP：initialize + 真正的调用。
-  httpQueue.push({ protocolVersion: "2025-03-26" }, result);
+  httpMock.queue.push({ protocolVersion: "2025-03-26" }, result);
 }
 
-function buildTool() {
+async function runTool(params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const tool = createWeComMcpToolFactory()({
     messageChannel: "wecom",
     accountId: "acc-1",
@@ -66,147 +79,202 @@ function buildTool() {
     sessionId: "s",
   } as never);
   if (!tool) throw new Error("tool factory returned null");
-  return tool;
-}
-
-async function runTool(params: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const result = (await buildTool().execute("call-1", params)) as {
-    content: Array<{ text: string }>;
-  };
+  const result = (await tool.execute("call-1", params)) as { content: Array<{ text: string }> };
   return JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
 }
 
+/**
+ * 拆出 MCP result 里那层内嵌 JSON：官方的授权拦截返回的仍是标准
+ * `{content:[{type:"text",text:"<json>"}]}` 形态，业务字段在 text 里。
+ */
+function innerJson(result: Record<string, unknown>): Record<string, unknown> {
+  const content = result.content as Array<{ text?: string }> | undefined;
+  const text = content?.[0]?.text;
+  return text ? (JSON.parse(text) as Record<string, unknown>) : result;
+}
+
+const bizMsgCalls = () =>
+  runtimeMock.replyCommand.mock.calls
+    .map((call) => call[0] as { cmd: string; body: Record<string, unknown> })
+    .filter((req) => req.cmd === "aibot_send_biz_msg");
+
 describe("wecom_mcp", () => {
   beforeEach(() => {
-    httpQueue.length = 0;
-    fetchCalls.length = 0;
+    httpMock.queue.length = 0;
+    httpMock.calls.length = 0;
     clearWecomMcpAccountCache("acc-1");
+    sourceMock.snapshot = {
+      source: "bot-ws",
+      requesterUserId: "ZhangSan",
+      chatId: "wrABCDefGH",
+      peerKind: "group",
+    };
     runtimeMock.isConnected.mockReturnValue(true);
     runtimeMock.replyCommand.mockReset();
     runtimeMock.replyCommand.mockResolvedValue({ errcode: 0, body: { url: CONFIG_URL } });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string, init: { body: string }) => {
-        fetchCalls.push({ url, body: JSON.parse(init.body) as Record<string, unknown> });
-        const next = httpQueue.shift();
-        if (next === undefined) throw new Error("unexpected extra fetch");
-        return jsonResponse(next);
-      }),
-    );
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     clearWecomMcpAccountCache("acc-1");
   });
 
-  describe("biz_type 归一", () => {
-    // 官方取值表（CLI 概述 doc 61944）：能力名与 biz_type 并不同名，靠猜必错。
-    it.each([
-      ["doc", "doc"],
-      ["smartsheet", "doc"],
-      ["smart_sheet", "doc"],
-      ["sheet", "doc"],
-      ["smartpage", "doc"],
-      ["智能表格", "doc"],
-      ["智能文档", "doc"],
-      ["wedoc", "doc"],
-      ["calendar", "schedule"],
-      ["schedule", "schedule"],
-      ["message", "msg"],
-      ["msg", "msg"],
-      ["email", "mail"],
-      ["drive", "disk"],
-      ["contacts", "contact"],
-      ["MeetingS", "meeting"],
-    ])("把 %s 归一到 %s", (input, expected) => {
-      expect(resolveWecomMcpBizType(input)).toEqual({ bizType: expected, recognized: true });
+  describe("请求身份（官方 x-openclaw-wecom-userid）", () => {
+    it("每一次 MCP 请求都带上发起人 userid——握手与调用都要带", async () => {
+      queueCall(okResult("ok"));
+      await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
+
+      expect(httpMock.calls).toHaveLength(2);
+      for (const call of httpMock.calls) {
+        // MCP 平面是「代替成员」操作的：不带身份，服务端只会回 no authority。
+        expect(call.headers["x-openclaw-wecom-userid"]).toBe("ZhangSan");
+      }
     });
 
-    it("认不出的取值原样放行，不写死枚举把未来品类挡在门外", () => {
-      expect(resolveWecomMcpBizType("brand_new_thing")).toEqual({
-        bizType: "brand_new_thing",
-        recognized: false,
-      });
+    it("userid 保持原始大小写", async () => {
+      queueCall({ tools: [] });
+      await runTool({ action: "list", category: "contact" });
+
+      expect(httpMock.calls[0]?.headers["x-openclaw-wecom-userid"]).toBe("ZhangSan");
+      expect(httpMock.calls[0]?.headers["x-openclaw-wecom-userid"]).not.toBe("zhangsan");
+    });
+
+    it("拿不到发起人时不带该 header，而不是发一个空值", async () => {
+      sourceMock.snapshot = { source: "bot-ws" };
+      queueCall(okResult("ok"));
+      await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
+
+      expect(httpMock.calls[0]?.headers).not.toHaveProperty("x-openclaw-wecom-userid");
+    });
+
+    it("带上官方形态的 User-Agent", async () => {
+      queueCall(okResult("ok"));
+      await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
+
+      expect(httpMock.calls[0]?.headers["User-Agent"]).toMatch(
+        /^OpenClawPlugin\/\d[\w.-]* \w+\/\w+$/,
+      );
     });
   });
 
-  it("按官方取值表发出 biz_type，而不是模型给的能力名", async () => {
+  it("category 原样发给企微，不做任何改写（对齐官方）", async () => {
     queueCall(okResult("ok"));
-    await sendJsonRpc("acc-1", "smartsheet", "tools/call", { name: "smartsheet_records_list" });
+    await runTool({ action: "call", category: "smartsheet", method: "x", args: "{}" });
 
-    expect(runtimeMock.replyCommand).toHaveBeenCalledTimes(1);
-    const request = runtimeMock.replyCommand.mock.calls[0]?.[0] as {
-      cmd: string;
-      body: Record<string, unknown>;
-    };
-    expect(request.cmd).toBe("aibot_get_mcp_config");
-    // 发 "smartsheet" 会拿回一个没有作用域的 URL，之后每次调用都是 851003。
-    expect(request.body.biz_type).toBe("doc");
-  });
-
-  it("同一作用域的别名共用一份配置与会话，不重复取配置", async () => {
-    queueCall(okResult("first"));
-    await sendJsonRpc("acc-1", "smartsheet", "tools/call", { name: "a" });
-    // 第二次是热路径：配置与会话都已缓存，只剩一次真正的调用。
-    httpQueue.push(okResult("second"));
-    await sendJsonRpc("acc-1", "doc", "tools/call", { name: "b" });
-
-    expect(runtimeMock.replyCommand).toHaveBeenCalledTimes(1);
+    const config = runtimeMock.replyCommand.mock.calls[0]?.[0] as { body: Record<string, unknown> };
+    expect(config.body.biz_type).toBe("smartsheet");
   });
 
   it("日志不带出配置 URL 里的凭证", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     queueCall(okResult("ok"));
-    await sendJsonRpc("acc-1", "doc", "tools/call", { name: "a" });
+    await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
 
     const logged = log.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logged).toContain("https://mcp.example.com/stream/abc");
     expect(logged).not.toContain("SUPER_SECRET_TOKEN");
   });
 
-  describe("授权类错误", () => {
-    it("851003 先作废配置重取一次再试，成功就不再打扰调用方", async () => {
-      queueCall(bizErrorResult(851003, "no authority"));
-      queueCall(okResult("成功写入"));
+  describe("业务错误码（对齐官方集合）", () => {
+    it.each([850001, 851014])("%i 作废配置与会话，下次调用重新拉取", async (errcode) => {
+      queueCall(bizError(errcode, "auth expired"));
+      await runTool({ action: "call", category: "contact", method: "contact_users_search", args: "{}" });
 
+      queueCall(okResult("ok"));
+      await runTool({ action: "call", category: "contact", method: "contact_users_search", args: "{}" });
+
+      const configFetches = runtimeMock.replyCommand.mock.calls.filter(
+        (call) => (call[0] as { cmd: string }).cmd === "aibot_get_mcp_config",
+      );
+      expect(configFetches).toHaveLength(2);
+    });
+
+    it("其它业务错误码不动缓存，也不改写返回", async () => {
+      queueCall(bizError(40058, "invalid parameter"));
       const parsed = await runTool({
         action: "call",
-        category: "smartsheet",
-        method: "smartsheet_records_add",
+        category: "contact",
+        method: "contact_users_search",
         args: "{}",
       });
 
-      // 重取配置 = 第二次 aibot_get_mcp_config。
-      expect(runtimeMock.replyCommand).toHaveBeenCalledTimes(2);
-      expect(JSON.stringify(parsed)).toContain("成功写入");
-      expect(parsed.hint).toBeUndefined();
+      expect(JSON.stringify(parsed)).toContain("invalid parameter");
+      expect(bizMsgCalls()).toHaveLength(0);
+    });
+  });
+
+  describe("文档授权引导卡片", () => {
+    it.each([851013, 851014, 851008])(
+      "doc 品类命中 %i：推授权卡片，并拦下 help_message",
+      async (errcode) => {
+        queueCall(
+          bizError(errcode, "no doc authority", {
+            help_message: "请打开链接 https://example.com/auth 完成授权",
+          }),
+        );
+
+        const parsed = await runTool({
+          action: "call",
+          category: "doc",
+          method: "doc_contents_append",
+          args: "{}",
+        });
+
+        const cards = bizMsgCalls();
+        expect(cards).toHaveLength(1);
+        expect(cards[0]?.body).toMatchObject({
+          biz_type: 1,
+          chat_id: "wrABCDefGH",
+          chat_type: 2,
+          userid: "ZhangSan",
+        });
+        const inner = innerJson(parsed);
+        expect(inner._biz_msg_sent).toBe(true);
+        expect(inner.errcode).toBe(errcode);
+        // 授权步骤由卡片承担，转述只会走样。
+        expect(JSON.stringify(parsed)).not.toContain("help_message");
+        expect(JSON.stringify(parsed)).not.toContain("example.com/auth");
+      },
+    );
+
+    it("chat_id 与 userid 必须是原文大小写（小写会被企微判为 93006）", async () => {
+      queueCall(bizError(851013, "no doc authority"));
+      await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
+
+      const body = bizMsgCalls()[0]?.body as Record<string, unknown>;
+      expect(body.chat_id).toBe("wrABCDefGH");
+      expect(body.userid).toBe("ZhangSan");
     });
 
-    it("重取后仍然 851003 就停手，并给出可执行的排查提示", async () => {
-      queueCall(bizErrorResult(851003, "no authority"));
-      queueCall(bizErrorResult(851003, "no authority"));
+    it("单聊按 chat_type=1 发", async () => {
+      sourceMock.snapshot = {
+        source: "bot-ws",
+        requesterUserId: "LiSi",
+        chatId: "LiSi",
+        peerKind: "direct",
+      };
+      queueCall(bizError(851013, "no doc authority"));
+      await runTool({ action: "call", category: "doc", method: "doc_create", args: "{}" });
 
+      expect(bizMsgCalls()[0]?.body).toMatchObject({ chat_type: 1, chat_id: "LiSi" });
+    });
+
+    it("非 doc 品类的同码错误不推卡片", async () => {
+      queueCall(bizError(851013, "no authority"));
       const parsed = await runTool({
         action: "call",
-        category: "smartsheet",
-        method: "smartsheet_records_add",
+        category: "contact",
+        method: "contact_users_search",
         args: "{}",
       });
 
-      expect(runtimeMock.replyCommand).toHaveBeenCalledTimes(2);
-      const hint = String(parsed.hint ?? "");
-      expect(hint).toContain("851003");
-      expect(hint).toContain("7 天");
-      expect(hint).toContain("Webhook");
-      expect(hint).toContain("biz_type=doc");
-      // 只重试一次：真没授权时再试也是同一个错误。
-      expect(httpQueue).toHaveLength(0);
+      expect(bizMsgCalls()).toHaveLength(0);
+      expect(innerJson(parsed)._biz_msg_sent).toBeUndefined();
     });
 
-    it("非授权类业务错误原样返回，不重试也不加提示", async () => {
-      queueCall(bizErrorResult(40058, "invalid parameter"));
+    it("缺会话上下文时不推卡片，但仍要告诉用户去哪里重新授权", async () => {
+      sourceMock.snapshot = { source: "bot-ws", requesterUserId: "ZhangSan" };
+      queueCall(bizError(851013, "no doc authority"));
 
       const parsed = await runTool({
         action: "call",
@@ -215,9 +283,10 @@ describe("wecom_mcp", () => {
         args: "{}",
       });
 
-      expect(runtimeMock.replyCommand).toHaveBeenCalledTimes(1);
-      expect(JSON.stringify(parsed)).toContain("invalid parameter");
-      expect(parsed.hint).toBeUndefined();
+      expect(bizMsgCalls()).toHaveLength(0);
+      const inner = innerJson(parsed);
+      expect(inner._biz_msg_sent).toBe(false);
+      expect(String(inner._user_hint)).toContain("重新授权");
     });
   });
 
@@ -238,20 +307,15 @@ describe("wecom_mcp", () => {
 
     it("清单放得下时给出完整 schema", async () => {
       queueCall({ tools: [tool("todo_create"), tool("todo_list")] });
-
       const parsed = await runTool({ action: "list", category: "todo" });
 
-      expect(parsed.bizType).toBe("todo");
       expect(parsed.count).toBe(2);
       expect(parsed.truncated).toBeUndefined();
       expect(JSON.stringify(parsed)).toContain("inputSchema");
     });
 
     it("清单超预算时退回名称索引，并说明怎么取完整 schema", async () => {
-      queueCall({
-        tools: Array.from({ length: 60 }, (_, i) => tool(`smartsheet_tool_${i}`, 12)),
-      });
-
+      queueCall({ tools: Array.from({ length: 60 }, (_, i) => tool(`smartsheet_tool_${i}`, 12)) });
       const parsed = await runTool({ action: "list", category: "doc" });
 
       expect(parsed.truncated).toBe(true);
@@ -269,7 +333,6 @@ describe("wecom_mcp", () => {
           tool("smartsheet_records_update"),
         ],
       });
-
       const parsed = await runTool({ action: "list", category: "doc", method: "smartsheet_" });
 
       expect(parsed.count).toBe(2);
@@ -280,7 +343,6 @@ describe("wecom_mcp", () => {
 
   it("Bot WS 未连接时直接给出可读原因，不去打 HTTP", async () => {
     runtimeMock.isConnected.mockReturnValue(false);
-
     const parsed = await runTool({
       action: "call",
       category: "doc",
@@ -289,15 +351,14 @@ describe("wecom_mcp", () => {
     });
 
     expect(String(parsed.error)).toContain("Bot WS 未连接");
-    expect(fetchCalls).toHaveLength(0);
+    expect(httpMock.calls).toHaveLength(0);
   });
 
-  it("缺少 category 时直接给出官方取值，不去问企微", async () => {
+  it("缺少 category 时不去问企微", async () => {
     const parsed = await runTool({ action: "list", category: "  " });
 
-    expect(String(parsed.error)).toContain("biz_type");
-    expect(String(parsed.error)).toContain("schedule");
+    expect(String(parsed.error)).toContain("category");
     expect(runtimeMock.replyCommand).not.toHaveBeenCalled();
-    expect(fetchCalls).toHaveLength(0);
+    expect(httpMock.calls).toHaveLength(0);
   });
 });

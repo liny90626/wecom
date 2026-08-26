@@ -4,9 +4,9 @@ export {
   clearWecomMcpCategoryCache,
   McpHttpError,
   McpRpcError,
-  resolveWecomMcpBizType,
   sendJsonRpc,
-  WECOM_MCP_BIZ_TYPES,
+  sendWecomDocAuthCard,
+  WECOM_USERID_HEADER,
   type McpToolInfo,
 } from "./transport.js";
 export { cleanSchemaForGemini } from "./schema.js";

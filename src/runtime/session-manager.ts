@@ -50,6 +50,8 @@ export async function prepareInboundSession(params: {
       sessionKey: route.sessionKey,
       peerKind: event.conversation.peerKind,
       peerId: event.conversation.peerId,
+      requesterUserId: event.conversation.senderId,
+      chatId: event.conversation.peerId,
     });
   }
   const storePath = core.channel.session.resolveStorePath(cfg.session?.store, {
@@ -139,6 +141,8 @@ export async function prepareInboundSession(params: {
       sessionId: readContextSessionId(ctx),
       peerKind: event.conversation.peerKind,
       peerId: event.conversation.peerId,
+      requesterUserId: event.conversation.senderId,
+      chatId: event.conversation.peerId,
     });
   }
 

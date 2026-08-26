@@ -1,11 +1,35 @@
 import { generateReqId } from "@wecom/aibot-node-sdk";
+import { fetch as undiciFetch } from "undici";
+
 import { getBotWsPushHandle } from "../../runtime.js";
+import { PLUGIN_VERSION } from "../../version.js";
 
 const HTTP_REQUEST_TIMEOUT_MS = 30_000;
 const MCP_CONFIG_FETCH_TIMEOUT_MS = 15_000;
 const MCP_GET_CONFIG_CMD = "aibot_get_mcp_config";
+const AIBOT_SEND_BIZ_MSG_CMD = "aibot_send_biz_msg";
+const BIZ_MSG_SEND_TIMEOUT_MS = 10_000;
+/** `AiBotBizMsgType`：1 = 文档权限。 */
+const AIBOT_BIZ_MSG_TYPE_DOC_READ_AUTH = 1;
 const MCP_PLUGIN_VERSION = "wecom-dual-plane";
 const LOG_TAG = "[wecom-mcp]";
+
+/**
+ * 请求 MCP Server 时透传可信企微 userid 的 header 名。
+ *
+ * MCP 平面是「代替成员」操作的：不带这个 header，服务端不知道以谁的身份执行，
+ * 对成员作用域的资源就会返回 `no authority`。取值必须是**原始大小写**。
+ */
+export const WECOM_USERID_HEADER = "x-openclaw-wecom-userid";
+
+/** 与官方插件同形态：`OpenClawPlugin/<version> <platform>/<arch>`。 */
+function buildUserAgent(): string {
+  const archMap: Record<string, string> = { x64: "x86_64", ia32: "i386" };
+  const arch = archMap[process.arch] ?? process.arch;
+  return `OpenClawPlugin/${PLUGIN_VERSION} ${process.platform}/${arch}`;
+}
+
+const MCP_USER_AGENT = buildUserAgent();
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -38,97 +62,13 @@ const mcpSessionCache = new Map<string, McpSession>();
 const statelessKeys = new Set<string>();
 const inflightInitRequests = new Map<string, Promise<McpSession>>();
 
-/**
- * 官方 `biz_type` 取值表（企微 CLI 概述 doc 61944，2026-08-14）。
- *
- * 取值与能力名并不同名，靠猜必错三处：消息是 `msg` 不是 `message`、日程是
- * `schedule` 不是 `calendar`，而**表格 / 智能表格 / 智能文档三项与文档共用同一个
- * `doc`**。企微对认不出的 `biz_type` 不会报错，只会给回一个没有作用域的 URL，
- * 于是每次调用都返回 `851003 no authority`——看起来像权限问题，实际是品类错了。
- */
-export const WECOM_MCP_BIZ_TYPES = [
-  "doc",
-  "msg",
-  "mail",
-  "todo",
-  "schedule",
-  "meeting",
-  "disk",
-  "contact",
-  "media",
-] as const;
-
-const BIZ_TYPE_BY_ALIAS = new Map<string, string>([
-  ["doc", "doc"],
-  ["docs", "doc"],
-  ["document", "doc"],
-  ["documents", "doc"],
-  ["wedoc", "doc"],
-  ["文档", "doc"],
-  ["sheet", "doc"],
-  ["sheets", "doc"],
-  ["spreadsheet", "doc"],
-  ["表格", "doc"],
-  ["在线表格", "doc"],
-  ["smartsheet", "doc"],
-  ["smart_sheet", "doc"],
-  ["smart-sheet", "doc"],
-  ["智能表格", "doc"],
-  ["smartpage", "doc"],
-  ["smart_page", "doc"],
-  ["smart-page", "doc"],
-  ["智能文档", "doc"],
-  ["msg", "msg"],
-  ["message", "msg"],
-  ["messages", "msg"],
-  ["消息", "msg"],
-  ["mail", "mail"],
-  ["mails", "mail"],
-  ["email", "mail"],
-  ["邮件", "mail"],
-  ["todo", "todo"],
-  ["todos", "todo"],
-  ["待办", "todo"],
-  ["schedule", "schedule"],
-  ["schedules", "schedule"],
-  ["calendar", "schedule"],
-  ["calendars", "schedule"],
-  ["日程", "schedule"],
-  ["meeting", "meeting"],
-  ["meetings", "meeting"],
-  ["会议", "meeting"],
-  ["disk", "disk"],
-  ["drive", "disk"],
-  ["wedrive", "disk"],
-  ["微盘", "disk"],
-  ["contact", "contact"],
-  ["contacts", "contact"],
-  ["通讯录", "contact"],
-  ["media", "media"],
-  ["素材", "media"],
-]);
-
-/**
- * 把模型给的品类归一到官方 `biz_type`。认不出的取值原样放行——官方随时可能加新
- * 品类，写死枚举会把插件锁在今天的表上；放行的同时标记 `recognized: false`，让
- * 日志与错误提示能指出这一点。
- */
-export function resolveWecomMcpBizType(category: string): {
-  bizType: string;
-  recognized: boolean;
-} {
-  const raw = String(category ?? "").trim();
-  const mapped = BIZ_TYPE_BY_ALIAS.get(raw.toLowerCase());
-  return mapped ? { bizType: mapped, recognized: true } : { bizType: raw, recognized: false };
-}
-
 // URL 里带着这次授权的凭证，日志只留 origin + path。
 function redactUrl(url: string): string {
   return url.split(/[?#]/)[0] ?? "";
 }
 
-function cacheKey(accountId: string, bizType: string): string {
-  return `${accountId}::${bizType}`;
+function cacheKey(accountId: string, category: string): string {
+  return `${accountId}::${category}`;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -164,7 +104,7 @@ export class McpHttpError extends Error {
 
 async function fetchMcpConfig(
   accountId: string,
-  bizType: string,
+  category: string,
 ): Promise<Record<string, unknown>> {
   const handle = getBotWsPushHandle(accountId);
   if (!handle?.isConnected()) {
@@ -175,7 +115,7 @@ async function fetchMcpConfig(
     handle.replyCommand({
       cmd: MCP_GET_CONFIG_CMD,
       body: {
-        biz_type: bizType,
+        biz_type: category,
         plugin_version: MCP_PLUGIN_VERSION,
       },
       headers: {
@@ -195,22 +135,70 @@ async function fetchMcpConfig(
 
   const body = (response as { body?: { url?: string } }).body;
   if (!body?.url) {
-    throw new Error(`MCP 配置响应缺少 url 字段 (account=${accountId}, bizType=${bizType})`);
+    throw new Error(`MCP 配置响应缺少 url 字段 (account=${accountId}, category=${category})`);
   }
 
   console.log(
-    `${LOG_TAG} config ready account=${accountId} bizType=${bizType} url=${redactUrl(String(body.url))}`,
+    `${LOG_TAG} config ready account=${accountId} category=${category} url=${redactUrl(String(body.url))}`,
   );
   return body as Record<string, unknown>;
 }
 
-async function getMcpUrl(accountId: string, bizType: string): Promise<string> {
-  const key = cacheKey(accountId, bizType);
+/**
+ * 让企微给用户发一张文档授权引导卡片（`aibot_send_biz_msg`）。
+ *
+ * `chat_id` 与 `userid` **大小写敏感**：必须用入站帧里的原文，不能拿 OpenClaw
+ * 的 sessionKey 反解——core 会把 peer id 强制小写，小写后企微报 93006
+ * invalid chatid（官方插件在同一处踩过并留了警告）。
+ */
+export async function sendWecomDocAuthCard(params: {
+  accountId: string;
+  chatId: string;
+  chatType: "direct" | "group";
+  requesterUserId?: string;
+}): Promise<boolean> {
+  const handle = getBotWsPushHandle(params.accountId);
+  if (!handle?.isConnected()) {
+    console.warn(`${LOG_TAG} doc-auth card skipped account=${params.accountId} reason=ws-not-connected`);
+    return false;
+  }
+  const body: Record<string, unknown> = {
+    biz_type: AIBOT_BIZ_MSG_TYPE_DOC_READ_AUTH,
+    chat_id: params.chatId,
+    chat_type: params.chatType === "group" ? 2 : 1,
+  };
+  if (params.requesterUserId) {
+    body.userid = params.requesterUserId;
+  }
+  try {
+    await withTimeout(
+      handle.replyCommand({
+        cmd: AIBOT_SEND_BIZ_MSG_CMD,
+        body,
+        headers: { req_id: generateReqId("biz_msg") },
+      }),
+      BIZ_MSG_SEND_TIMEOUT_MS,
+      `aibot_send_biz_msg timed out after ${BIZ_MSG_SEND_TIMEOUT_MS}ms`,
+    );
+    console.log(
+      `${LOG_TAG} doc-auth card sent account=${params.accountId} chatType=${params.chatType}`,
+    );
+    return true;
+  } catch (error) {
+    console.error(
+      `${LOG_TAG} doc-auth card failed account=${params.accountId} error=${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
+}
+
+async function getMcpUrl(accountId: string, category: string): Promise<string> {
+  const key = cacheKey(accountId, category);
   const cached = mcpConfigCache.get(key);
   if (cached?.url) {
     return String(cached.url);
   }
-  const body = await fetchMcpConfig(accountId, bizType);
+  const body = await fetchMcpConfig(accountId, category);
   mcpConfigCache.set(key, body);
   return String(body.url);
 }
@@ -219,6 +207,7 @@ async function sendRawJsonRpc(
   url: string,
   session: McpSession,
   body: JsonRpcRequest,
+  requesterUserId?: string,
 ): Promise<{ rpcResult: unknown; newSessionId: string | null }> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), HTTP_REQUEST_TIMEOUT_MS);
@@ -226,17 +215,24 @@ async function sendRawJsonRpc(
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
+      "User-Agent": MCP_USER_AGENT,
     };
     if (session.sessionId) {
       headers["Mcp-Session-Id"] = session.sessionId;
     }
+    const normalizedRequesterUserId = requesterUserId?.trim();
+    if (normalizedRequesterUserId) {
+      headers[WECOM_USERID_HEADER] = normalizedRequesterUserId;
+    }
 
-    const response = await fetch(url, {
+    // 用 undici 的 fetch：Node 18.0–18.17 的原生 fetch 改不了 User-Agent，
+    // 而 undici 本来就是本仓库的生产依赖，各版本行为一致。
+    const response = (await undiciFetch(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
       signal: controller.signal,
-    });
+    })) as unknown as Response;
     const newSessionId = response.headers.get("mcp-session-id");
 
     if (!response.ok) {
@@ -285,10 +281,11 @@ async function sendRawJsonRpc(
 
 async function initializeSession(
   accountId: string,
-  bizType: string,
+  category: string,
   url: string,
+  requesterUserId?: string,
 ): Promise<McpSession> {
-  const key = cacheKey(accountId, bizType);
+  const key = cacheKey(accountId, category);
   const session: McpSession = { sessionId: null, initialized: false, stateless: false };
 
   const initializeRequest: JsonRpcRequest = {
@@ -302,7 +299,7 @@ async function initializeSession(
     },
   };
 
-  const initResult = await sendRawJsonRpc(url, session, initializeRequest);
+  const initResult = await sendRawJsonRpc(url, session, initializeRequest, requesterUserId);
   if (initResult.newSessionId) {
     session.sessionId = initResult.newSessionId;
   }
@@ -318,7 +315,7 @@ async function initializeSession(
     jsonrpc: "2.0",
     method: "notifications/initialized",
   };
-  const notifyResult = await sendRawJsonRpc(url, session, notifyRequest);
+  const notifyResult = await sendRawJsonRpc(url, session, notifyRequest, requesterUserId);
   if (notifyResult.newSessionId) {
     session.sessionId = notifyResult.newSessionId;
   }
@@ -329,10 +326,11 @@ async function initializeSession(
 
 async function getOrCreateSession(
   accountId: string,
-  bizType: string,
+  category: string,
   url: string,
+  requesterUserId?: string,
 ): Promise<McpSession> {
-  const key = cacheKey(accountId, bizType);
+  const key = cacheKey(accountId, category);
   if (statelessKeys.has(key)) {
     const cached = mcpSessionCache.get(key);
     if (cached) return cached;
@@ -348,7 +346,7 @@ async function getOrCreateSession(
     return inflight;
   }
 
-  const promise = initializeSession(accountId, bizType, url).finally(() => {
+  const promise = initializeSession(accountId, category, url, requesterUserId).finally(() => {
     inflightInitRequests.delete(key);
   });
   inflightInitRequests.set(key, promise);
@@ -357,13 +355,14 @@ async function getOrCreateSession(
 
 async function rebuildSession(
   accountId: string,
-  bizType: string,
+  category: string,
   url: string,
+  requesterUserId?: string,
 ): Promise<McpSession> {
-  const key = cacheKey(accountId, bizType);
+  const key = cacheKey(accountId, category);
   const inflight = inflightInitRequests.get(key);
   if (inflight) return inflight;
-  const promise = initializeSession(accountId, bizType, url).finally(() => {
+  const promise = initializeSession(accountId, category, url, requesterUserId).finally(() => {
     inflightInitRequests.delete(key);
   });
   inflightInitRequests.set(key, promise);
@@ -409,9 +408,8 @@ async function parseSseResponse(response: Response): Promise<unknown> {
 }
 
 export function clearWecomMcpCategoryCache(accountId: string, category: string): void {
-  const { bizType } = resolveWecomMcpBizType(category);
-  const key = cacheKey(accountId, bizType);
-  console.log(`${LOG_TAG} clear cache account=${accountId} bizType=${bizType}`);
+  const key = cacheKey(accountId, category);
+  console.log(`${LOG_TAG} clear cache account=${accountId} category=${category}`);
   mcpConfigCache.delete(key);
   mcpSessionCache.delete(key);
   statelessKeys.delete(key);
@@ -445,16 +443,9 @@ export async function sendJsonRpc(
   category: string,
   method: string,
   params?: Record<string, unknown>,
+  options?: { requesterUserId?: string },
 ): Promise<unknown> {
-  // 归一只做一次，之后缓存键、配置请求、会话、日志全部用同一个 bizType——
-  // 否则 "smartsheet" 与 "doc" 会各自持有一份指向同一作用域的配置与会话。
-  const { bizType, recognized } = resolveWecomMcpBizType(category);
-  if (!recognized) {
-    console.warn(
-      `${LOG_TAG} unknown category account=${accountId} category=${category} (原样发给企微；官方取值：${WECOM_MCP_BIZ_TYPES.join("/")})`,
-    );
-  }
-  const url = await getMcpUrl(accountId, bizType);
+  const url = await getMcpUrl(accountId, category);
   const body: JsonRpcRequest = {
     jsonrpc: "2.0",
     id: generateReqId("mcp_rpc"),
@@ -462,32 +453,33 @@ export async function sendJsonRpc(
     ...(params !== undefined ? { params } : {}),
   };
 
-  let session = await getOrCreateSession(accountId, bizType, url);
+  const requesterUserId = options?.requesterUserId;
+  let session = await getOrCreateSession(accountId, category, url, requesterUserId);
 
   try {
-    const result = await sendRawJsonRpc(url, session, body);
+    const result = await sendRawJsonRpc(url, session, body, requesterUserId);
     if (result.newSessionId) {
       session.sessionId = result.newSessionId;
     }
     return result.rpcResult;
   } catch (error) {
     if (error instanceof McpRpcError && CACHE_CLEAR_ERROR_CODES.has(error.code)) {
-      clearWecomMcpCategoryCache(accountId, bizType);
+      clearWecomMcpCategoryCache(accountId, category);
     }
     if (session.stateless) {
       throw error;
     }
     if (error instanceof McpHttpError && error.statusCode === 404) {
-      mcpSessionCache.delete(cacheKey(accountId, bizType));
-      session = await rebuildSession(accountId, bizType, url);
-      const result = await sendRawJsonRpc(url, session, body);
+      mcpSessionCache.delete(cacheKey(accountId, category));
+      session = await rebuildSession(accountId, category, url, requesterUserId);
+      const result = await sendRawJsonRpc(url, session, body, requesterUserId);
       if (result.newSessionId) {
         session.sessionId = result.newSessionId;
       }
       return result.rpcResult;
     }
     console.error(
-      `${LOG_TAG} rpc failed account=${accountId} bizType=${bizType} method=${method} error=${error instanceof Error ? error.message : String(error)}`,
+      `${LOG_TAG} rpc failed account=${accountId} category=${category} method=${method} error=${error instanceof Error ? error.message : String(error)}`,
     );
     throw error;
   }

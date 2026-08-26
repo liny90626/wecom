@@ -6,11 +6,16 @@ import { resolveWecomSourceSnapshot } from "../../runtime/source-registry.js";
 import { cleanSchemaForGemini } from "./schema.js";
 import {
   clearWecomMcpCategoryCache,
-  resolveWecomMcpBizType,
   sendJsonRpc,
-  WECOM_MCP_BIZ_TYPES,
+  sendWecomDocAuthCard,
   type McpToolInfo,
 } from "./transport.js";
+
+type McpIdentity = {
+  requesterUserId?: string;
+  chatId?: string;
+  chatType?: "direct" | "group";
+};
 
 type WecomMcpParams = {
   action: "list" | "call";
@@ -22,11 +27,16 @@ type WecomMcpParams = {
 const LOG_TAG = "[wecom-mcp]";
 
 /**
- * 企微判定「当前身份对该资源没有权限」的业务错误码。它们不一定是真的没授权——
- * 手上那份 MCP 配置过期、或者 biz_type 归一到了别的作用域，都会长这样，所以收到
- * 这类码要先把配置作废重取一次再下结论。
+ * 需要清理缓存的业务错误码（对齐官方插件）：机器人授权过期 / 被重置，
+ * 清掉配置与会话，下次调用重新拉取。
  */
-const AUTHORITY_BIZ_ERROR_CODES = new Set([850002, 851003]);
+const BIZ_CACHE_CLEAR_ERROR_CODES = new Set([850001, 851014]);
+
+/**
+ * 文档授权错误码（对齐官方插件）。命中时由企微直接给用户推一张授权引导卡片，
+ * 并把原始 help_message 拦下不喂给 LLM——让模型转述授权步骤只会走样。
+ */
+const DOC_AUTH_ERROR_CODES = new Set([851013, 851014, 851008]);
 
 /** 工具清单的输出上限。`doc` 一个品类就有 60+ 个工具，全量 schema 能吃掉一大块上下文。 */
 const LIST_MAX_BYTES = 32_000;
@@ -96,26 +106,15 @@ function extractBizError(result: unknown): BizError | undefined {
   return undefined;
 }
 
-function buildAuthorityHint(category: string, bizType: string, failure: BizError): string {
-  return [
-    `企微返回 ${failure.errcode}（${failure.errmsg || "no authority"}）：当前身份对该资源没有权限。`,
-    "已自动重取一次 MCP 配置并重试，仍然失败。请依次确认：",
-    "① 机器人管理后台「可使用权限」里对应能力是否仍在授权有效期内（文档类权限有效期 7 天，到期需成员重新授权）；",
-    "② 目标资源是否在该能力的授权范围内；",
-    "③ 智能表格的记录新增/更新在企业可见范围超过 10 人时会被官方限制，此时应改用该表「接收外部数据」的 Webhook 写入；",
-    `④ 本次使用的 biz_type=${bizType}（由 category=${category} 归一而来）是否与目标资源匹配，官方取值为 ${WECOM_MCP_BIZ_TYPES.join("、")}。`,
-  ].join("");
-}
-
 async function handleList(
   accountId: string,
   category: string,
   namePrefix: string | undefined,
+  identity: McpIdentity,
 ): Promise<unknown> {
-  const result = (await sendJsonRpc(accountId, category, "tools/list")) as
-    | { tools?: McpToolInfo[] }
-    | undefined;
-  const { bizType } = resolveWecomMcpBizType(category);
+  const result = (await sendJsonRpc(accountId, category, "tools/list", undefined, {
+    ...(identity.requesterUserId ? { requesterUserId: identity.requesterUserId } : {}),
+  })) as { tools?: McpToolInfo[] } | undefined;
   const all = result?.tools ?? [];
   const prefix = namePrefix?.trim();
   const selected = prefix ? all.filter((tool) => tool.name.startsWith(prefix)) : all;
@@ -123,7 +122,6 @@ async function handleList(
   const detailed = {
     accountId,
     category,
-    bizType,
     count: selected.length,
     ...(prefix ? { namePrefix: prefix } : {}),
     tools: selected.map((tool) => ({
@@ -138,12 +136,11 @@ async function handleList(
 
   // 装不下就只给索引，并说清楚怎么拿到完整 schema——直接截断会让模型以为参数就长这样。
   console.warn(
-    `${LOG_TAG} tools/list truncated account=${accountId} bizType=${bizType} count=${selected.length}`,
+    `${LOG_TAG} tools/list truncated account=${accountId} category=${category} count=${selected.length}`,
   );
   return {
     accountId,
     category,
-    bizType,
     count: selected.length,
     truncated: true,
     note: `完整 schema 超过 ${LIST_MAX_BYTES} 字节，此处只列出名称与说明。把 method 设为名称前缀（如 smartsheet_）再调用一次 action=list 可取到该组工具的完整参数结构。`,
@@ -159,34 +156,58 @@ async function handleCall(
   category: string,
   method: string,
   args: Record<string, unknown>,
+  identity: McpIdentity,
 ): Promise<unknown> {
-  const send = (): Promise<unknown> =>
-    sendJsonRpc(accountId, category, "tools/call", { name: method, arguments: args });
-
-  const first = await send();
-  const failure = extractBizError(first);
-  if (!failure) return first;
-
-  const { bizType } = resolveWecomMcpBizType(category);
-  console.warn(
-    `${LOG_TAG} biz error account=${accountId} bizType=${bizType} method=${method} errcode=${failure.errcode} errmsg=${failure.errmsg}`,
+  const result = await sendJsonRpc(
+    accountId,
+    category,
+    "tools/call",
+    { name: method, arguments: args },
+    { ...(identity.requesterUserId ? { requesterUserId: identity.requesterUserId } : {}) },
   );
-  if (!AUTHORITY_BIZ_ERROR_CODES.has(failure.errcode)) {
-    return first;
+
+  const failure = extractBizError(result);
+  if (!failure) return result;
+  console.warn(
+    `${LOG_TAG} biz error account=${accountId} category=${category} method=${method} errcode=${failure.errcode} errmsg=${failure.errmsg}`,
+  );
+
+  // 机器人授权过期/重置：作废配置与会话，下次调用重新拉取。
+  if (BIZ_CACHE_CLEAR_ERROR_CODES.has(failure.errcode)) {
+    clearWecomMcpCategoryCache(accountId, category);
   }
 
-  // 作废这份配置并重取一次。只重试一次：真的没授权时，重试第二次也只是把同一个
-  // 错误再走一遍。
-  clearWecomMcpCategoryCache(accountId, category);
-  const retried = await send();
-  const retryFailure = extractBizError(retried);
-  if (!retryFailure || !AUTHORITY_BIZ_ERROR_CODES.has(retryFailure.errcode)) {
-    return retried;
+  if (category !== "doc" || !DOC_AUTH_ERROR_CODES.has(failure.errcode)) {
+    return result;
   }
-  console.warn(
-    `${LOG_TAG} biz error persists account=${accountId} bizType=${bizType} method=${method} errcode=${retryFailure.errcode}`,
-  );
-  return { ...(retried as Record<string, unknown>), hint: buildAuthorityHint(category, bizType, retryFailure) };
+
+  // 文档授权错误：让企微直接给用户推一张授权引导卡片，并把原始 help_message
+  // 拦下——由模型转述授权步骤只会走样，用户要点的是卡片。
+  const { chatId, chatType, requesterUserId } = identity;
+  let cardSent = false;
+  if (chatId && chatType) {
+    cardSent = await sendWecomDocAuthCard({ accountId, chatId, chatType, requesterUserId });
+  } else {
+    console.warn(
+      `${LOG_TAG} doc-auth card skipped account=${accountId} reason=missing-chat-context chatId=${chatId ?? "n/a"} chatType=${chatType ?? "n/a"}`,
+    );
+  }
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: renderResultText({
+          errcode: failure.errcode,
+          errmsg: failure.errmsg || "authorization error",
+          _biz_msg_sent: cardSent,
+          _user_hint: cardSent
+            ? "文档授权提示卡片已直接发送给用户，无需再向用户转述任何授权相关的信息。请告知用户：已发送授权引导，请按提示完成授权后重试。"
+            : "文档授权失败，且授权引导卡片未能发出。请让用户到企业微信「工作台 → 智能机器人 → 可使用权限」重新授权后重试。",
+        }),
+      },
+    ],
+  };
 }
 
 export function createWeComMcpToolFactory(): OpenClawPluginToolFactory {
@@ -203,6 +224,12 @@ export function createWeComMcpToolFactory(): OpenClawPluginToolFactory {
     if (!source || source.source !== "bot-ws") {
       return null;
     }
+    // 身份必须是入站帧里的原文：企微的 chat_id / userid 大小写敏感。
+    const identity: McpIdentity = {
+      ...(source.requesterUserId ? { requesterUserId: source.requesterUserId } : {}),
+      ...(source.chatId ? { chatId: source.chatId } : {}),
+      ...(source.peerKind ? { chatType: source.peerKind } : {}),
+    };
 
     return {
       name: "wecom_mcp",
@@ -220,7 +247,7 @@ export function createWeComMcpToolFactory(): OpenClawPluginToolFactory {
           category: {
             type: "string",
             description:
-              "能力品类（企微 biz_type）：doc（文档、在线表格、智能表格、智能文档四者共用）、msg（消息）、mail（邮件）、todo（待办）、schedule（日程）、meeting（会议）、disk（微盘）、contact（通讯录）、media（素材）。各能力需在机器人后台单独授权，未授权时返回 851003。不确定某品类有哪些工具时先用 action=list。",
+              "MCP 品类名称，如 doc、contact 等。官方取值：doc（文档、在线表格、智能表格、智能文档四者共用）、msg、mail、todo、schedule、meeting、disk、contact、media。各能力需在机器人后台单独授权。不确定某品类有哪些工具时先用 action=list。",
           },
           method: {
             type: "string",
@@ -242,13 +269,13 @@ export function createWeComMcpToolFactory(): OpenClawPluginToolFactory {
             throw new Error("当前会话缺少 WeCom accountId，无法调用 wecom_mcp。");
           }
           if (!String(params.category ?? "").trim()) {
-            return textResult({
-              error: `必须提供 category（企微 biz_type），官方取值：${WECOM_MCP_BIZ_TYPES.join("、")}`,
-            });
+            return textResult({ error: "必须提供 category（企微 MCP 品类，如 doc、contact）" });
           }
 
           if (params.action === "list") {
-            return textResult(await handleList(effectiveAccountId, params.category, params.method));
+            return textResult(
+              await handleList(effectiveAccountId, params.category, params.method, identity),
+            );
           }
           if (!params.method) {
             return textResult({ error: "action=call 时必须提供 method" });
@@ -259,6 +286,7 @@ export function createWeComMcpToolFactory(): OpenClawPluginToolFactory {
               params.category,
               params.method,
               parseArgs(params.args),
+              identity,
             ),
           );
         } catch (error) {

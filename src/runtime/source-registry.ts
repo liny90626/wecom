@@ -9,6 +9,15 @@ export type WecomSourceSnapshot = {
   sessionId?: string;
   peerKind?: "direct" | "group";
   peerId?: string;
+  /**
+   * 发起人 userid 与会话 id，**保留原始大小写**。
+   *
+   * 上面的 `peerId` 是给查找用的、被强制小写化的键；企微的 `chat_id` 与
+   * userid 都是大小写敏感的（官方插件注释记过一笔：小写后 `aibot_send_biz_msg`
+   * 会报 93006 invalid chatid），所以身份透传必须另存一份原文。
+   */
+  requesterUserId?: string;
+  chatId?: string;
   upstreamCorpId?: string;
 };
 
@@ -125,6 +134,8 @@ export function registerWecomSourceSnapshot(params: {
   sessionId?: string | null;
   peerKind?: "direct" | "group" | null;
   peerId?: string | null;
+  requesterUserId?: string | null;
+  chatId?: string | null;
   upstreamCorpId?: string | null;
 }): void {
   const accountId = normalizeOptional(params.accountId);
@@ -145,6 +156,10 @@ export function registerWecomSourceSnapshot(params: {
       : {}),
     ...(normalizePeerKind(params.peerKind) ? { peerKind: normalizePeerKind(params.peerKind) } : {}),
     ...(normalizePeerId(params.peerId) ? { peerId: normalizePeerId(params.peerId) } : {}),
+    ...(normalizeOptional(params.requesterUserId)
+      ? { requesterUserId: normalizeOptional(params.requesterUserId) }
+      : {}),
+    ...(normalizeOptional(params.chatId) ? { chatId: normalizeOptional(params.chatId) } : {}),
     ...(normalizeOptional(params.upstreamCorpId)
       ? { upstreamCorpId: normalizeOptional(params.upstreamCorpId) }
       : {}),

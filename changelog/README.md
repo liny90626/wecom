@@ -4,7 +4,9 @@
 
 ## 本 fork 维护版本
 
-- [`v2.7.260-18`](./v2.7.260-18.md)（发布 tag `released/2.7.260-18`，已推送 `fork`）：新增官方 `wecom-cli` tool 与 16 个 Skills，固定 `@wecom/cli@1.2.0`，按 bot 隔离凭据、启动预热、严格 argv/输出/超时策略；保留既有 MCP，仅对配置层未就绪和 `851003` 做有界 CLI 兜底，并标注 `via`。全量 56 文件 / 706 用例通过。
+- [`v2.7.260-19`](./v2.7.260-19.md)（本地候选）：修正 `wecom_mcp -> wecom-cli` 兜底的跨品类方法路由；`msg -> message`、`schedule -> calendar`，`doc` 按方法前缀选择 doc/sheet/smartsheet/smartpage/media，无法证明的映射快速失败。稳定单 worker 全量 56 文件 / 710 用例通过。
+
+- [`v2.7.260-18`](./v2.7.260-18.md)（已由 `-19` 取代；发布 tag `released/2.7.260-18` 已推送 `fork`）：新增官方 `wecom-cli` tool 与 16 个 Skills，固定 `@wecom/cli@1.2.0`，按 bot 隔离凭据、启动预热、严格 argv/输出/超时策略；保留既有 MCP，仅对配置层未就绪和 `851003` 做有界 CLI 兜底，并标注 `via`。全量 56 文件 / 706 用例通过。发布后对抗检查发现跨品类兜底映射不完整，故不再推荐安装该包。
 
 - [`v2.7.260-17`](./v2.7.260-17.md)（发布标签 `released/2.7.260-17`）：`wecom_mcp` 收口的**发布版**（`-15`/`-16` 为未打 tag 的验证版，内容已并入）。`851003` 的根因是**结构性**的——`aibot_get_mcp_config` 签发 `/mcp/robot-doc`「企微机器人文档 MCP」只有机器人自身作用域，后台 apikey 签发 `/mcp/v2/bot/<biz>`「动态文档 MCP」内嵌授权真人用户；两个曾被当作根因的假设（缺身份头、`plugin_version` 降档）均已证伪。新增 **`bot.mcpServers`** 配置项，八个能力全可用；严格对齐官方 MCP 实现（身份头、官方 UA、官方错误码分工、文档授权引导卡片且保留 `help_message` 原文）；`tools/list` 按实测体积以 48KB 限幅；并与官方插件仓库同步事件白名单、`enter_check_update` 版本握手、`auth_change_event` 清缓存。该模块从零测试覆盖补到 31 条。
 - [`v2.7.260-16`](./v2.7.260-16.md)（**验证版，未打 tag / 未推远端**）：用真实端点探测后**坐实 `851003` 的根因——两条签发路径指向两台不同的 MCP Server**。后台 `/mcp/v2/bot/<biz>?apikey=…` 是「动态\* MCP」v1.0.5（`doc` 62 个新一代工具），其返回里服务端自报「授权真人用户身份」，说明**授权内嵌在 apikey 里**；而 `aibot_get_mcp_config` 签发的是旧一代、19 个工具且**未绑定真人用户**，因此成员的文档一律 851003，不需真人授权的 `tools/list` 却能过。`bot.mcpServers` 升格为推荐配置，八个能力全部可用且无需额外代码；`tools/list` 限幅按**实测体积**（doc 289KB vs 次大 mail 12.8KB）以 48KB 阈值回归；`initialize` 后打印对端 serverInfo。

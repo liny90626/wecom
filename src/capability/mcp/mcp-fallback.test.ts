@@ -86,6 +86,7 @@ if [ "\${1:-}" = "auth" ]; then
   exit 0
 fi
 printf x > "$WECOM_CLI_CONFIG_DIR/cli-called"
+printf '%s' "$*" > "$WECOM_CLI_CONFIG_DIR/last-args"
 printf '%s' '{"ok":"cli","via":"child"}'
 `,
   );
@@ -109,7 +110,10 @@ function makeConfig(): Record<string, unknown> {
   };
 }
 
-async function runCall(): Promise<Record<string, unknown>> {
+async function runCall(
+  category = "doc",
+  method = "doc_create",
+): Promise<Record<string, unknown>> {
   const tool = createWeComMcpToolFactory()({
     messageChannel: "wecom",
     accountId: "account_a",
@@ -120,8 +124,8 @@ async function runCall(): Promise<Record<string, unknown>> {
   if (!tool) throw new Error("MCP tool unavailable");
   const result = (await tool.execute("call", {
     action: "call",
-    category: "doc",
-    method: "doc_create",
+    category,
+    method,
     args: "{}",
   })) as { content: Array<{ text: string }> };
   return JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
@@ -167,6 +171,31 @@ describe("MCP narrow CLI fallback", { timeout: 30_000, sequential: true }, () =>
     const result = await runCall();
     expect(result).toMatchObject({ ok: "cli", via: "cli-fallback:851003" });
   });
+
+  it("executes MCP category aliases and doc subservices through the correct CLI path", async () => {
+    const cases = [
+      ["msg", "message_aibot_send", "message aibot send --json {}"],
+      ["schedule", "calendar_schedules_create", "calendar schedules create --json {}"],
+      ["doc", "sheet_get", "sheet get --json {}"],
+    ] as const;
+    const configDir = cliConfigDirFor("bot-a", "secret-a");
+
+    for (const [category, method, expectedArgs] of cases) {
+      clearWecomMcpAccountCache("account_a");
+      state.queue.length = 0;
+      state.queue.push(
+        { protocolVersion: "2025-03-26" },
+        {
+          content: [
+            { type: "text", text: JSON.stringify({ errcode: 851003, errmsg: "no authority" }) },
+          ],
+        },
+      );
+      const result = await runCall(category, method);
+      expect(result).toMatchObject({ ok: "cli", via: "cli-fallback:851003" });
+      expect(fs.readFileSync(path.join(configDir, "last-args"), "utf8")).toBe(expectedArgs);
+    }
+  }, PROCESS_TEST_TIMEOUT_MS);
 
   it("falls back when MCP endpoint authorization is explicitly false", { timeout: PROCESS_TEST_TIMEOUT_MS }, async () => {
     state.replyCommand.mockResolvedValue({

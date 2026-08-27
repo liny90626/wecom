@@ -226,6 +226,7 @@ describe("wecom-cli tool", { timeout: 30_000, sequential: true }, () => {
   it("exposes only on the WeCom channel and accepts the tool prefix compatibility", { timeout: PROCESS_TEST_TIMEOUT_MS }, async () => {
     const factory = createWeComCliToolFactory();
     expect(factory({ messageChannel: "telegram" } as never)).toBeNull();
+    expect(factory({} as never)).toBeNull();
     const tool = createWeComCliTool({ config: configFor() });
     expect(prepareCliArguments({ args: "wecom-cli doc get" })).toEqual({
       args: ["doc", "get"],
@@ -254,5 +255,44 @@ describe("wecom-cli tool", { timeout: 30_000, sequential: true }, () => {
       "--json",
       '{"records":[]}',
     ]);
+  });
+
+  it("maps MCP category aliases to their CLI service names", () => {
+    expect(cliArgsForMcpCall("msg", "message_aibot_send", { chat_id: "x" })).toEqual([
+      "message",
+      "aibot",
+      "send",
+      "--json",
+      '{"chat_id":"x"}',
+    ]);
+    expect(cliArgsForMcpCall("schedule", "calendar_schedules_create", {})).toEqual([
+      "calendar",
+      "schedules",
+      "create",
+      "--json",
+      "{}",
+    ]);
+  });
+
+  it("routes each doc MCP prefix to the matching CLI service", () => {
+    expect(cliArgsForMcpCall("doc", "sheet_get", {})).toEqual([
+      "sheet",
+      "get",
+      "--json",
+      "{}",
+    ]);
+    expect(cliArgsForMcpCall("doc", "smartpage_pages_get", {})).toEqual([
+      "smartpage",
+      "pages",
+      "get",
+      "--json",
+      "{}",
+    ]);
+  });
+
+  it("fails closed when an MCP method cannot be mapped without guessing", () => {
+    expect(() => cliArgsForMcpCall("schedule", "schedule_create", {})).toThrow("安全映射");
+    expect(() => cliArgsForMcpCall("doc", "unknown_operation", {})).toThrow("安全映射");
+    expect(() => cliArgsForMcpCall("contact", "create_doc", {})).toThrow("安全映射");
   });
 });

@@ -1,6 +1,6 @@
-# goal.md — `wecom-cli` 接入专项（候选 `2.7.260-18`）
+# goal.md — `wecom-cli` 接入专项（交付版本 `2.7.260-19`）
 
-> 状态：**实现、自测、打包与 fork 推送已完成**。`2.7.260-18` 的 CLI 接入、窄范围 MCP 兜底、官方 Skills 与文档已落地；Linux x64 自测已通过，Windows 真机/企业网关验证仍是后续环境门禁。
+> 状态：**`2.7.260-19` 修正候选实现中**。`2.7.260-18` 已完成 CLI 接入、窄范围 MCP 兜底、官方 Skills、打包与 fork 推送，但发布后对抗检查发现跨品类兜底方法映射不完整；`-19` 以最小改动修正该边界。Windows 真机/企业网关验证仍是后续环境门禁。
 > 上一轮（`wecom_mcp` 收口）已随 `2.7.260-17` 发布，细节见 `changelog/v2.7.260-17.md`，此处不再展开。
 
 ---
@@ -156,12 +156,12 @@
 ### P4 文档与红线
 
 - `README.md`：CLI 的配置与排障（**不含任何真实凭据**）；写清哪些能力走哪条平面、兜底何时触发、怎么从日志的 `via` 看出本次走了哪条。
-- `changelog/v2.7.260-18.md` + `changelog/README.md` + 版本号（`src/version.ts` 由 `version.test.ts` 与 `package.json` 对账）。
+- `changelog/v2.7.260-18.md` / `changelog/v2.7.260-19.md` + `changelog/README.md` + 版本号（`src/version.ts` 由 `version.test.ts` 与 `package.json` 对账）。
 - `SESSION_HANDOFF.md` 新增禁改条目，至少：**不得自实现凭据协议**、**`auth init` 必须短路**、**环境变量只能由插件注入**、**绝不使用 PATH 上的全局 `wecom-cli`**、**多账号缺上下文时宁可失败不回退默认账号**。
 
 ### 全局验收
 
-`56 文件 / 706 用例` 全绿（相对基线不减，新增用例全绿）；`npx tsc --noEmit`、`npm run build`、`npm run verify-dist`、B1/B2/B3、`git diff --check` 全过；只用与生产一致的 OpenClaw **2026.7.1-2**。Linux x64 从候选 tgz 做了 `npm install --omit=dev` 隔离安装并确认平台 CLI 可执行；Windows x64/ARM64 与真实企业网关仍未验证。
+`56 文件 / 710 用例` 全绿（相对基线不减，新增用例全绿）；`npx tsc --noEmit`、`npm run build`、`npm run verify-dist`、B1/B2/B3、`git diff --check` 全过；只用与生产一致的 OpenClaw **2026.7.1-2**。并发全量唯一失败为既有 30 秒墙钟用例受负载超时，隔离复跑与稳定单 worker 全量均通过，未调整 timeout。Linux x64 从候选 tgz 做了 `npm install --omit=dev` 隔离安装并确认平台 CLI 可执行；Windows x64/ARM64 与真实企业网关仍未验证。
 
 ---
 

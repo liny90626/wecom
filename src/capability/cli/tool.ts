@@ -479,7 +479,7 @@ export function createWeComCliTool(options: CreateWeComCliToolOptions = {}) {
 
 export function createWeComCliToolFactory(): OpenClawPluginToolFactory {
   return (toolContext: OpenClawPluginToolContext) => {
-    if (toolContext.messageChannel && toolContext.messageChannel !== "wecom") return null;
+    if (toolContext.messageChannel !== "wecom") return null;
     const accountId =
       String(
         (toolContext as OpenClawPluginToolContext & { accountId?: string }).accountId ??
@@ -509,8 +509,8 @@ export function cliArgsForMcpCall(
   const normalizedCategory = category.trim().toLowerCase();
   const normalizedMethod = method.trim();
   // The old robot-doc MCP used verb-first names. These are the pairs proven
-  // in the repository's live MCP/CLI comparison; unknown names stay generic
-  // and are left for the CLI's own discovery/exit-2 diagnostics.
+  // in the repository's live MCP/CLI comparison; unknown combinations fail
+  // closed instead of guessing a potentially mutating command.
   const legacyPaths: Record<string, string[]> = {
     create_doc: ["doc", "create"],
     sheet_get_info: ["sheet", "get"],
@@ -521,18 +521,44 @@ export function cliArgsForMcpCall(
     smartsheet_del_records: ["smartsheet", "records", "delete"],
     smartsheet_get_records: ["smartsheet", "records", "list"],
   };
-  const legacy = legacyPaths[normalizedMethod];
+  const legacy = normalizedCategory === "doc" ? legacyPaths[normalizedMethod] : undefined;
   if (legacy) return [...legacy, "--json", JSON.stringify(args)];
 
-  const prefix = `${normalizedCategory}_`;
-  const relative = normalizedMethod.startsWith(prefix)
-    ? normalizedMethod.slice(prefix.length)
-    : normalizedMethod;
+  let cliService = normalizedCategory;
+  let relative: string;
+  if (normalizedCategory === "doc") {
+    const service = ["doc", "sheet", "smartsheet", "smartpage", "media"].find((candidate) =>
+      normalizedMethod.startsWith(`${candidate}_`),
+    );
+    if (!service) {
+      throw new CliArgvError(
+        `无法把 MCP method ${JSON.stringify(method)} 安全映射到 doc/sheet/smartsheet/smartpage/media CLI 服务`,
+      );
+    }
+    cliService = service;
+    relative = normalizedMethod.slice(service.length + 1);
+  } else {
+    const aliases: Record<string, { service: string; methodPrefix: string }> = {
+      msg: { service: "message", methodPrefix: "message_" },
+      schedule: { service: "calendar", methodPrefix: "calendar_" },
+    };
+    const route = aliases[normalizedCategory] ?? {
+      service: normalizedCategory,
+      methodPrefix: `${normalizedCategory}_`,
+    };
+    if (!normalizedMethod.startsWith(route.methodPrefix)) {
+      throw new CliArgvError(
+        `无法把 MCP method ${JSON.stringify(method)} 安全映射到 ${route.service} CLI 服务`,
+      );
+    }
+    cliService = route.service;
+    relative = normalizedMethod.slice(route.methodPrefix.length);
+  }
   const segments = relative.split("_").filter(Boolean);
   if (segments.length === 0) {
     throw new CliArgvError(`无法从 MCP method ${JSON.stringify(method)} 生成 CLI 命令路径`);
   }
-  return [normalizedCategory, ...segments, "--json", JSON.stringify(args)];
+  return [cliService, ...segments, "--json", JSON.stringify(args)];
 }
 
 export async function executeMcpFallback(

@@ -4,7 +4,7 @@
 
 ## 本 fork 维护版本
 
-- [`v2.7.260-19`](./v2.7.260-19.md)（本地 tag `released/2.7.260-19`，待推 `fork`）：修正 `wecom_mcp -> wecom-cli` 兜底的跨品类方法路由；`msg -> message`、`schedule -> calendar`，`doc` 按方法前缀选择 doc/sheet/smartsheet/smartpage/media，无法证明的映射快速失败。稳定单 worker 全量 56 文件 / 710 用例通过。
+- [`v2.7.260-19`](./v2.7.260-19.md)（发布 tag `released/2.7.260-19`，已推送 `fork`）：修正 `wecom_mcp -> wecom-cli` 兜底的跨品类方法路由；`msg -> message`、`schedule -> calendar`，`doc` 按方法前缀选择 doc/sheet/smartsheet/smartpage/media，无法证明的映射快速失败。稳定单 worker 全量 56 文件 / 710 用例通过。
 
 - [`v2.7.260-18`](./v2.7.260-18.md)（已由 `-19` 取代；发布 tag `released/2.7.260-18` 已推送 `fork`）：新增官方 `wecom-cli` tool 与 16 个 Skills，固定 `@wecom/cli@1.2.0`，按 bot 隔离凭据、启动预热、严格 argv/输出/超时策略；保留既有 MCP，仅对配置层未就绪和 `851003` 做有界 CLI 兜底，并标注 `via`。全量 56 文件 / 706 用例通过。发布后对抗检查发现跨品类兜底映射不完整，故不再推荐安装该包。
 

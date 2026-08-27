@@ -12,7 +12,7 @@ Windows x64 的平台包由 npm 元数据确认存在；Windows ARM64 没有官�
 
 ```text
 npm ls openclaw @wecom/cli --all
-@yanhaidao/wecom@2.7.260-19
+@yanhaidao/wecom@2.7.260-20
 ├── @wecom/cli@1.2.0
 └── openclaw@2026.7.1-2
 

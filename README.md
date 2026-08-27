@@ -23,7 +23,7 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-当前维护版本为 `v2.7.260-19`，本轮修正 `wecom_mcp -> wecom-cli` 兜底的方法路由；上一发布标签为 `released/2.7.260-18`（已由本版取代）。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留。
+当前维护版本为 `v2.7.260-20`，本轮补强多账号隔离与 CLI 错误输出脱敏；上一发布标签为 `released/2.7.260-19`（已由本版取代）。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留。
 
 本轮收口 `wecom_mcp` 的 `851003 no authority`。根因是**结构性**的：`aibot_get_mcp_config` 签发的是 `/mcp/robot-doc`（「企微机器人文档 MCP」，**只有机器人自身作用域**），而后台「查看使用方式」的 apikey 签发的是 `/mcp/v2/bot/<biz_type>`（「动态文档 MCP」，**内嵌授权真人用户**）——不是授权没生效，是产品定位不同。因此新增 **`bot.mcpServers`** 配置项：按 `biz_type` 直接配后台地址，八个能力全部可用。同时严格对齐官方 MCP 实现（身份头、官方 UA、官方错误码分工、文档授权引导卡片），`tools/list` 按实测体积限幅，并与官方插件仓库同步了事件白名单、`enter_check_update` 版本握手与 `auth_change_event` 清缓存。完整说明见 [`changelog/v2.7.260-17.md`](./changelog/v2.7.260-17.md)。
 
@@ -308,11 +308,19 @@ npx vitest run
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
-#### 📌 v2.7.260-19（2026-08-27，LinKy fork）
+#### 📌 v2.7.260-20（2026-08-28，LinKy fork）
+
+- **多账号默认别名 fail closed**：配置存在多个自定义账号时，字面量 `default` 不再回退到第一个账号，避免 CLI 兜底串企业。
+- **CLI 错误输出脱敏**：超时、exit 2、普通失败的 stderr 与 endpoint 诊断不再把 secret 或带凭证 URL 返回给模型/日志。
+- **新增对抗回归**：覆盖合成 `default`、跨渠道旧方法组合和外部 CLI 泄露式错误输出。
+- **[验证]**：只用 OpenClaw `2026.7.1-2`；本轮新增/受影响聚焦回归 `25/25`，既有 `monitor.active 3/3` 与 `file-text 5/5` 隔离复跑通过。全量尝试受当前测试机负载影响，既有 `gateway-sim` 30 秒用例超时，未修改 timeout；详见 `changelog/v2.7.260-20.md`。
+
+#### 📌 v2.7.260-19（已取代，2026-08-27，LinKy fork）
 
 - **修正 MCP 到 CLI 的兜底路由**：`msg` 精确转到 CLI `message`，`schedule` 转到 `calendar`；`doc` 下按 `doc_` / `sheet_` / `smartsheet_` / `smartpage_` / `media_` 选择对应 CLI 服务。
 - **未知映射快速失败**：保留已实测的旧 MCP 方法表；不在表内且无法由官方前缀证明的旧方法不再猜测命令，避免把一次明确拒绝变成另一条错误写操作。
 - **对抗回归**：从 MCP `851003` 走到真实测试子进程，逐项断言 `message aibot send`、`calendar schedules create`、`sheet get` 的最终 argv。
+- **已由 `2.7.260-20` 取代**：后续对抗检查补上多账号 `default` 别名和 CLI 错误输出脱敏边界。
 - **[验证]**：只用 OpenClaw `2026.7.1-2`，稳定单 worker 全量 `56 files / 710 tests` 全绿；typecheck、build、dist、B1/B2/B3、diff check 全绿。并发全量唯一失败是既有 `gateway-sim` 30 秒墙钟用例受负载超时，隔离复跑 16.5 秒通过，未提高 timeout。
 
 #### 📌 v2.7.260-18（已取代，2026-08-27）

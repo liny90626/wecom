@@ -94,7 +94,10 @@ export function resolveCliBot(
 ): ResolvedCliBot {
   const ids = listWecomAccountIds(config);
   const explicit = accountId?.trim();
-  if (!explicit && ids.length > 1) {
+  if (
+    ids.length > 1 &&
+    (!explicit || (explicit === "default" && !ids.includes("default")))
+  ) {
     throw new CliAuthError(
       "当前会话缺少账号上下文（agentAccountId），而配置中存在多个企业微信账号。为避免误用其他企业的凭据，本次调用已被拒绝。",
     );
@@ -270,6 +273,15 @@ function redactSecret(value: string, secret: string): string {
   return secret ? value.split(secret).join("***") : value;
 }
 
+function redactEndpoint(value: string, secret: string): string {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return redactSecret(value, secret);
+  }
+}
+
 function resolveBinPath(config: OpenClawConfig, accountId: string): { binPath: string; source: string } {
   const configured = resolveWecomCliConfig(config, accountId).binPath;
   const located = locateCliBinary(configured);
@@ -354,13 +366,16 @@ export async function executeWecomCli(
       if (output.timedOut) {
         return errorResult(
           `命令执行超时（${(options.timeoutMs ?? CLI_TIMEOUT_MS) / 1000}s）：wecom-cli ${commandForLog}`,
-          { stderr: output.stderr.slice(-2048) || undefined, ...(options.via ? { via: options.via } : {}) },
+          {
+            stderr: redactSecret(output.stderr.slice(-2048), bot.secret) || undefined,
+            ...(options.via ? { via: options.via } : {}),
+          },
         );
       }
       if (output.status === 2) {
         console.warn(`${CLI_LOG} 命令不存在或参数非法 (exit 2) via=${binary.source}：${commandForLog}`);
         return errorResult(
-          `命令不存在或参数非法：wecom-cli ${commandForLog}\n${output.stderr.trim().slice(0, 1500)}`,
+          `命令不存在或参数非法：wecom-cli ${commandForLog}\n${redactSecret(output.stderr.trim(), bot.secret).slice(0, 1500)}`,
           {
             hint: "该命令在当前 wecom-cli 版本中不可用，技能文档可能与 CLI 版本不一致。可用 --help 查看可用子命令。",
             ...(options.via ? { via: options.via } : {}),
@@ -371,20 +386,29 @@ export async function executeWecomCli(
       const errorPayload = parseErrorPayload(output.stdout);
       const rawErrcode = parseErrcode(output.stdout);
       if (output.status !== 0 || errorPayload) {
-        const message = rewriteMessage(
-          errorPayload?.message ??
-            parseErrmsg(output.stdout) ??
-            (output.stderr.trim() || `命令执行失败（exit ${output.status}）`),
+        const message = redactSecret(
+          rewriteMessage(
+            errorPayload?.message ??
+              parseErrmsg(output.stdout) ??
+              (output.stderr.trim() || `命令执行失败（exit ${output.status}）`),
+          ),
+          bot.secret,
         );
+        const safeEndpoint = errorPayload?.endpoint
+          ? redactEndpoint(errorPayload.endpoint, bot.secret)
+          : undefined;
+        const safeErrorPayload = errorPayload
+          ? { ...errorPayload, ...(safeEndpoint ? { endpoint: safeEndpoint } : {}) }
+          : undefined;
         console.warn(
-          `${CLI_LOG} 调用失败 (${output.ms}ms, exit=${output.status}) ${commandForLog} → ${redactSecret(JSON.stringify(errorPayload ?? output.stderr.slice(-500)), bot.secret)}`,
+          `${CLI_LOG} 调用失败 (${output.ms}ms, exit=${output.status}) ${commandForLog} → ${redactSecret(JSON.stringify(safeErrorPayload ?? output.stderr.slice(-500)), bot.secret)}`,
         );
         return errorResult(message, {
-          ...(errorPayload?.code != null || rawErrcode != null
-            ? { errcode: errorPayload?.code ?? rawErrcode }
+          ...(safeErrorPayload?.code != null || rawErrcode != null
+            ? { errcode: safeErrorPayload?.code ?? rawErrcode }
             : {}),
-          ...(errorPayload?.endpoint ? { endpoint: errorPayload.endpoint } : {}),
-          ...(errorPayload?.status != null ? { httpStatus: errorPayload.status } : {}),
+          ...(safeEndpoint ? { endpoint: safeEndpoint } : {}),
+          ...(safeErrorPayload?.status != null ? { httpStatus: safeErrorPayload.status } : {}),
           ...(options.via ? { via: options.via } : {}),
         });
       }

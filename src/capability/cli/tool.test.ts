@@ -44,6 +44,10 @@ case "\${1:-}" in
     sleep 1
     printf '%s' '{"ok":true}'
     ;;
+  secret-error)
+    printf '%s' '{"error":{"message":"secret-a leaked","endpoint":"https://example.test/api?apikey=secret-a"}}'
+    exit 1
+    ;;
   retry)
     if [ ! -f "$WECOM_CLI_CONFIG_DIR/retry-seen" ]; then
       touch "$WECOM_CLI_CONFIG_DIR/retry-seen"
@@ -163,6 +167,14 @@ describe("wecom-cli tool", { timeout: 30_000, sequential: true }, () => {
     expect(parsed.hint).toBeTruthy();
   });
 
+  it("redacts secrets from CLI error output and endpoint diagnostics", { timeout: PROCESS_TEST_TIMEOUT_MS }, async () => {
+    stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "wecom-cli-tool-"));
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    fakeCli = createFakeCli();
+    const parsed = parseResult(await executeWecomCli(["secret-error"], { config: configFor() }));
+    expect(JSON.stringify(parsed)).not.toContain("secret-a");
+  });
+
   it("rejects unsafe args before resolving or spawning a binary", { timeout: PROCESS_TEST_TIMEOUT_MS }, async () => {
     stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "wecom-cli-tool-"));
     process.env.OPENCLAW_STATE_DIR = stateDir;
@@ -221,6 +233,21 @@ describe("wecom-cli tool", { timeout: 30_000, sequential: true }, () => {
       },
     } as OpenClawConfig;
     expect(() => resolveCliBot(cfg)).toThrow("多个企业微信账号");
+  });
+
+  it("refuses the synthetic default alias when multiple custom accounts exist", () => {
+    const cfg = {
+      channels: {
+        wecom: {
+          defaultAccount: "alpha",
+          accounts: {
+            alpha: { bot: { ws: { botId: "a", secret: "sa" } } },
+            beta: { bot: { ws: { botId: "b", secret: "sb" } } },
+          },
+        },
+      },
+    } as OpenClawConfig;
+    expect(() => resolveCliBot(cfg, "default")).toThrow("多个企业微信账号");
   });
 
   it("exposes only on the WeCom channel and accepts the tool prefix compatibility", { timeout: PROCESS_TEST_TIMEOUT_MS }, async () => {

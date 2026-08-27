@@ -25,6 +25,20 @@ export type WecomRoutingConfig = {
   failClosedOnDefaultRoute?: boolean;
 };
 
+export type WecomCliEnv = Partial<
+  Record<
+    "WECOM_CLI_BASE_URL" | "WECOM_CLI_AUTH_ENDPOINT" | "WECOM_CLI_ADDITIONAL_HEADERS",
+    string
+  >
+>;
+
+export type WecomCliConfig = {
+  /** 联调或受控运维场景下显式指定 CLI 二进制；默认只从插件私有依赖寻址。 */
+  binPath?: string;
+  /** 仅允许官方白名单中的 CLI 环境变量。 */
+  env?: WecomCliEnv;
+};
+
 export type WecomBotWsConfig = {
   botId: string;
   secret: string;
@@ -119,6 +133,7 @@ export type WecomAccountConfig = {
   enabled?: boolean;
   name?: string;
   mediaMaxMb?: number;
+  cli?: WecomCliConfig;
   bot?: WecomBotConfig;
   agent?: WecomAgentConfig;
 };
@@ -131,6 +146,7 @@ export type WecomConfig = {
   agent?: WecomAgentConfig;
   accounts?: Record<string, WecomAccountConfig>;
   defaultAccount?: string;
+  cli?: WecomCliConfig;
   media?: WecomMediaConfig;
   network?: WecomNetworkConfig;
   routing?: WecomRoutingConfig;

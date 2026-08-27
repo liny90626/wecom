@@ -10,6 +10,7 @@ export {
   isWecomEnabled,
 } from "./accounts.js";
 export { resolveWecomRuntimeAccount, resolveWecomRuntimeConfig, type ResolvedRuntimeAccount, type ResolvedRuntimeConfig } from "./runtime-config.js";
+export { resolveWecomCliConfig } from "./cli.js";
 export { resolveDerivedPath, resolveDerivedPathSummary } from "./derived-paths.js";
 export {
   resolveWecomEgressProxyUrl,

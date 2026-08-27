@@ -2,10 +2,14 @@ import type {
   OpenClawPluginToolContext,
   OpenClawPluginToolFactory,
 } from "openclaw/plugin-sdk/core";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import { resolveWecomAccount } from "../../config/accounts.js";
+import { getWecomRuntime } from "../../runtime.js";
 import { resolveWecomSourceSnapshot } from "../../runtime/source-registry.js";
 import { cleanSchemaForGemini } from "./schema.js";
 import {
   clearWecomMcpCategoryCache,
+  McpConfigError,
   sendJsonRpc,
   sendWecomDocAuthCard,
   type McpToolInfo,
@@ -37,6 +41,7 @@ const BIZ_CACHE_CLEAR_ERROR_CODES = new Set([850001, 851014]);
  * 并把原始 help_message 拦下不喂给 LLM——让模型转述授权步骤只会走样。
  */
 const DOC_AUTH_ERROR_CODES = new Set([851013, 851014, 851008]);
+const NO_CLI_FALLBACK_CODES = new Set([851013, 851014, 851008, 45009]);
 
 type BizError = { errcode: number; errmsg: string; helpMessage?: string };
 
@@ -67,9 +72,16 @@ function textResult<TDetails>(data: TDetails) {
 }
 
 function errorResult(error: unknown) {
-  if (error && typeof error === "object" && "errcode" in error) {
-    const errcode = Number((error as { errcode?: number }).errcode ?? 0);
-    const errmsg = String((error as { errmsg?: string }).errmsg ?? `错误码: ${errcode}`);
+  const rawErrcode =
+    error && typeof error === "object" ? (error as { errcode?: unknown }).errcode : undefined;
+  if (rawErrcode !== undefined) {
+    const errcode = Number(rawErrcode);
+    const errmsg =
+      typeof (error as { errmsg?: unknown }).errmsg === "string"
+        ? (error as { errmsg: string }).errmsg
+        : error instanceof Error
+          ? error.message
+          : `错误码: ${errcode}`;
     return textResult({ error: errmsg, errcode });
   }
   return textResult({
@@ -111,17 +123,58 @@ function extractBizError(result: unknown): BizError | undefined {
     } catch {
       continue;
     }
-    if (typeof parsed.errcode === "number" && parsed.errcode !== 0) {
+    const errcode =
+      typeof parsed.errcode === "number"
+        ? parsed.errcode
+        : typeof parsed.errcode === "string" && /^-?\d+$/.test(parsed.errcode)
+          ? Number(parsed.errcode)
+          : undefined;
+    if (errcode !== undefined && errcode !== 0) {
       const helpMessage =
         typeof parsed.help_message === "string" ? parsed.help_message : undefined;
       return {
-        errcode: parsed.errcode,
+        errcode,
         errmsg: String(parsed.errmsg ?? ""),
         ...(helpMessage ? { helpMessage } : {}),
       };
     }
   }
   return undefined;
+}
+
+function hasCliCredentials(accountId: string, config?: OpenClawConfig): boolean {
+  const cfg = config ?? getWecomRuntime().config.loadConfig();
+  const account = resolveWecomAccount({ cfg, accountId });
+  return Boolean(
+    (account.bot?.ws?.botId?.trim() || account.bot?.botId?.trim()) &&
+      (account.bot?.ws?.secret?.trim() || account.bot?.secret?.trim()),
+  );
+}
+
+/**
+ * Invoke the CLI only when MCP has definitely not executed a business method.
+ * The dynamic import keeps the mature MCP module independent of the optional
+ * CLI implementation in installations that do not use the new tool.
+ */
+async function tryCliFallback(params: {
+  accountId: string;
+  category: string;
+  method: string;
+  args: Record<string, unknown>;
+  reason: string;
+  config?: OpenClawConfig;
+}): Promise<unknown | undefined> {
+  if (!hasCliCredentials(params.accountId, params.config)) return undefined;
+  console.warn(
+    `${LOG_TAG} fallback → wecom-cli account=${params.accountId} category=${params.category} method=${params.method} reason=${params.reason}`,
+  );
+  const { executeMcpFallback } = await import("../cli/tool.js");
+  const result = await executeMcpFallback(params.category, params.method, params.args, {
+    accountId: params.accountId,
+    config: params.config,
+    reason: params.reason,
+  });
+  return result;
 }
 
 async function handleList(
@@ -180,20 +233,56 @@ async function handleCall(
   method: string,
   args: Record<string, unknown>,
   identity: McpIdentity,
+  config?: OpenClawConfig,
 ): Promise<unknown> {
-  const result = await sendJsonRpc(
-    accountId,
-    category,
-    "tools/call",
-    { name: method, arguments: args },
-    { ...(identity.requesterUserId ? { requesterUserId: identity.requesterUserId } : {}) },
-  );
+  let result: unknown;
+  try {
+    result = await sendJsonRpc(
+      accountId,
+      category,
+      "tools/call",
+      { name: method, arguments: args },
+      { ...(identity.requesterUserId ? { requesterUserId: identity.requesterUserId } : {}) },
+    );
+  } catch (error) {
+    // Endpoint/config acquisition happens before the business RPC. It is safe
+    // to use the member-scoped CLI when that layer is unavailable.
+    if (
+      error instanceof McpConfigError &&
+      (error.errcode === undefined || !NO_CLI_FALLBACK_CODES.has(error.errcode))
+    ) {
+      const fallback = await tryCliFallback({
+        accountId,
+        category,
+        method,
+        args,
+        reason: error.reason,
+        config,
+      });
+      if (fallback !== undefined) return fallback;
+    }
+    throw error;
+  }
 
   const failure = extractBizError(result);
   if (!failure) return result;
   console.warn(
     `${LOG_TAG} biz error account=${accountId} category=${category} method=${method} errcode=${failure.errcode} errmsg=${failure.errmsg} userid=${identity.requesterUserId ?? "(not set)"} raw=${JSON.stringify(result).slice(0, 600)}`,
   );
+
+  if (failure.errcode === 851003) {
+    // 851003 is an explicit server rejection, so the MCP method definitely
+    // did not run. This is the only business error eligible for CLI fallback.
+    const fallback = await tryCliFallback({
+      accountId,
+      category,
+      method,
+      args,
+      reason: "851003",
+      config,
+    });
+    if (fallback !== undefined) return fallback;
+  }
 
   // 机器人授权过期/重置：作废配置与会话，下次调用重新拉取。
   if (BIZ_CACHE_CLEAR_ERROR_CODES.has(failure.errcode)) {
@@ -331,6 +420,9 @@ export function createWeComMcpToolFactory(): OpenClawPluginToolFactory {
               params.method,
               parseArgs(params.args),
               identity,
+              (toolContext.getRuntimeConfig?.() ??
+                toolContext.runtimeConfig ??
+                toolContext.config) as OpenClawConfig | undefined,
             ),
           );
         } catch (error) {

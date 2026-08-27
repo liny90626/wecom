@@ -9,12 +9,15 @@ describe("wecom plugin register", () => {
     const registerChannel = vi.fn();
     const registerHttpRoute = vi.fn();
     const registerTool = vi.fn();
+    const registerService = vi.fn();
     const on = vi.fn();
     const api = {
       runtime: {},
       registerChannel,
       registerHttpRoute,
       registerTool,
+      registerService,
+      logger: { info: vi.fn(), warn: vi.fn() },
       on,
     } as unknown as OpenClawPluginApi;
 
@@ -22,6 +25,9 @@ describe("wecom plugin register", () => {
 
     expect(registerChannel).toHaveBeenCalledTimes(1);
     expect(registerHttpRoute).toHaveBeenCalledTimes(2);
+    expect(registerService).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "wecom-cli-credentials" }),
+    );
     expect(registerHttpRoute).toHaveBeenCalledWith(
       expect.objectContaining({
         path: "/plugins/wecom",
@@ -46,7 +52,13 @@ describe("wecom plugin register", () => {
       "wecom_doc",
       "wecom_calendar",
       "wecom_mcp",
+      "wecom-cli",
     ]);
+    expect(manifest.skills).toEqual(["./skills"]);
+    const pkg = JSON.parse(
+      fs.readFileSync(path.resolve(process.cwd(), "package.json"), "utf8"),
+    ) as { dependencies?: Record<string, string> };
+    expect(pkg.dependencies?.["@wecom/cli"]).toBe("1.2.0");
   });
 
 });

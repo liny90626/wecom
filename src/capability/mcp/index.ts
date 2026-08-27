@@ -3,6 +3,8 @@ export {
   clearWecomMcpAccountCache,
   clearWecomMcpCategoryCache,
   McpHttpError,
+  McpConfigError,
+  type McpConfigFailureReason,
   McpRpcError,
   sendJsonRpc,
   sendWecomDocAuthCard,

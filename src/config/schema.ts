@@ -22,6 +22,18 @@ export interface RoutingConfig {
   failClosedOnDefaultRoute?: boolean;
 }
 
+export type CliEnv = Partial<
+  Record<
+    "WECOM_CLI_BASE_URL" | "WECOM_CLI_AUTH_ENDPOINT" | "WECOM_CLI_ADDITIONAL_HEADERS",
+    string
+  >
+>;
+
+export interface CliConfig {
+  binPath?: string;
+  env?: CliEnv;
+}
+
 export interface BotWsConfig {
   botId: string;
   secret: string;
@@ -68,6 +80,7 @@ export interface AccountConfig {
   enabled?: boolean;
   name?: string;
   mediaMaxMb?: number;
+  cli?: CliConfig;
   bot?: BotConfig;
   agent?: AgentConfig;
 }
@@ -80,6 +93,7 @@ export interface WecomConfigInput {
   agent?: AgentConfig;
   accounts?: Record<string, AccountConfig>;
   defaultAccount?: string;
+  cli?: CliConfig;
   media?: MediaConfig;
   network?: NetworkConfig;
   routing?: RoutingConfig;

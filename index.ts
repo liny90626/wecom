@@ -4,6 +4,11 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { registerWecomCalendarTools } from "./src/capability/calendar/tool.js";
+import {
+  CLI_TOOL_NAME,
+  createWeComCliToolFactory,
+  prewarmWecomCliCredentials,
+} from "./src/capability/cli/index.js";
 import { registerWecomDocTools } from "./src/capability/doc/tool.js";
 import { createWeComMcpToolFactory } from "./src/capability/mcp/index.js";
 import { wecomPlugin } from "./src/channel.js";
@@ -24,6 +29,13 @@ const WECOM_BOT_WS_MEDIA_GUIDANCE = [
   "- 建议优先使用本地可访问路径，而不是远程 URL",
   "- 图片和视频超过 10MB、语音超过 2MB、文件超过 20MB 时可能会降级或发送失败",
   "- 语音消息仅原生支持 AMR；其他音频格式会按文件发送",
+].join("\n");
+
+const WECOM_CLI_GUIDANCE = [
+  "企业微信通讯录、文档、会议、日程、待办、智能表格等能力必须通过专用 `wecom-cli` tool 调用。",
+  "禁止通过 exec、bash、shell、npx 或 PATH 上的全局命令运行 wecom-cli；专用 tool 会按当前会话账号注入隔离凭据。",
+  "调用时 args 只传 wecom-cli 后面的参数，不传命令前缀、WECOM_CLI_* 环境变量、--config-dir 或 --home。",
+  "工具失败时不要降级到 exec，也不要手动执行 auth init；应报告工具权限或 channels.wecom 配置问题。",
 ].join("\n");
 
 const plugin = {
@@ -56,6 +68,29 @@ const plugin = {
     registerWecomDocTools(api);
     registerWecomCalendarTools(api);
     api.registerTool(createWeComMcpToolFactory(), { name: "wecom_mcp" });
+    api.registerTool(createWeComCliToolFactory(), { name: CLI_TOOL_NAME });
+
+    // Authorization is warmed independently from the first business call. A
+    // failed warmup is logged and left for the tool to report on demand.
+    if (typeof api.registerService === "function") {
+      let prewarmPromise: Promise<void> | undefined;
+      api.registerService({
+        id: "wecom-cli-credentials",
+        start: (ctx) => {
+          prewarmPromise = prewarmWecomCliCredentials(ctx.config, {
+            info: (message) => ctx.logger.info(message),
+            warn: (message) => ctx.logger.warn(message),
+          }).catch((error) => {
+            ctx.logger.warn(
+              `[wecom-cli] 启动预热未完成（不影响现有渠道）：${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        },
+        stop: async () => {
+          await prewarmPromise;
+        },
+      });
+    }
 
     api.on("before_prompt_build", (_event, ctx) => {
       if (ctx.channelId !== "wecom") {
@@ -72,6 +107,11 @@ const plugin = {
       return {
         appendSystemContext: WECOM_BOT_WS_MEDIA_GUIDANCE,
       };
+    });
+
+    api.on("before_prompt_build", (_event, ctx) => {
+      if (ctx.channelId !== "wecom") return;
+      return { appendSystemContext: WECOM_CLI_GUIDANCE };
     });
   },
 };

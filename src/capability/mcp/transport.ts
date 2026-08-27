@@ -123,6 +123,21 @@ export class McpHttpError extends Error {
   }
 }
 
+export type McpConfigFailureReason = "unavailable" | "not-authed";
+
+/** Failure while obtaining the MCP endpoint, before any business RPC ran. */
+export class McpConfigError extends Error {
+  constructor(
+    public readonly reason: McpConfigFailureReason,
+    message: string,
+    public readonly cause?: unknown,
+    public readonly errcode?: number,
+  ) {
+    super(message);
+    this.name = "McpConfigError";
+  }
+}
+
 /**
  * 读取账号里显式配置的 MCP Server 地址（`bot.mcpServers[bizType]`）。
  *
@@ -146,7 +161,10 @@ async function fetchMcpConfig(
 ): Promise<Record<string, unknown>> {
   const handle = getBotWsPushHandle(accountId);
   if (!handle?.isConnected()) {
-    throw new Error(`当前企微账号 MCP 服务未就绪：account=${accountId} 的 Bot WS 未连接。`);
+    throw new McpConfigError(
+      "unavailable",
+      `当前企微账号 MCP 服务未就绪：account=${accountId} 的 Bot WS 未连接。`,
+    );
   }
 
   const response = await withTimeout(
@@ -169,15 +187,21 @@ async function fetchMcpConfig(
 
   const errcode = Number((response as { errcode?: number }).errcode ?? 0);
   if (errcode !== 0) {
-    throw new Error(
+    throw new McpConfigError(
+      "unavailable",
       `MCP 配置请求失败: errcode=${String((response as { errcode?: number }).errcode)} errmsg=${String((response as { errmsg?: string }).errmsg ?? "unknown")}`,
+      undefined,
+      Number.isFinite(errcode) ? errcode : undefined,
     );
   }
 
   // 现网实测的响应体：{ url, type, is_authed }。
   const body = (response as { body?: { url?: string; type?: unknown; is_authed?: unknown } }).body;
   if (!body?.url) {
-    throw new Error(`MCP 配置响应缺少 url 字段 (account=${accountId}, category=${category})`);
+    throw new McpConfigError(
+      "unavailable",
+      `MCP 配置响应缺少 url 字段 (account=${accountId}, category=${category})`,
+    );
   }
 
   // 后台签发的地址形如 /mcp/v2/bot/<biz_type>；实测这一代的 apikey 内嵌了
@@ -206,7 +230,11 @@ async function fetchMcpConfig(
   if (body.is_authed === false) {
     console.warn(
       `${LOG_TAG} 该品类尚未授权（is_authed=false，account=${accountId} category=${category}）——` +
-        "请到机器人管理后台「可使用权限」为该能力完成成员授权后再试。",
+      "请到机器人管理后台「可使用权限」为该能力完成成员授权后再试。",
+    );
+    throw new McpConfigError(
+      "not-authed",
+      `MCP 品类尚未授权：account=${accountId} category=${category}（is_authed=false）。`,
     );
   }
   return body as Record<string, unknown>;

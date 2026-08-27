@@ -23,11 +23,13 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-当前已发布版本为 `v2.7.260-17`，发布标签 `released/2.7.260-17`。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留。
+当前候选版本为 `v2.7.260-18`，本轮新增 `wecom-cli` 接入；上一正式发布标签为 `released/2.7.260-17`。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留。
 
 本轮收口 `wecom_mcp` 的 `851003 no authority`。根因是**结构性**的：`aibot_get_mcp_config` 签发的是 `/mcp/robot-doc`（「企微机器人文档 MCP」，**只有机器人自身作用域**），而后台「查看使用方式」的 apikey 签发的是 `/mcp/v2/bot/<biz_type>`（「动态文档 MCP」，**内嵌授权真人用户**）——不是授权没生效，是产品定位不同。因此新增 **`bot.mcpServers`** 配置项：按 `biz_type` 直接配后台地址，八个能力全部可用。同时严格对齐官方 MCP 实现（身份头、官方 UA、官方错误码分工、文档授权引导卡片），`tools/list` 按实测体积限幅，并与官方插件仓库同步了事件白名单、`enter_check_update` 版本握手与 `auth_change_event` 清缓存。完整说明见 [`changelog/v2.7.260-17.md`](./changelog/v2.7.260-17.md)。
 
 开发与后续自测统一固定为 OpenClaw `2026.7.1-2`，不再运行其他 OpenClaw 版本或双版本矩阵。`peerDependencies` 继续保留既有 `^2026.6.11` 安装兼容范围，只表示安装兼容声明。
+
+本候选同时固定 `@wecom/cli@1.2.0` 为插件私有依赖。插件通过专用 `wecom-cli` tool 按当前会话账号注入隔离配置目录，不使用 PATH 上的全局命令，也不要求用户手动执行 `auth init`。
 
 - B1：修复企业微信 Markdown 表格渲染兼容问题，尽量保留表格结构，避免退化成纯文本。
 - B2：优化 Bot WebSocket 长文本回复投递。正文过长时会按企业微信限制分段发送，并对流式预览与最终正文之间的重复片段做去重处理，降低长文本重复和截断风险。
@@ -257,11 +259,62 @@ npx vitest run
 
 两者同时配置后，您既能拿到顺滑的实时交互，也能拿到企业级可治理的协作能力。
 
+### 5. `wecom-cli` 企业微信业务能力
+
+本插件随包提供 `@wecom/cli@1.2.0` 及 16 个官方 Skills。企业微信会话中的通讯录、文档、邮件、日程、会议、待办、微盘、在线表格、智能文档和智能表格等新能力，统一通过 `wecom-cli` tool 调用；不需要安装全局 CLI，也不要通过 `exec` 或终端手动运行命令。
+
+插件从现有 `bot.ws.botId` 与 `bot.ws.secret` 自动完成非交互授权，并把凭据交给 CLI 写入账号隔离目录：
+
+```jsonc
+{
+  "channels": {
+    "wecom": {
+      "cli": {
+        // 可选：仅在受控联调环境显式指定二进制；默认从插件私有依赖寻址
+        "binPath": "/absolute/path/to/wecom-cli",
+        // 可选：仅支持这三个官方联调变量
+        "env": {
+          "WECOM_CLI_BASE_URL": "https://example.invalid"
+        }
+      },
+      "accounts": {
+        "default": {
+          "bot": {
+            "ws": { "botId": "YOUR_BOT_ID", "secret": "YOUR_BOT_SECRET" }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+`cli` 可放在 `channels.wecom`（所有账号默认值）或指定账号下；`binPath` 必须是绝对路径。正常安装无需填写它，OpenClaw 安装插件依赖时会按平台落地 `@wecom/cli` 的二进制（支持 Windows x64、Linux x64/arm64、macOS x64/arm64；Windows ARM64 没有官方平台包）。插件启动时会预热已配置账号的登录态，已有 `credentials.enc` 与 `.encryption_key` 时不会重复请求授权。
+
+现有 `wecom_mcp` 路径继续保留。只有确定的 MCP 配置缺失/拒绝（配置响应错误、缺少 URL、`is_authed=false`）、或业务调用得到 `851003 no authority` 且服务端已确认未执行时，才会为本次 `action=call` 转到 CLI；配置请求自身的网络超时/连接重置也不会被误判为可兜底故障。兜底只使用启动预热已完成的登录态，不会在请求路径触发 `auth init`。`851013`、`851014`、`851008`、`45009` 以及业务 RPC 超时/5xx/连接重置不会自动重跑。兜底返回和日志会带 `via=cli-fallback:<reason>`，可据此确认实际使用的能力平面。
+
+排障时先确认工具白名单包含插件 ID `wecom`（也可直接放行 `wecom-cli`，或使用允许全部工具的 profile），再看：
+
+```text
+[wecom-cli:tool] 二进制寻址命中 source=@wecom/cli-linux-x64 ...
+[wecom-cli:tool] ok (...) via=@wecom/cli-linux-x64 ...
+```
+
+不要把真实 `botId`、`secret` 或 CLI 配置目录提交到仓库；插件日志不会打印 `secret`，但命令参数和企业微信返回内容仍应按敏感信息处理。
+
 ---
 
 ## 📋 本 fork 近期更新
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
+
+#### 📌 v2.7.260-18（候选，2026-08-27）
+
+- **新增 `wecom-cli` tool**：固定使用插件私有 `@wecom/cli@1.2.0`，按 `(botId, secret)` 隔离凭据目录，禁止 PATH 全局 CLI、交互式 `auth` 和模型覆盖环境变量。
+- **保留 MCP 兼容路径**：新能力走 CLI；现有 `wecom_mcp` 不改默认成功路径，仅在配置层未就绪或明确 `851003` 时兜底，并在结果/日志中标注 `via`。文档未授权码、限频和传输层异常不自动重跑。
+- **随包挂载 16 个官方 Skills**，并在 Gateway 启动阶段预热已配置 Bot WS 账号的 CLI 登录态。
+- **新增对抗式回归**：引号感知参数、输出字节上限、多账号串号防护、授权并发/冷却/清理、重签重试和 MCP 兜底分类。
+- **[验证]**：只用 OpenClaw `2026.7.1-2`，全量 Vitest `56 files / 706 tests` 全绿；typecheck、build、dist、B1/B2/B3、diff check 全绿。Linux x64 从候选包隔离安装后确认平台 CLI 可解析并可执行；Windows 真机与真实企业微信网关/客户端仍待验收。
 
 #### 📌 v2.7.260-17（2026-08-26，LinKy fork 维护版）
 

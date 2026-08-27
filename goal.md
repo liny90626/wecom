@@ -1,6 +1,6 @@
 # goal.md — `wecom-cli` 接入专项（候选 `2.7.260-18`）
 
-> 状态：**待审查**。本文件只做目标定义，未改动任何生产代码。
+> 状态：**本地验收通过，候选待发布**。`2.7.260-18` 的 CLI 接入、窄范围 MCP 兜底、官方 Skills 与文档已落地；Linux x64 自测已通过，Windows 真机/企业网关验证及远端发布仍是独立发布门禁。
 > 上一轮（`wecom_mcp` 收口）已随 `2.7.260-17` 发布，细节见 `changelog/v2.7.260-17.md`，此处不再展开。
 
 ---
@@ -161,7 +161,7 @@
 
 ### 全局验收
 
-`48 文件 / 652 用例` → **不减**，新增用例全绿；`npx tsc --noEmit`、`npm run build`、`npm run verify-dist`、B1/B2/B3、`git diff --check` 全过；只用与生产一致的 OpenClaw **2026.7.1-2**。
+`56 文件 / 706 用例` 全绿（相对基线不减，新增用例全绿）；`npx tsc --noEmit`、`npm run build`、`npm run verify-dist`、B1/B2/B3、`git diff --check` 全过；只用与生产一致的 OpenClaw **2026.7.1-2**。Linux x64 从候选 tgz 做了 `npm install --omit=dev` 隔离安装并确认平台 CLI 可执行；Windows x64/ARM64 与真实企业网关仍未验证。
 
 ---
 

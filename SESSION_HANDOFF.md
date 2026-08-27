@@ -1,9 +1,10 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-08-26（`2.7.260-17` 发布收口）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-08-27（`2.7.260-18` CLI 候选本地验收）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
+- 当前候选版本：**`2.7.260-18`**，本地实现 `wecom-cli` tool、官方 16 个 Skills、启动预热和 MCP 的窄范围 CLI 兜底；全量 56 文件 / 706 用例、构建与 B1/B2/B3 门禁已通过。依赖固定为 `@wecom/cli@1.2.0`，自测 OpenClaw 固定 `2026.7.1-2`；尚未打发布 tag 或推送远端。候选包已做隔离安装审计，最终 tag 包指纹待 tag 后补记。
 - 当前正式版本：**`2.7.260-17`**，发布标签 `released/2.7.260-17`。`wecom_mcp` 收口发布版，现网按 `bot.mcpServers` 配置**验证通过**。`851003` 的根因是结构性的：`aibot_get_mcp_config` 签发 `/mcp/robot-doc`「企微机器人文档 MCP」（只有机器人自身作用域），后台 apikey 签发 `/mcp/v2/bot/<biz>`「动态文档 MCP」（内嵌授权真人用户）。详见第 2u 节。
 - `2.7.260-15` / `-16` 是未打 tag 的验证版，内容已并入 `-17`——`-14` 冒烟失败后的收口，等真机验证通过再发布，详见第 2t 节。
 - 当前正式版本：**`2.7.260-14`**，发布标签 `released/2.7.260-14`，包 `yanhaidao-wecom-2.7.260-14.tgz`（打包指纹见 `changelog/v2.7.260-14.md`）。`wecom_mcp` 严格对齐官方实现，补上缺失的请求身份 header（`851003` 的真正根因）与文档授权引导卡片。详见第 2s 节。
@@ -660,6 +661,18 @@ CLI   sheet_info <同一 docid>            → 正常
 47. **`wecom_mcp` 的每一次 HTTP 请求都必须带 `x-openclaw-wecom-userid`，且取值必须是原文大小写**（v14，v15 修订）：**取值必须来自 `ctx.requesterSenderId`（OpenClaw core 提供的 trusted sender id），不要绕道插件自己的 registry——工具注册时机可能早于入站记录写入，那条路会是空的（v14 踩过，等于 header 压根没发）**。照抄官方时**诊断代码与功能代码同等重要**：官方每次请求都打印「带没带这个头」，漏抄它会让整轮排查只能靠猜。另：**不要给 `tools/list` 加返回体上限**——现网 19 个工具就会触发按文档估算定下的 32KB 阈值，模型因此拿不到 `inputSchema`（v13 加、v15 删）。MCP 平面是「代替成员」操作的，不带身份 ⇒ 服务端回 `no authority`（现网 `851003` 的真正根因）。`initialize` 握手也要带。身份只能取 `WecomSourceSnapshot.requesterUserId` / `.chatId` 这两个**原文**字段——`peerId` 是被强制小写的查找键，用它会让 `aibot_send_biz_msg` 报 `93006 invalid chatid`（官方源码在同一处踩过）。业务错误码的分工照抄官方，**不要自己发明**：`{850001, 851014}` 清缓存、`{851013, 851014, 851008}` + `category==="doc"` 推授权卡片并拦下 `help_message`、`851003` 不做特殊处理。`category` **原样透传**，不做别名归一（官方如此）。
 
 48. **`wecom_mcp` 的接入地址优先用后台签发的 `bot.mcpServers`，不要只信 `aibot_get_mcp_config`**（v16）：两者指向**两台不同的 MCP Server**——后台地址是「动态\* MCP」v1.0.5（`doc` 62 个新一代工具），其 apikey **内嵌了授权真人用户**；`aibot_get_mcp_config` 签发的是旧一代、19 个工具且**未绑定真人用户**，对成员拥有的文档一律 `851003`，而不需要真人授权的 `tools/list` 却能过。排查时**先看 `initialize` 打出的 `serverInfo`**，一眼就能分辨对端是哪台。工具名**只能以 `action=list` 的实际返回为准**，不能拿官方文档当准（现网旧 Server 就叫 `sheet_get_info`）。`tools/list` 的限幅阈值**必须基于实测体积**——按文档估算定过一次 32KB，在 19 个工具上就误伤了。
+
+49. **`wecom-cli` 的凭据协议不得在插件内复刻**（v18）：签名、AES-GCM、`credentials.enc`、`.encryption_key` 和原子写全部委托给插件私有 `@wecom/cli`；插件只负责按 `(botId, secret)` 选目录、短路、并发策略和冷却。
+
+50. **`auth init` 必须由插件非交互短路管理**（v18）：只在目录缺少两个凭据文件或命中允许的重签路径时 spawn `auth init --bot-id --secret`；不得把 secret 写入普通命令日志，也不得引导用户手动执行默认目录的 `auth init`。
+
+51. **CLI 环境只能由插件注入**（v18）：模型参数拒绝 `WECOM_CLI_*=`、`--config-dir` 和 `--home`；运行时固定 `WECOM_CLI_CONFIG_DIR` 与 state cwd，配置透传仅限三个官方联调变量。
+
+52. **绝不使用 PATH 上的全局 `wecom-cli`**（v18）：二进制只从插件依赖的平台包或明确的 `channels.wecom.cli.binPath` 寻址；多账号缺少 `agentAccountId` 时宁可失败，不回退默认企业。
+
+53. **MCP 兜底必须证明业务尚未执行**（v18）：只兜配置层失败、`is_authed=false` 和明确 `851003`；`851013/851014/851008`、`45009`、超时、5xx、连接重置不自动重跑。兜底结果与日志必须带 `via=cli-fallback:<reason>`，否则不能宣称已诊断。
+
+> v18 对第 47 条的「`851003` 不做特殊处理」作了**有界例外**：原 MCP 结果仍保留，只有明确业务拒绝且 CLI 登录态已在启动预热完成时才转 CLI；这不是恢复无条件重试。
 
 - 群聊中「他人消息接管了正在运行的回合」时，旧回合收到的仍是「已收到新消息，合并思考。✅」，但跨成员并不合并内容——文案不够准确（既有问题，需要第三种提示语才能修）。
 - 流仍然健康、但预览已冻结（>5 分钟或 >3000 字）时，冻结点之后的新正文仍要等到 final 才可见：后台推送只在通道退休/回执不可信时才启动。

@@ -2,8 +2,9 @@
   "id": "wecom",
   "channels": ["wecom"],
   "contracts": {
-    "tools": ["wecom_doc", "wecom_calendar", "wecom_mcp"]
+    "tools": ["wecom_doc", "wecom_calendar", "wecom_mcp", "wecom-cli"]
   },
+  "skills": ["./skills"],
   "channelConfigs": {
     "wecom": {
       "label": "WeCom (企业微信)",

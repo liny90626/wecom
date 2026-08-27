@@ -1,10 +1,10 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-08-27（`2.7.260-18` CLI 候选本地验收）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-08-27（`2.7.260-18` CLI 候选已推送 fork）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 当前候选版本：**`2.7.260-18`**，本地实现 `wecom-cli` tool、官方 16 个 Skills、启动预热和 MCP 的窄范围 CLI 兜底；全量 56 文件 / 706 用例、构建与 B1/B2/B3 门禁已通过。依赖固定为 `@wecom/cli@1.2.0`，自测 OpenClaw 固定 `2026.7.1-2`。本地 tag `released/2.7.260-18` 已创建；最终包为 `yanhaidao-wecom-2.7.260-18.tgz`（581,144 bytes；SHA-256 `6acf87c28510a49243ad6ae7ffcfb1e15f6175d11d1514d97f808ea1f20e96ce`；250 文件）。远端推送待完成。
+- 当前候选版本：**`2.7.260-18`**，本地实现 `wecom-cli` tool、官方 16 个 Skills、启动预热和 MCP 的窄范围 CLI 兜底；全量 56 文件 / 706 用例、构建与 B1/B2/B3 门禁已通过。依赖固定为 `@wecom/cli@1.2.0`，自测 OpenClaw 固定 `2026.7.1-2`。tag `released/2.7.260-18` 与 `main` 已推送维护远端 `fork`。最终包为 `yanhaidao-wecom-2.7.260-18.tgz`（581,144 bytes；SHA-256 `6acf87c28510a49243ad6ae7ffcfb1e15f6175d11d1514d97f808ea1f20e96ce`；250 文件）。Windows 真机、企业微信网关/客户端仍未验证。
 - 当前正式版本：**`2.7.260-17`**，发布标签 `released/2.7.260-17`。`wecom_mcp` 收口发布版，现网按 `bot.mcpServers` 配置**验证通过**。`851003` 的根因是结构性的：`aibot_get_mcp_config` 签发 `/mcp/robot-doc`「企微机器人文档 MCP」（只有机器人自身作用域），后台 apikey 签发 `/mcp/v2/bot/<biz>`「动态文档 MCP」（内嵌授权真人用户）。详见第 2u 节。
 - `2.7.260-15` / `-16` 是未打 tag 的验证版，内容已并入 `-17`——`-14` 冒烟失败后的收口，等真机验证通过再发布，详见第 2t 节。
 - 当前正式版本：**`2.7.260-14`**，发布标签 `released/2.7.260-14`，包 `yanhaidao-wecom-2.7.260-14.tgz`（打包指纹见 `changelog/v2.7.260-14.md`）。`wecom_mcp` 严格对齐官方实现，补上缺失的请求身份 header（`851003` 的真正根因）与文档授权引导卡片。详见第 2s 节。

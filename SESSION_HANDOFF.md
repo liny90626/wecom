@@ -1,10 +1,10 @@
 # SESSION HANDOFF — OpenClaw WeCom 插件维护交接
 
-> 最后更新：2026-08-28（`2.7.260-20` 本地发布候选）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
+> 最后更新：2026-08-28（`2.7.260-20` 已推送 fork）。新会话开工前先读本文件、`README.md`、`changelog/README.md` 与最新版本简报。
 
 ## 1. 当前状态
 
-- 当前候选版本：**`2.7.260-20`**。在 `-19` 发布后对抗检查中发现：多账号下字面量 `default` 会经旧解析器回退到第一个账号，以及 CLI 错误 stderr/endpoint 诊断存在凭证暴露路径；`-20` 已最小修正并补回归。CLI tool 16、MCP fallback 8、版本 1 的聚焦回归通过；既有 `monitor.active 3/3` 与 `file-text 5/5` 隔离复跑通过。全量尝试受当前测试机负载影响，既有 `gateway-sim` 30 秒用例超时，未修改 timeout。tag `released/2.7.260-20` 指向 `822d6af`，包为 `yanhaidao-wecom-2.7.260-20.tgz`（582,352 bytes；SHA-256 `bd4bb88021a175efd49a1a19c3027c80969c221bcd7a117e505c391d10025d78`；250 文件）；待推维护远端 `fork`。
+- 当前发布版本：**`2.7.260-20`**。在 `-19` 发布后对抗检查中发现：多账号下字面量 `default` 会经旧解析器回退到第一个账号，以及 CLI 错误 stderr/endpoint 诊断存在凭证暴露路径；`-20` 已最小修正并补回归。CLI tool 16、MCP fallback 8、版本 1 的聚焦回归通过；既有 `monitor.active 3/3` 与 `file-text 5/5` 隔离复跑通过。全量尝试受当前测试机负载影响，既有 `gateway-sim` 30 秒用例超时，未修改 timeout。tag `released/2.7.260-20` 指向 `822d6af`，发布后文档提交 `9230625` 已推送维护远端 `fork`；包为 `yanhaidao-wecom-2.7.260-20.tgz`（582,352 bytes；SHA-256 `bd4bb88021a175efd49a1a19c3027c80969c221bcd7a117e505c391d10025d78`；250 文件）。
 - 上一发布版本：**`2.7.260-19`**。tag 与 `main` 已推送维护远端 `fork`；包 `yanhaidao-wecom-2.7.260-19.tgz`（581,856 bytes；SHA-256 `3042f3f20eae2504c995cba3b75abaebd37af7d2d7934984b88516cb3a3426bd`；250 文件）。跨品类 MCP 兜底路由修正有效，但 `-20` 将补上多账号别名与错误输出脱敏边界。Windows 真机、企业微信网关/客户端仍未验证。
 - 上一发布版本：**`2.7.260-18`**，tag 与 `main` 已推送维护远端 `fork`；包 `yanhaidao-wecom-2.7.260-18.tgz`（581,144 bytes；SHA-256 `6acf87c28510a49243ad6ae7ffcfb1e15f6175d11d1514d97f808ea1f20e96ce`；250 文件）。CLI 主工具、凭据隔离与 Skills 有效，但跨品类 MCP 兜底映射不完整，不再推荐安装。Windows 真机、企业微信网关/客户端仍未验证。
 - 更早正式版本：**`2.7.260-17`**，发布标签 `released/2.7.260-17`。`wecom_mcp` 收口发布版，现网按 `bot.mcpServers` 配置**验证通过**。`851003` 的根因是结构性的：`aibot_get_mcp_config` 签发 `/mcp/robot-doc`「企微机器人文档 MCP」（只有机器人自身作用域），后台 apikey 签发 `/mcp/v2/bot/<biz>`「动态文档 MCP」（内嵌授权真人用户）。详见第 2u 节。

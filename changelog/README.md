@@ -4,6 +4,8 @@
 
 ## 本 fork 维护版本
 
+- [`v2.7.260-21`](./v2.7.260-21.md)（发布 tag `released/2.7.260-21`，已推送 `fork`）：对抗式评审三处修复 + 官方功能对齐。冻结状态定时器在「流可写但 ACK 不回」时仍会 0ms 空转（实测 98 个 0ms 定时器 / 297 次 `replyStream`），按「派发即消费」的车道语义补下限修复；`closeDeferred` 恢复企微流收尾帧并补 `sealProgress()`，且在回合仍有未送达正文时拒绝接管，避免静默丢失模型输出。新增**模板卡片出站能力**（此前只发技能没有实现）：final 抽取并单独推送卡片、流式帧遮罩未成形 JSON、`template_card_event` 就地更新。deferred 回合的推送不再挂 `（回复完毕）`；入站附件超限改为可操作的中文提示。全量 58 文件 / 759 用例全绿。
+
 - [`v2.7.260-20`](./v2.7.260-20.md)（发布 tag `released/2.7.260-20`，已推送 `fork`）：补强多账号 `default` 别名 fail-closed 与 CLI 错误输出脱敏；`-19` 的路由修正保持不变。新增/受影响聚焦回归通过，既有高负载用例的环境超时见简报。
 
 - [`v2.7.260-19`](./v2.7.260-19.md)（发布 tag `released/2.7.260-19`，已推送 `fork`）：修正 `wecom_mcp -> wecom-cli` 兜底的跨品类方法路由；`msg -> message`、`schedule -> calendar`，`doc` 按方法前缀选择 doc/sheet/smartsheet/smartpage/media，无法证明的映射快速失败。稳定单 worker 全量 56 文件 / 710 用例通过。

@@ -4,7 +4,7 @@
 
 ## 本 fork 维护版本
 
-- [`v2.7.260-20`](./v2.7.260-20.md)（本地候选）：补强多账号 `default` 别名 fail-closed 与 CLI 错误输出脱敏；`-19` 的路由修正保持不变。新增/受影响聚焦回归通过，既有高负载用例的环境超时见简报。
+- [`v2.7.260-20`](./v2.7.260-20.md)（发布 tag `released/2.7.260-20`，待推 `fork`）：补强多账号 `default` 别名 fail-closed 与 CLI 错误输出脱敏；`-19` 的路由修正保持不变。新增/受影响聚焦回归通过，既有高负载用例的环境超时见简报。
 
 - [`v2.7.260-19`](./v2.7.260-19.md)（发布 tag `released/2.7.260-19`，已推送 `fork`）：修正 `wecom_mcp -> wecom-cli` 兜底的跨品类方法路由；`msg -> message`、`schedule -> calendar`，`doc` 按方法前缀选择 doc/sheet/smartsheet/smartpage/media，无法证明的映射快速失败。稳定单 worker 全量 56 文件 / 710 用例通过。
 

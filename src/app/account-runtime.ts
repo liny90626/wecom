@@ -121,11 +121,17 @@ export class WecomAccountRuntime {
       markExternalActivity: () => {
         replyHandle.markExternalActivity?.();
       },
+      markRunActivity: () => {
+        replyHandle.markRunActivity?.();
+      },
       onTransportRetired: (listener) =>
         replyHandle.onTransportRetired?.(listener) ?? (() => {}),
       markDispatchSettled: () => {
         replyHandle.markDispatchSettled?.();
       },
+      closeDeferred: replyHandle.closeDeferred
+        ? async () => (await replyHandle.closeDeferred?.()) ?? true
+        : undefined,
       supersedeByNewInbound: (meta) => {
         replyHandle.supersedeByNewInbound?.(meta);
       },

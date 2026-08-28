@@ -77,6 +77,8 @@ export async function dispatchRuntimeReply(params: {
   const isBotWsReply = replyHandle.context.transport === "bot-ws";
   const sessionKey = String(session.ctx.SessionKey ?? session.route?.sessionKey ?? "");
   let visibleBodySeen = false;
+  let visibleProcessPreviewSeen = false;
+  let deferredTurn = false;
   let finalDelivered = false;
   let observedReplyDelivery = false;
   let turnAdopted = false;
@@ -265,12 +267,18 @@ export async function dispatchRuntimeReply(params: {
     }
     const slot: { payload?: ReplyPayload } = {};
     pendingPreambleSlot = slot;
-    appendProgress(() => {
-      if (pendingPreambleSlot === slot) {
-        pendingPreambleSlot = undefined;
-      }
-      return slot.payload ?? resolvePreamblePayload();
-    }, "block");
+    appendProgress(
+      () => {
+        if (pendingPreambleSlot === slot) {
+          pendingPreambleSlot = undefined;
+        }
+        return slot.payload ?? resolvePreamblePayload();
+      },
+      "block",
+      () => {
+        visibleProcessPreviewSeen = true;
+      },
+    );
     return true;
   };
 
@@ -323,12 +331,16 @@ export async function dispatchRuntimeReply(params: {
     if (finalDelivered) {
       return;
     }
+    const channelData = {
+      ...(externalFinalDelivered ? { wecomExternalFinalDelivered: true } : {}),
+      // Carries "the answer is still coming" to the transport, which uses it to
+      // keep the completion marker off a turn that has not completed.
+      ...(deferredTurn ? { wecomDeferredTurn: true } : {}),
+    };
     await replyHandle.deliver(
       {
         text: !visibleBodySeen && fastAutoOnText ? fastAutoOnText : "",
-        ...(externalFinalDelivered
-          ? { channelData: { wecomExternalFinalDelivered: true } }
-          : {}),
+        ...(Object.keys(channelData).length > 0 ? { channelData } : {}),
       },
       { kind: "final" },
     );
@@ -581,6 +593,29 @@ export async function dispatchRuntimeReply(params: {
     );
   }
   if (
+    isBotWsReply &&
+    result.noVisibleReplyFallbackEligible === true &&
+    (visibleBodySeen || visibleProcessPreviewSeen) &&
+    replyHandle.closeDeferred
+  ) {
+    // Drain the queued narration first, exactly like closeReply does: the
+    // stream is finished on the last CONFIRMED preview, so closing ahead of a
+    // still-queued progress frame would drop that step and close on a stale
+    // bubble.
+    await sealProgress();
+    if (abortSignal?.aborted) {
+      return;
+    }
+    deferredTurn = true;
+    // The handle declines when the turn still holds body text the user has not
+    // seen; delivering that is worth more than skipping the notice, so the
+    // ordinary close below owns those turns.
+    if (await replyHandle.closeDeferred()) {
+      console.info(`[wecom-b3] dispatch-deferred-visible-reply sessionKey=${sessionKey}`);
+      return;
+    }
+  }
+  if (
     result.noVisibleReplyFallbackEligible === true &&
     !visibleBodySeen &&
     !fastAutoOnText &&
@@ -598,6 +633,7 @@ export async function dispatchRuntimeReply(params: {
       // continuation whose answer arrives through a later run. Failing here
       // would replace that answer with an error notice.
       console.info(`[wecom-b3] dispatch-deferred-no-visible-reply sessionKey=${sessionKey}`);
+      deferredTurn = true;
       await closeReply();
       return;
     }

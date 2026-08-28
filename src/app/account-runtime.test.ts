@@ -101,6 +101,7 @@ describe("WecomAccountRuntime", () => {
 
     trackedReplyHandle?.activate?.();
     expect(activate).toHaveBeenCalledOnce();
+    expect(trackedReplyHandle?.closeDeferred).toBeUndefined();
   });
 
   it("forwards transport lifecycle hooks through the runtime wrapper", async () => {
@@ -111,6 +112,8 @@ describe("WecomAccountRuntime", () => {
     const unregister = vi.fn();
     const onTransportRetired = vi.fn(() => unregister);
     const markDispatchSettled = vi.fn();
+    const markRunActivity = vi.fn();
+    const closeDeferred = vi.fn();
 
     await makeRuntime().handleEvent(makeEvent(), {
       context: {
@@ -121,6 +124,8 @@ describe("WecomAccountRuntime", () => {
       deliver: vi.fn(),
       onTransportRetired,
       markDispatchSettled,
+      markRunActivity,
+      closeDeferred,
     });
 
     const listener = vi.fn();
@@ -129,6 +134,10 @@ describe("WecomAccountRuntime", () => {
 
     expect(onTransportRetired).toHaveBeenCalledWith(listener);
     expect(markDispatchSettled).toHaveBeenCalledOnce();
+    trackedReplyHandle?.markRunActivity?.();
+    expect(markRunActivity).toHaveBeenCalledOnce();
+    trackedReplyHandle?.closeDeferred?.();
+    expect(closeDeferred).toHaveBeenCalledOnce();
   });
 
   it("records a handled Bot WS reply failure once across runtime and frame boundaries", async () => {

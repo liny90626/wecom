@@ -3,6 +3,19 @@ import { ProxyAgent, fetch as undiciFetch } from "undici";
 
 type ProxyDispatcher = Dispatcher;
 
+/**
+ * A body that exceeded the caller's byte budget.
+ *
+ * Typed because the caller has to tell "this file is too big" apart from "the
+ * network broke": only the first one has an answer the user can act on.
+ */
+export class ResponseBodyTooLargeError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`response body too large (>${maxBytes} bytes)`);
+    this.name = "ResponseBodyTooLargeError";
+  }
+}
+
 const proxyDispatchers = new Map<string, ProxyDispatcher>();
 
 /**
@@ -136,7 +149,7 @@ export async function readResponseBodyAsBuffer(res: Response, maxBytes?: number)
       } catch {
         // ignore
       }
-      throw new Error(`response body too large (>${limit} bytes)`);
+      throw new ResponseBodyTooLargeError(limit);
     }
     chunks.push(value);
   }

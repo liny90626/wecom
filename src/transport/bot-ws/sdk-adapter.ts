@@ -11,6 +11,7 @@ import {
   unregisterBotWsPushHandle,
   type BotWsPushHandle,
 } from "../../app/index.js";
+import { updateTemplateCardOnEvent } from "../../capability/card/manager.js";
 import { clearWecomMcpAccountCache } from "../../capability/mcp/index.js";
 import { PLUGIN_VERSION } from "../../version.js";
 import type { ReplyHandle, RuntimeLogSink, UnifiedInboundEvent } from "../../types/index.js";
@@ -507,6 +508,25 @@ export class BotWsSdkAdapter {
             `[wecom-ws] event ignored account=${this.runtime.account.accountId} eventtype=${eventType}`,
           );
           return;
+        }
+        // 卡片交互回调：先把卡片本身更新掉（禁用控件、提交按钮改「已提交」），
+        // 再照常派发给 agent。不更新的话卡片会一直停在可点状态，用户以为没提交成功。
+        // 缓存是进程内的，重启后拿不到原卡片，此时只跳过更新、不影响派发。
+        if (eventType === "template_card_event") {
+          const body = frame.body as EventMessage | undefined;
+          void updateTemplateCardOnEvent({
+            client,
+            frame,
+            accountId: this.runtime.account.accountId,
+            event: (body?.event as { template_card_event?: never } | undefined)
+              ?.template_card_event,
+            userId: String((body as { from?: { userid?: string } } | undefined)?.from?.userid ?? "")
+              .trim() || undefined,
+          }).catch((error: unknown) => {
+            this.log.warn?.(
+              `[wecom-ws] template-card-update failed account=${this.runtime.account.accountId} error=${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
         }
         // 授权变更：成员刚在后台改过「可使用权限」，手上那份 MCP 配置与会话
         // 可能已经不对应了，作废掉，让下次调用重新拉取。

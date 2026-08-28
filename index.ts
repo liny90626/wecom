@@ -31,6 +31,15 @@ const WECOM_BOT_WS_MEDIA_GUIDANCE = [
   "- 语音消息仅原生支持 AMR；其他音频格式会按文件发送",
 ].join("\n");
 
+const WECOM_TEMPLATE_CARD_GUIDANCE = [
+  "【WeCom 模板卡片】",
+  "需要给用户发通知、投票、按钮选择等结构化卡片时，直接在最终回复里输出 ```json 代码块，",
+  "其中 card_type 字段标明卡片类型（text_notice / news_notice / button_interaction /",
+  "vote_interaction / multiple_interaction）。插件会自动提取该代码块、作为企业微信卡片消息发送，",
+  "并把它从正文中移除；代码块之外的文字照常作为普通回复发送。详见 wecom-send-template-card 技能。",
+  "不要调用 wecom-cli 或其他工具发送卡片。",
+].join("\n");
+
 const WECOM_CLI_GUIDANCE = [
   "企业微信通讯录、文档、会议、日程、待办、智能表格等能力必须通过专用 `wecom-cli` tool 调用。",
   "禁止通过 exec、bash、shell、npx 或 PATH 上的全局命令运行 wecom-cli；专用 tool 会按当前会话账号注入隔离凭据。",
@@ -105,7 +114,7 @@ const plugin = {
         return;
       }
       return {
-        appendSystemContext: WECOM_BOT_WS_MEDIA_GUIDANCE,
+        appendSystemContext: [WECOM_BOT_WS_MEDIA_GUIDANCE, WECOM_TEMPLATE_CARD_GUIDANCE].join("\n\n"),
       };
     });
 

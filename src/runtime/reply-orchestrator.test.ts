@@ -316,7 +316,10 @@ describe("dispatchRuntimeReply", () => {
 
     expect(fail).not.toHaveBeenCalled();
     expect(deliver).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith({ text: "" }, { kind: "final" });
+    expect(deliver).toHaveBeenCalledWith(
+      { text: "", channelData: { wecomDeferredTurn: true } },
+      { kind: "final" },
+    );
   });
 
   it("keeps a tool-heavy turn's bubble to one narration step through a real Bot WS handle", async () => {
@@ -1397,7 +1400,7 @@ describe("dispatchRuntimeReply", () => {
       { text: "第一版思考", isReasoning: true },
       { text: "最新思考", isReasoning: true },
       fastProgress,
-      { text: "" },
+      { text: "", channelData: { wecomDeferredTurn: true } },
     ]);
   });
 
@@ -1895,7 +1898,10 @@ describe("dispatchRuntimeReply", () => {
     ).resolves.toBeUndefined();
 
     expect(fail).not.toHaveBeenCalled();
-    expect(deliver).toHaveBeenLastCalledWith({ text: "" }, { kind: "final" });
+    expect(deliver).toHaveBeenLastCalledWith(
+      { text: "", channelData: { wecomDeferredTurn: true } },
+      { kind: "final" },
+    );
   });
 
   it("prefers the deferred close over the absorbed notice when both apply", async () => {
@@ -1924,7 +1930,10 @@ describe("dispatchRuntimeReply", () => {
       } as any,
     });
 
-    expect(deliver).toHaveBeenLastCalledWith({ text: "" }, { kind: "final" });
+    expect(deliver).toHaveBeenLastCalledWith(
+      { text: "", channelData: { wecomDeferredTurn: true } },
+      { kind: "final" },
+    );
     expect(
       deliver.mock.calls.some((call) => String(call[0]?.text ?? "").includes("并入")),
     ).toBe(false);
@@ -2435,7 +2444,10 @@ describe("dispatchRuntimeReply", () => {
       },
       { kind: "block" },
     );
-    expect(deliver).toHaveBeenLastCalledWith({ text: "" }, { kind: "final" });
+    expect(deliver).toHaveBeenLastCalledWith(
+      { text: "", channelData: { wecomDeferredTurn: true } },
+      { kind: "final" },
+    );
   });
 
   it("accepts a routed final after Fast auto-off progress", async () => {
@@ -2844,6 +2856,352 @@ describe("dispatchRuntimeReply", () => {
 
     expect(deliver).toHaveBeenCalledWith({ text: "最终候选已成功" }, { kind: "final" });
     expect(fail).not.toHaveBeenCalled();
+  });
+
+  it("does not abort the OpenClaw run when the WeCom progress stream expires", async () => {
+    __resetBotWsReplyTestState();
+    const abortController = new AbortController();
+    const expiredError = {
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const client = {
+      replyStreamNonBlocking: vi.fn().mockRejectedValue(expiredError),
+      hasPendingReplyAck: vi.fn(() => false),
+      replyStream: vi.fn().mockRejectedValue(expiredError),
+      sendMessage: vi.fn().mockResolvedValue({}),
+      replyWelcome: vi.fn().mockResolvedValue({}),
+    } as unknown as WSClient;
+    const replyHandle = createBotWsReplyHandle({
+      client,
+      frame: {
+        headers: { req_id: "req-expired-progress-live-run" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as any,
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      expect(params.replyOptions.abortSignal.aborted).toBe(false);
+      await params.replyOptions.onItemEvent({
+        itemId: "commentary-expired-stream",
+        kind: "preamble",
+        progressText: "长任务仍在执行",
+      });
+      expect(params.replyOptions.abortSignal.aborted).toBe(false);
+      await params.dispatcherOptions.deliver({ text: "完整最终答复" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-expired-progress-live-run" } } as any,
+      replyHandle,
+      abortSignal: abortController.signal,
+    });
+
+    expect(abortController.signal.aborted).toBe(false);
+    const pushes = (client.sendMessage as any).mock.calls.map((call: any[]) =>
+      String(call[1]?.markdown?.content ?? ""),
+    );
+    expect(pushes.join("\n")).toContain("完整最终答复");
+  });
+
+  it("does not claim a visible preview is complete when OpenClaw defers the final", async () => {
+    __resetBotWsReplyTestState();
+    const expiredError = {
+      headers: { req_id: "req-deferred-visible-preview" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const client = {
+      replyStreamNonBlocking: vi.fn().mockResolvedValue({}),
+      hasPendingReplyAck: vi.fn(() => false),
+      replyStream: vi.fn().mockRejectedValue(expiredError),
+      sendMessage: vi.fn().mockResolvedValue({}),
+      replyWelcome: vi.fn().mockResolvedValue({}),
+    } as unknown as WSClient;
+    const replyHandle = createBotWsReplyHandle({
+      client,
+      frame: {
+        headers: { req_id: "req-deferred-visible-preview" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as any,
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementation(async (params) => {
+        await params.dispatcherOptions.deliver({ text: "过程预览，不是最终答案" }, { kind: "block" });
+        return {
+          queuedFinal: false,
+          counts: { block: 1, final: 0, tool: 0 },
+          noVisibleReplyFallbackEligible: true,
+        };
+      });
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-deferred-visible-preview" } } as any,
+      replyHandle,
+    });
+
+    const pushes = (client.sendMessage as any).mock.calls.map((call: any[]) =>
+      String(call[1]?.markdown?.content ?? ""),
+    );
+    expect(pushes).toEqual([]);
+    expect(pushes.join("\n")).not.toContain("以上预览内容即为完整回复");
+
+    await replyHandle.deliver({ text: "真实最终答案" }, { kind: "final" });
+    const finalPushes = (client.sendMessage as any).mock.calls.map((call: any[]) =>
+      String(call[1]?.markdown?.content ?? ""),
+    );
+    expect(finalPushes.join("\n")).toContain("真实最终答案");
+    expect(finalPushes.join("\n")).not.toContain("以上预览内容即为完整回复");
+  });
+
+  it("does not claim a channel-owned preview is complete when source delivery is suppressed", async () => {
+    __resetBotWsReplyTestState();
+    const expiredError = {
+      headers: { req_id: "req-deferred-suppressed-preview" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const client = {
+      replyStreamNonBlocking: vi.fn().mockResolvedValue({}),
+      hasPendingReplyAck: vi.fn(() => false),
+      replyStream: vi.fn().mockRejectedValue(expiredError),
+      sendMessage: vi.fn().mockResolvedValue({}),
+      replyWelcome: vi.fn().mockResolvedValue({}),
+    } as unknown as WSClient;
+    const replyHandle = createBotWsReplyHandle({
+      client,
+      frame: {
+        headers: { req_id: "req-deferred-suppressed-preview" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as any,
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await dispatchRuntimeReply({
+      core: {
+        channel: {
+          reply: {
+            dispatchReplyWithBufferedBlockDispatcher: vi.fn().mockImplementation(async (params) => {
+              await params.dispatcherOptions.deliver(
+                { text: "渠道过程预览，不是最终答案" },
+                { kind: "block" },
+              );
+              return {
+                queuedFinal: false,
+                counts: { block: 1, final: 0, tool: 0 },
+                sourceReplyDeliveryMode: "message_tool_only",
+                noVisibleReplyFallbackEligible: true,
+              };
+            }),
+          },
+        },
+      } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-deferred-suppressed-preview" } } as any,
+      replyHandle,
+    });
+
+    // No invented completion reaches the user on any lane...
+    expect(client.sendMessage).not.toHaveBeenCalled();
+    // ...but the opened stream is still finished on the text already shown, or
+    // the bubble keeps rendering as "still generating" for the rest of its
+    // window.
+    expect(client.replyStream).toHaveBeenCalledTimes(1);
+    const [, , closeText, closeFinish] = client.replyStream.mock.calls[0] as unknown as unknown[];
+    expect(closeText).toBe("渠道过程预览，不是最终答案");
+    expect(closeFinish).toBe(true);
+  });
+
+  it("still delivers a deferred turn's unseen body tail instead of closing on it", async () => {
+    __resetBotWsReplyTestState();
+    const expiredError = {
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    let previewSends = 0;
+    const client = {
+      // The first preview lands; the window closes before the second one, so
+      // the tail only ever exists inside this handle.
+      replyStreamNonBlocking: vi.fn().mockImplementation(async () => {
+        previewSends += 1;
+        if (previewSends > 1) throw expiredError;
+        return {};
+      }),
+      hasPendingReplyAck: vi.fn(() => false),
+      replyStream: vi.fn().mockRejectedValue(expiredError),
+      sendMessage: vi.fn().mockResolvedValue({}),
+      replyWelcome: vi.fn().mockResolvedValue({}),
+    } as unknown as WSClient;
+    const replyHandle = createBotWsReplyHandle({
+      client,
+      frame: {
+        headers: { req_id: "req-deferred-unseen-tail" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as any,
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await dispatchRuntimeReply({
+      core: {
+        channel: {
+          reply: {
+            dispatchReplyWithBufferedBlockDispatcher: vi.fn().mockImplementation(async (params) => {
+              await params.dispatcherOptions.deliver({ text: "第一段已送达。" }, { kind: "block" });
+              await params.dispatcherOptions.deliver(
+                { text: "第二段未送达的尾巴。" },
+                { kind: "block" },
+              );
+              return {
+                queuedFinal: false,
+                counts: { block: 2, final: 0, tool: 0 },
+                noVisibleReplyFallbackEligible: true,
+              };
+            }),
+          },
+        },
+      } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-deferred-unseen-tail" } } as any,
+      replyHandle,
+    });
+
+    const pushes = (client.sendMessage as any).mock.calls.map((call: any[]) =>
+      String(call[1]?.markdown?.content ?? ""),
+    );
+    // Skipping the completion notice must never cost the user model output:
+    // the tail the closed window swallowed still has to reach them.
+    expect(pushes.join("\n")).toContain("第二段未送达的尾巴。");
+    expect(pushes.join("\n")).not.toContain("以上预览内容即为完整回复");
+  });
+
+  it("does not stamp the completion marker on a deferred turn's undelivered tail", async () => {
+    __resetBotWsReplyTestState();
+    const expiredError = {
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    let previewSends = 0;
+    const client = {
+      replyStreamNonBlocking: vi.fn().mockImplementation(async () => {
+        previewSends += 1;
+        if (previewSends > 1) throw expiredError;
+        return {};
+      }),
+      hasPendingReplyAck: vi.fn(() => false),
+      replyStream: vi.fn().mockRejectedValue(expiredError),
+      sendMessage: vi.fn().mockResolvedValue({}),
+      replyWelcome: vi.fn().mockResolvedValue({}),
+    } as unknown as WSClient;
+    const replyHandle = createBotWsReplyHandle({
+      client,
+      frame: {
+        headers: { req_id: "req-deferred-no-marker" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as any,
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await dispatchRuntimeReply({
+      core: {
+        channel: {
+          reply: {
+            dispatchReplyWithBufferedBlockDispatcher: vi.fn().mockImplementation(async (params) => {
+              await params.dispatcherOptions.deliver({ text: "第一段已送达。" }, { kind: "block" });
+              await params.dispatcherOptions.deliver(
+                { text: "第二段未送达的尾巴。" },
+                { kind: "block" },
+              );
+              return {
+                queuedFinal: false,
+                counts: { block: 2, final: 0, tool: 0 },
+                noVisibleReplyFallbackEligible: true,
+              };
+            }),
+          },
+        },
+      } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-deferred-no-marker" } } as any,
+      replyHandle,
+    });
+
+    const pushes = (client.sendMessage as any).mock.calls.map((call: any[]) =>
+      String(call[1]?.markdown?.content ?? ""),
+    );
+    // The tail still has to reach the user...
+    expect(pushes.join("\n")).toContain("第二段未送达的尾巴。");
+    // ...but "（回复完毕）" would claim a completion that has not happened.
+    expect(pushes.join("\n")).not.toContain("（回复完毕）");
+  });
+
+  it("does not claim a visible preamble preview is complete when the final is deferred", async () => {
+    __resetBotWsReplyTestState();
+    const expiredError = {
+      headers: { req_id: "req-deferred-preamble-preview" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    const client = {
+      replyStreamNonBlocking: vi.fn().mockResolvedValue({}),
+      hasPendingReplyAck: vi.fn(() => false),
+      replyStream: vi.fn().mockRejectedValue(expiredError),
+      sendMessage: vi.fn().mockResolvedValue({}),
+      replyWelcome: vi.fn().mockResolvedValue({}),
+    } as unknown as WSClient;
+    const replyHandle = createBotWsReplyHandle({
+      client,
+      frame: {
+        headers: { req_id: "req-deferred-preamble-preview" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as any,
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementation(async (params) => {
+        await params.replyOptions.onItemEvent({
+          itemId: "commentary-1",
+          kind: "preamble",
+          progressText: "过程说明预览，不是最终答案",
+        });
+        return {
+          queuedFinal: false,
+          counts: { block: 0, final: 0, tool: 0 },
+          noVisibleReplyFallbackEligible: true,
+        };
+      });
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-deferred-preamble-preview" } } as any,
+      replyHandle,
+    });
+
+    expect(client.sendMessage).not.toHaveBeenCalled();
+    expect(client.replyStream).toHaveBeenCalledTimes(1);
+    const [, , closeText, closeFinish] = client.replyStream.mock.calls[0] as unknown as unknown[];
+    expect(String(closeText)).toContain("过程说明预览，不是最终答案");
+    expect(closeFinish).toBe(true);
   });
 
 });

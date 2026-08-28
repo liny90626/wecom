@@ -1817,6 +1817,320 @@ describe("createBotWsReplyHandle", () => {
     );
   });
 
+  it("does not spin zero-delay timers while a frozen status ACK is in flight", async () => {
+    mockClient.replyStream
+      .mockResolvedValueOnce({} as any)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve({}), 25);
+          }) as any,
+      );
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-frozen-status-in-flight" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "预览内容。".repeat(700) }, { kind: "block" });
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+
+    await vi.advanceTimersByTimeAsync(8 * 60_000 + 25);
+    await flushPromises();
+
+    const zeroDelayTimers = timeoutSpy.mock.calls.filter((call) => call[1] === 0);
+    expect(zeroDelayTimers).toHaveLength(0);
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not rearm frozen status after supersede while its ACK is in flight", async () => {
+    let releaseStatusAck!: (value: unknown) => void;
+    mockClient.replyStream
+      .mockResolvedValueOnce({} as any)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseStatusAck = resolve;
+          }) as any,
+      );
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-frozen-status-superseded" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "预览内容。".repeat(700) }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(8 * 60_000);
+    await flushPromises();
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+
+    handle.supersedeByNewInbound?.({
+      accountId: "default",
+      peerKind: "direct",
+      peerId: "alice",
+      reason: "new-inbound",
+    });
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    releaseStatusAck({});
+    await flushPromises();
+
+    expect(timeoutSpy.mock.calls.filter((call) => call[1] === 0)).toHaveLength(0);
+  });
+
+  it("does not retry frozen status faster than the status cadence when its ACKs never arrive", async () => {
+    // A stream that keeps taking frames but never acknowledges them latches
+    // streamAckUnreliable WITHOUT killing the bubble, so the frozen-status lane
+    // stays armed. Its slot is only spent on a CONFIRMED frame, so every failed
+    // cycle used to leave the slot due and re-arm on a zero delay — the lane
+    // then re-sent the same failing frame several times a second for the rest
+    // of the turn instead of once a minute.
+    mockClient.replyStream.mockRejectedValue(new Error("ack timeout"));
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-frozen-status-ack-never-arrives" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "预览内容。".repeat(700) }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(8 * 60_000);
+    await flushPromises();
+
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const streamCallsBefore = mockClient.replyStream.mock.calls.length;
+    const virtualStart = Date.now();
+    for (let step = 0; step < 200; step += 1) {
+      await vi.advanceTimersToNextTimerAsync();
+    }
+
+    expect(timeoutSpy.mock.calls.filter((call) => call[1] === 0)).toHaveLength(0);
+    // 200 timer steps must cover far more than a couple of status slots; a
+    // spinning lane burned them all inside ~80 simulated seconds.
+    const elapsedMs = Date.now() - virtualStart;
+    expect(elapsedMs).toBeGreaterThan(30 * 60_000);
+    const streamCalls = mockClient.replyStream.mock.calls.length - streamCallsBefore;
+    expect(streamCalls).toBeLessThan(elapsedMs / 60_000);
+  });
+
+  it("keeps an expired callback claim on recurring push without reviving its frozen stream", async () => {
+    const callbackClaimExpiresAt = Date.now() + 8 * 60_000;
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-frozen-status-expired-claim" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      isCallbackStreamCurrent: () => Date.now() < callbackClaimExpiresAt,
+    });
+
+    await handle.deliver({ text: "预览内容。".repeat(700) }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(8 * 60_000);
+    await flushPromises();
+
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content)).toContain(
+      "【长任务处理中，请勿打断，已用时8m00s】",
+    );
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await flushPromises();
+    expect(mockClient.sendMessage).toHaveBeenCalledTimes(2);
+    expect(String((mockClient.sendMessage.mock.calls[1]?.[1] as any).markdown.content)).toContain(
+      "【长任务处理中，请勿打断，已用时13m00s】",
+    );
+  });
+
+  it("sends a template card as its own message and keeps its JSON out of the reply", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-template-card-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const cardBlock =
+      "```json\n" +
+      JSON.stringify({
+        card_type: "vote_interaction",
+        title: "午饭吃什么",
+        options: [
+          { id: "a", text: "面" },
+          { id: "b", text: "饭" },
+        ],
+      }) +
+      "\n```";
+    await handle.deliver({ text: `帮你发起投票：\n\n${cardBlock}\n\n投完告诉我。` }, { kind: "final" });
+    await flushPromises();
+
+    const cardPushes = mockClient.sendMessage.mock.calls.filter(
+      (call) => (call[1] as any)?.msgtype === "template_card",
+    );
+    expect(cardPushes).toHaveLength(1);
+    const card = (cardPushes[0]?.[1] as any).template_card;
+    expect(card.card_type).toBe("vote_interaction");
+    expect(card.checkbox.option_list).toEqual([
+      { id: "a", text: "面" },
+      { id: "b", text: "饭" },
+    ]);
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).toContain("帮你发起投票");
+    expect(finalFrame).toContain("投完告诉我");
+    expect(finalFrame).not.toContain("card_type");
+  });
+
+  it("closes a card-only reply on a confirmation instead of an empty bubble", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-template-card-only" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const cardBlock =
+      "```json\n" +
+      JSON.stringify({ card_type: "text_notice", main_title: { title: "发布完成" } }) +
+      "\n```";
+    await handle.deliver({ text: cardBlock }, { kind: "final" });
+    await flushPromises();
+
+    expect(
+      mockClient.sendMessage.mock.calls.filter(
+        (call) => (call[1] as any)?.msgtype === "template_card",
+      ),
+    ).toHaveLength(1);
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).toContain("卡片消息已发送");
+    expect(finalFrame).not.toContain("card_type");
+  });
+
+  it("says so when a detected card could not be sent", async () => {
+    // The JSON is gone from the text by then, so silence would leave the turn
+    // looking answered while the user received nothing.
+    mockClient.sendMessage.mockRejectedValueOnce(new Error("card rejected"));
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-template-card-failed" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const cardBlock =
+      "```json\n" +
+      JSON.stringify({ card_type: "text_notice", main_title: { title: "发布完成" } }) +
+      "\n```";
+    await handle.deliver({ text: cardBlock }, { kind: "final" });
+    await flushPromises();
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).toContain("卡片消息发送失败");
+    expect(finalFrame).not.toContain("card_type");
+  });
+
+  it("never streams raw card JSON while the model is still writing it", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-template-card-preview" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: '帮你发起投票：\n\n```json\n{\n  "card_type": "vote' }, {
+      kind: "block",
+    });
+    await flushPromises();
+
+    const previewFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(previewFrame).toContain("帮你发起投票");
+    expect(previewFrame).toContain("正在生成卡片消息");
+    expect(previewFrame).not.toContain("card_type");
+  });
+
+  it("does not push the same card twice when the final is delivered again", async () => {
+    // A card cannot be recalled, and this handle's final can legitimately be
+    // delivered more than once (a close followed by a handoff notice, a retry).
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-template-card-twice" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const cardBlock =
+      "```json\n" +
+      JSON.stringify({ card_type: "text_notice", main_title: { title: "发布完成" } }) +
+      "\n```";
+    await handle.deliver({ text: `已完成。\n\n${cardBlock}` }, { kind: "final" });
+    await handle.deliver({ text: `已完成。\n\n${cardBlock}` }, { kind: "final" });
+    await flushPromises();
+
+    expect(
+      mockClient.sendMessage.mock.calls.filter(
+        (call) => (call[1] as any)?.msgtype === "template_card",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not treat an ordinary code block as a card", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-plain-code-block" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: '配置：\n\n```json\n{"retries": 3}\n```' }, { kind: "final" });
+    await flushPromises();
+
+    expect(
+      mockClient.sendMessage.mock.calls.filter(
+        (call) => (call[1] as any)?.msgtype === "template_card",
+      ),
+    ).toHaveLength(0);
+    expect(String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "")).toContain("retries");
+  });
+
   it("does not split an emoji when freezing the preview character boundary", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
@@ -5845,6 +6159,12 @@ describe("createBotWsReplyHandle", () => {
     expect(String(lastCall?.[2])).toContain("预览内容");
     expect(String(lastCall?.[2])).toContain(
       "【长任务处理中，请勿打断，已用时8m00s】",
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushPromises();
+    expect(String(nonBlockingClient.replyStreamNonBlocking.mock.calls.at(-1)?.[2])).toContain(
+      "【长任务处理中，请勿打断，已用时9m00s】",
     );
   });
 

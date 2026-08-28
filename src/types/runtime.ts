@@ -116,6 +116,12 @@ export type ReplyHandle = {
   onTransportRetired?: (listener: () => void) => () => void;
   /** Releases transport-owner tracking after the OpenClaw dispatch has ended. */
   markDispatchSettled?: () => void;
+  /**
+   * Ends a deferred turn without inventing a final reply for its last preview.
+   * Resolves false when the turn still holds body text the user has not seen,
+   * so the caller falls back to the normal final delivery that can send it.
+   */
+  closeDeferred?: () => Promise<boolean>;
   /** Resolves after a superseded Bot WS run has released its OpenClaw session. */
   waitForSupersede?: () => Promise<void>;
   supersedeByNewInbound?: (meta: {

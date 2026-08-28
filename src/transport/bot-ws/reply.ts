@@ -16,6 +16,12 @@ import {
   chunkFormattedWeComMarkdownV2,
   toWeComMarkdownV2,
 } from "../../wecom_msg_adapter/markdown_adapter.js";
+import {
+  containsTemplateCardBlock,
+  extractTemplateCards,
+  maskTemplateCardBlocks,
+} from "../../capability/card/parser.js";
+import { sendTemplateCards } from "../../capability/card/manager.js";
 import { uploadAndSendBotWsMedia } from "./media.js";
 
 const PLACEHOLDER_RETRY_MS = 3000;
@@ -1557,6 +1563,8 @@ export function createBotWsReplyHandle(params: {
   };
 
   let finalDelivered = false;
+  /** This handle has already pushed its template cards; they cannot be recalled. */
+  let templateCardsDispatched = false;
   let finalDeliveryKey = "";
   let supersededByNewInbound = false;
   let suppressSupersededFinalPush = false;
@@ -2150,6 +2158,8 @@ export function createBotWsReplyHandle(params: {
       deliveryKey: string;
       peerDedup: boolean;
       isError: boolean;
+      /** OpenClaw deferred this turn's answer to a later run. */
+      deferred: boolean;
     },
   ): Promise<boolean | "retry-scheduled"> => {
     const markdownChunks = chunkWeComMarkdownWireV2(
@@ -2170,7 +2180,10 @@ export function createBotWsReplyHandle(params: {
         ? prependThinkingWithinFrameBudget(firstStreamChunk)
         : firstStreamChunk;
     let fallbackText = resolveStreamFallbackText(finalText, options.isError);
-    const fallbackAppendCompletionMarker = !options.isError;
+    // A pushed message has no bubble context, so it normally carries the marker
+    // to show the answer ended there. A deferred turn has NOT ended: the marker
+    // would tell the user to stop waiting for the answer that is still coming.
+    const fallbackAppendCompletionMarker = !options.isError && !options.deferred;
     // The fallback retry must reuse the EXACT identity of the failed push
     // (text/marker/default limits): any drift would reset the tracked chunk
     // progress and re-push chunks the user already confirmed-received.
@@ -2418,9 +2431,16 @@ export function createBotWsReplyHandle(params: {
   };
 
   const renderPreviewFrame = (
-    sourceText: string,
+    rawSourceText: string,
     now = Date.now(),
   ): { text: string; bodySourceText?: string } => {
+    // A template card is JSON the user must never see. It is only sendable once
+    // the block closes, so every intermediate frame — body preview, frozen
+    // status, timeout freeze — renders the placeholder instead. Masking here
+    // rather than at one call site keeps every preview lane consistent.
+    const sourceText = containsTemplateCardBlock(rawSourceText)
+      ? maskTemplateCardBlocks(rawSourceText)
+      : rawSourceText;
     const thinkingLimits = resolveThinkingFrameLayout(
       accumulatedThinkingText,
       Boolean(sourceText),
@@ -3018,6 +3038,9 @@ export function createBotWsReplyHandle(params: {
       }
     } finally {
       pendingPreviewFlushInFlight = false;
+      if (previewFrozen) {
+        startPreviewStatusInterval(LONG_TASK_STATUS_INTERVAL_MS);
+      }
       schedulePendingPreviewPoll();
     }
   }
@@ -3071,20 +3094,40 @@ export function createBotWsReplyHandle(params: {
     }
   };
 
-  const startPreviewStatusInterval = (): void => {
-    if (previewStatusInterval || streamSettled || !previewFrozen || previewWatchdogExpired) {
+  /**
+   * @param minDelayMs Floor for the next tick. Callers that re-arm AFTER a
+   * cycle pass the status interval: a slot that is still due means that cycle
+   * put nothing on the bubble (an unacknowledged frame, a lane that handed over
+   * to active push), and re-arming on it computes a zero delay and re-enters at
+   * once — an unthrottled retry loop that outruns the very cadence this lane
+   * exists to serve. Arming fresh (at freeze time) keeps the floor at 0 so a
+   * turn that only starts painting after the gate still reports promptly.
+   */
+  const startPreviewStatusInterval = (minDelayMs = 0): void => {
+    if (
+      previewStatusInterval ||
+      previewStatusInFlight ||
+      pendingPreviewFlushInFlight ||
+      pendingPreview ||
+      streamSettled ||
+      streamUpdateUnreliable ||
+      supersededByNewInbound ||
+      !previewFrozen ||
+      previewWatchdogExpired
+    ) {
       return;
     }
-    // A fixed-phase setInterval drifted out of step with the shared clock and
-    // fired ticks that the throttle then silently dropped. Re-arm from the
-    // clock each time instead, so a tick and a due slot are the same thing.
+    // Re-arm only after the current ACK attempt settles. Re-arming immediately
+    // at an already-due slot creates an unbounded 0 ms timer loop while the
+    // status frame is still in flight, starving the model/tool event loop.
     previewStatusInterval = setTimeout(
       () => {
         previewStatusInterval = undefined;
-        void sendFrozenPreviewStatus();
-        startPreviewStatusInterval();
+        void sendFrozenPreviewStatus().finally(() =>
+          startPreviewStatusInterval(LONG_TASK_STATUS_INTERVAL_MS),
+        );
       },
-      Math.max(0, nextLongTaskStatusDueAt() - Date.now()),
+      Math.max(minDelayMs, nextLongTaskStatusDueAt() - Date.now()),
     );
     previewStatusInterval.unref?.();
   };
@@ -3443,6 +3486,38 @@ export function createBotWsReplyHandle(params: {
       dispatchSettled = true;
       maybeReleaseRuntimeCleanup();
     },
+    closeDeferred: async () => {
+      if (runtimeRetired || streamSettled) {
+        return true;
+      }
+      const deliveredSourceText = previewFrozenDeliveredSourceText || lastDeliveredBodySourceText;
+      const unseenBody =
+        !deliveredSourceText ||
+        !accumulatedText.startsWith(deliveredSourceText) ||
+        accumulatedText.slice(deliveredSourceText.length).trim().length > 0;
+      if (accumulatedText && unseenBody) {
+        // The turn deferred its final, but it produced body text the user has
+        // not been shown. Only the final path knows how to chunk, retry and
+        // bookmark that remainder, so decline and let the caller run it: losing
+        // model output is worse than the notice this close exists to avoid.
+        console.info(
+          `[wecom-b3] deferred-close-declined account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} bodyChars=${accumulatedText.length} deliveredChars=${deliveredSourceText.length}`,
+        );
+        return false;
+      }
+      // Everything this turn produced is already on screen. Finish the stream
+      // on that text — an opened WeCom stream that never receives its closing
+      // frame keeps rendering as "still generating" for the rest of its window
+      // — and invent nothing: this is exactly the case where the normal final
+      // degenerated into "最终回复已完成，以上预览内容即为完整回复。" on a turn
+      // that had not finished. finalDelivered stays false so a later
+      // continuation can still deliver its real answer through this handle.
+      console.info(
+        `[wecom-b3] deferred-stream-closed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} previewChars=${lastPreviewText.length}`,
+      );
+      await closeOpenedStreamSilently(lastPreviewText);
+      return true;
+    },
     deliver: async (payload: ReplyPayload, info) => {
       if (runtimeRetired || (!streamSettled && !ensureRuntimeCleanup())) {
         return;
@@ -3601,7 +3676,47 @@ export function createBotWsReplyHandle(params: {
           ? mergeFinalReplyText(accumulatedText, text)
           : accumulatedText || text;
 
+      // OpenClaw deferred this turn's answer to a later run. Everything that
+      // would announce completion has to stay off this delivery.
+      const deferredTurn = payload.channelData?.wecomDeferredTurn === true;
       let finalText = outboundText;
+
+      // Template cards leave this reply as their own WeCom messages, so the JSON
+      // block is stripped before the chunker or the bubble ever sees it — what
+      // stays behind is what the user will actually read. A superseded turn
+      // stays silent: its cards belong to a conversation the user already
+      // moved on from.
+      if (
+        info.kind === "final" &&
+        !isEvent &&
+        !supersededByNewInbound &&
+        !templateCardsDispatched &&
+        containsTemplateCardBlock(finalText)
+      ) {
+        const extraction = extractTemplateCards(finalText);
+        if (extraction.cards.length > 0) {
+          const templateCardsSent = await sendTemplateCards({
+            client: params.client,
+            chatId: peerId,
+            chatType: peerKind,
+            accountId: params.accountId,
+            cards: extraction.cards,
+          });
+          // Latched before anything can fail: a card is an unrecallable message,
+          // and this handle's final can be delivered more than once (a close
+          // followed by a handoff notice, a retry). The delivery-key dedupe sits
+          // further down and would not stop the second send.
+          templateCardsDispatched = true;
+          const failedCount = extraction.cards.length - templateCardsSent;
+          // A card that never went out must be said out loud: its JSON is gone
+          // from the text by now, so silence would leave the turn looking
+          // answered when the user received nothing.
+          const failureNote = failedCount > 0 ? `⚠️ 有 ${failedCount} 张卡片消息发送失败。` : "";
+          const cardOnlyNote = templateCardsSent > 0 ? "📋 卡片消息已发送。" : "";
+          finalText =
+            [extraction.remainingText, failureNote].filter(Boolean).join("\n\n") || cardOnlyNote;
+        }
+      }
       let finalAppendCompletionMarker = false;
       let finalMediaDelivered = false;
       let currentFinalDeliveryKey = "";
@@ -3700,6 +3815,7 @@ export function createBotWsReplyHandle(params: {
         finalAppendCompletionMarker =
           payload.isError !== true &&
           !isEvent &&
+          !deferredTurn &&
           shouldAppendStreamCompletionMarker({
             finalText,
             previewFrozen,
@@ -3709,7 +3825,7 @@ export function createBotWsReplyHandle(params: {
           // A superseded reasoning-only handle must stay silent: promoting
           // the marker here would actively push a stray "（回复完毕）" bubble
           // into the newer conversation.
-          if (!finalText && reasoningOnlyFinal && !supersededByNewInbound) {
+          if (!finalText && reasoningOnlyFinal && !supersededByNewInbound && !deferredTurn) {
             finalText = FINAL_COMPLETION_MARKER;
           }
         }
@@ -3814,6 +3930,7 @@ export function createBotWsReplyHandle(params: {
             deliveryKey: currentFinalDeliveryKey,
             peerDedup: currentFinalUsesPeerDedup,
             isError: payload.isError === true,
+            deferred: deferredTurn,
           });
           if (normalFinalResult === "retry-scheduled") {
             return;

@@ -1,8 +1,27 @@
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
 import { resolveWecomMediaMaxBytes } from "../config/index.js";
+import { ResponseBodyTooLargeError } from "../http.js";
 import { decryptWecomMediaWithMeta } from "../media.js";
 import type { UnifiedInboundEvent } from "../types/index.js";
 import type { NormalizedMediaAttachment } from "./media-types.js";
+
+/**
+ * An inbound attachment the configured limit refuses.
+ *
+ * Its message is what the user reads: the raw failure is
+ * `response body too large (>83886080 bytes)`, which says nothing about the
+ * knob that produced it. Naming the limit and where to change it is the whole
+ * point of this class.
+ */
+export class WecomInboundMediaTooLargeError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(
+      `附件超过当前配置的大小上限（${(maxBytes / (1024 * 1024)).toFixed(0)}MB），未能读取。` +
+        "请压缩后重发，或调整 OpenClaw 的媒体大小配置。",
+    );
+    this.name = "WecomInboundMediaTooLargeError";
+  }
+}
 
 export class WecomMediaService {
   constructor(
@@ -55,6 +74,11 @@ export class WecomMediaService {
     attachment: NormalizedMediaAttachment,
   ): Promise<string> {
     const maxBytes = this.resolveInboundMaxBytes(event.accountId);
+    // Checked here rather than left to the core store: the core's own rejection
+    // is a generic message the user cannot act on.
+    if (attachment.buffer.length > maxBytes) {
+      throw new WecomInboundMediaTooLargeError(maxBytes);
+    }
     const saved = await this.core.channel.media.saveMediaBuffer(
       attachment.buffer,
       attachment.contentType,
@@ -75,10 +99,21 @@ export class WecomMediaService {
     // Keep fetch/decrypt/save on the same account-aware limit instead of falling back
     // to the core media store default (5MB).
     const maxBytes = this.resolveInboundMaxBytes(event.accountId);
-    // Bot-ws media is AES-encrypted; use decryption when aesKey is present
-    if (first.aesKey) {
-      return this.downloadEncryptedMedia({ url: first.remoteUrl, aesKey: first.aesKey, maxBytes });
+    try {
+      // Bot-ws media is AES-encrypted; use decryption when aesKey is present
+      if (first.aesKey) {
+        return await this.downloadEncryptedMedia({
+          url: first.remoteUrl,
+          aesKey: first.aesKey,
+          maxBytes,
+        });
+      }
+      return await this.downloadRemoteMedia({ url: first.remoteUrl, maxBytes });
+    } catch (error) {
+      if (error instanceof ResponseBodyTooLargeError) {
+        throw new WecomInboundMediaTooLargeError(maxBytes);
+      }
+      throw error;
     }
-    return this.downloadRemoteMedia({ url: first.remoteUrl, maxBytes });
   }
 }

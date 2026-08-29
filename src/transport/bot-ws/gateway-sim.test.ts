@@ -238,12 +238,15 @@ describe("WeCom gateway simulation", () => {
     await deliverAndTick(handle, { text: "长任务进度", isReasoning: true }, { kind: "block" }, 500);
 
     expect(sim.streamBubble("req-sim")?.content).toContain("正在思考中");
-    // The shared 8-minute gate filters short tasks before the first background push.
+    // The shared gate filters short tasks before the first background push.
     expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(0);
     await tick(8 * 60_000);
     const pushes = sim.chat.filter((entry) => entry.kind === "push");
     expect(pushes.length).toBeGreaterThanOrEqual(1);
-    expect(pushes[0]?.content).toBe("【长任务处理中，请勿打断，已用时8m00s】");
+    expect(pushes[0]?.content).toContain("长任务处理中，请勿打断");
+    // Once the window is dead this push is the only channel left, so it carries
+    // the reasoning the bubble can no longer show.
+    expect(pushes[0]?.content).toContain("<think>长任务进度</think>");
   });
 
   it("keeps the reasoning visible when the turn ends in an error", async () => {
@@ -311,7 +314,8 @@ describe("WeCom gateway simulation", () => {
     await tick(8 * 60_000);
     const pushes = sim.chat.filter((entry) => entry.kind === "push");
     expect(pushes.length).toBeGreaterThanOrEqual(1);
-    expect(pushes[0]?.content).toBe("【长任务处理中，请勿打断，已用时8m00s】");
+    expect(pushes[0]?.content).toContain("长任务处理中，请勿打断");
+    expect(pushes[0]?.content).toContain("<think>长任务进度</think>");
   });
 
   it("does not arm background notices after a single recovered ACK hiccup", async () => {
@@ -698,7 +702,9 @@ describe("WeCom gateway simulation", () => {
     const handle = startTurn(sim);
     await tick(100);
     await deliverAndTick(handle, { text: "长任务进度", isReasoning: true }, { kind: "block" }, 500);
-    await tick(8 * 60_000);
+    // The reasoning is content, so it earns the grid slot the dead window opened
+    // at five minutes rather than waiting out the content-free 8-minute gate.
+    await tick(5 * 60_000);
     const beforeExternal = sim.chat.filter((entry) => entry.kind === "push").length;
     expect(beforeExternal).toBe(1);
 
@@ -706,12 +712,13 @@ describe("WeCom gateway simulation", () => {
     // The external message just reached the user, so nothing right away...
     await tick(5 * 60_000 - 1_000);
     expect(sim.chat.filter((entry) => entry.kind === "push")).toHaveLength(beforeExternal);
-    // ...but the cadence must come back, on its own slot.
+    // ...but the cadence must come back, on its own slot. The reasoning has not
+    // moved since, so this one is the bare clock on the quiet cadence.
     await tick(1_000);
     const pushes = sim.chat.filter((entry) => entry.kind === "push");
     expect(pushes).toHaveLength(beforeExternal + 1);
     expect(pushes.at(-1)?.content).toBe(
-      "【长任务处理中，请勿打断，已用时13m00s】",
+      "【长任务处理中，请勿打断，已用时10m00s】",
     );
   });
 

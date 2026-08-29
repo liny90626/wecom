@@ -2178,6 +2178,67 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).not.toContain("另一段完全不同的内容。");
   });
 
+  it("keeps carrying the thinking window after the WeCom window dies", async () => {
+    // Production 2026-08-29: a 10-minute run streamed 126k characters of
+    // reasoning and ~1k of body. The bubble updated for the first six minutes
+    // and then went completely silent — the window closed, and the push lane
+    // carried body only, so everything the model produced afterwards was
+    // dropped. The user saw a clock and nothing else.
+    const start = Date.now();
+    const windowDiesAt = start + 6 * 60_000;
+    const expired = { errcode: 846608, errmsg: "stream message update expired" };
+    const streamed: string[] = [];
+    const pushed: string[] = [];
+    const streamSink = async (_frame: unknown, _streamId: unknown, text: string) => {
+      if (Date.now() >= windowDiesAt) throw expired;
+      streamed.push(String(text));
+      return {} as never;
+    };
+    mockClient.replyStream.mockImplementation(streamSink as never);
+    (mockClient as unknown as { replyStreamNonBlocking?: unknown }).replyStreamNonBlocking =
+      vi.fn(streamSink);
+    mockClient.sendMessage.mockImplementation((async (_chatId: unknown, body: unknown) => {
+      pushed.push(String((body as { markdown?: { content?: string } })?.markdown?.content ?? ""));
+      return {} as never;
+    }) as never);
+
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-after-window" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "main",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+      // The plugin's own req_id claim lives 8 minutes.
+      isCallbackStreamCurrent: () => Date.now() < start + 8 * 60_000,
+    });
+
+    await handle.deliver({ text: "子任务已在跑。" }, { kind: "block" });
+    await flushPromises();
+
+    let reasoning = "";
+    for (let tick = 0; tick < 300; tick += 1) {
+      reasoning += `第 ${tick} 段推理：正在检查配置并等待子任务返回结果。`;
+      await handle.deliver({ text: reasoning, isReasoning: true }, { kind: "block" });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await flushPromises();
+    }
+
+    // The bubble worked while it could.
+    expect(streamed.filter((frame) => frame.includes("<think>")).length).toBeGreaterThan(10);
+    // ...and the push lane has to take over, still carrying the reasoning.
+    const thinkingPushes = pushed.filter((frame) => frame.includes("<think>"));
+    expect(thinkingPushes.length).toBeGreaterThan(2);
+    // Each one shows where the model has got to, not a frozen snapshot.
+    expect(thinkingPushes.at(0)).not.toBe(thinkingPushes.at(-1));
+    // The status line it exists to carry is never crowded out.
+    expect(pushed.at(-1)).toContain("长任务处理中");
+    // The think wrapper must survive the wire escaping the body text goes through.
+    expect(pushed.at(-1)).not.toContain("&lt;think&gt;");
+  });
+
   it("does not treat an ordinary code block as a card", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

@@ -6,15 +6,16 @@
 
 ## 0. 先读结论
 
-- 已发布基线：2.7.260-22，标签 released/2.7.260-22，已推送 fork。
+- 已发布基线：2.7.260-23，标签 released/2.7.260-23，已推送 fork。
 - 自测统一只使用 OpenClaw 2026.7.1-2，不再运行双版本测试矩阵。
+- 2.7.260-23 修一处真机反馈：**企微流窗口关闭后，模型产出的东西全部被丢弃**。推送车道原本写死「Reasoning stays out」——气泡活着时是分工，气泡一死（约 6 分钟）就成了丢弃，只思考不出正文的回合从此完全静音。现让推送车道携带思考窗口。探针复现见 changelog；先复现再改，改完同一探针验证。
 - 2.7.260-22 收口两处真机反馈：
   - **长任务超时只报「LLM request failed.」**：OpenClaw embedded run 命中自身 600 秒上限（agents.defaults.timeoutSeconds）后连发两条 final，第二条点名了该配置项，却被 markFinalDelivered 当作重复投递丢弃（日志 `[wecom-b3] final-skip second-distinct`）。现改为：已投递的是错误通知时放行后续 final，已投递的是正常答案时行为不变。
   - 卡片点选提交后，agent 只收到 `[event:template_card_event]` 占位串，只能回一句「已收到某某事件」，提问的人拿不到选择结果。现把回调渲染成含卡片标题与选项原文的可读文本（`describeTemplateCardEvent`），并用发卡缓存把 option_id 还原成用户看到的文字。
 - 2.7.260-21 有两块内容：
   - **对抗式评审**：上一轮候选声称修好两个问题，逐条复现后两个都没修好，第二个还引入内容丢失；三项均已修复（详见第 2.0 节）。
   - **官方功能对齐**：补齐模板卡片出站能力、deferred 回合不再宣称完成、入站附件超限给出可操作提示。
-- 当前验证结果：全量 58 个测试文件、767/767 通过（75s）；typecheck、build、dist、B1、B2、B3、diff check 全部通过。
+- 当前验证结果：全量 58 个测试文件、768/768 通过（74s）；typecheck、build、dist、B1、B2、B3、diff check 全部通过。
 - goal.md 已删除：待办清单全部完成，仍然开放的缺口与明确不做的两项都并入本文件第 5 节，官方对账结论并入第 8 节。
 
 ## 1. Git 与发布边界
@@ -43,6 +44,24 @@
 - origin 仍停在 f5f5650，无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-2 流窗口关闭后的思考块传递（2.7.260-23）
+
+企微流窗口约 6 分钟关闭后，气泡再也刷不动，唯一通道是主动推送（sendMessage 发新消息）。
+推送车道原本明确排除 reasoning（注释：Reasoning stays out — only the visible body travels this way）。
+那条规则在气泡活着时成立，气泡一死就等于丢弃：一个只思考、不产出正文的回合完全静音。
+
+修复：
+- sendMarkdownChunksViaActivePush 新增可选 thinkingBlock，**分片前先从预算里扣掉占位**，再拼到第 0 片前面。
+- 必须拼在 wire 文本之外：chunkWeComMarkdownWireV2 会把 <think> 转义成 &lt;think&gt;，
+  那对模型输出是对的（防止模型写字面 <think> 撑爆客户端），对我们自己合成的块是错的。
+  与 final 走流时 prependThinkingWithinFrameBudget 的做法一致。
+- maybeSendPreviewExpiredNotice 用「正文在场时」那份限幅（800 字符 / 2400 字节）算思考窗口，
+  计入 hasNewContent，书签 pushedThinkingText 只在确认推送成功后推进（与 pushedFastModeText 同构）。
+
+节奏：正在思考时每分钟一条；推理不动时 undeliveredThinking 为空，自动退回 5 分钟静默节奏。
+三条 gateway-sim 用例的期望值随之变化（两条改为 toContain + 断言思考块在场，一条时间点 8:00/13:00 → 5:00/10:00），
+不是放宽——禁改 34 的 8 分钟绝对阈值管的是无内容的纯时钟推送，未被触动。
 
 ### 2.-1 模板卡片出站能力（2.7.260-21 新增）
 
@@ -155,6 +174,11 @@
 4. ambiguous 主动推送重试仍有有限重复风险，当前上限为 3 次；这是“宁可有限重复，不静默丢答案”的明确取舍。
 5. 真实 Windows、企业微信网关和客户端仍未全面验收；网关模拟器不能代替真机验证。模板卡片的**渲染与点选后就地更新已由使用者在真机确认通过**（2.7.260-21）；2.7.260-22 修的回调文本仍需真机复验——点选后应看到 agent 基于实际选择的回复，而不是「已收到 … 事件」。测试步骤见第 9 节。Windows 侧还缺 CLI 子进程 spawn、插件私有 node_modules 里 @wecom/cli-win32-x64 的 require.resolve、WECOM_CLI_CONFIG_DIR 的 0700 可写性；官方没有 win32-arm64 平台包，目标机若是 ARM 则整条 CLI 链路不可用。
 5.1 仓库 package-lock.json 为 0 字节，npm audit --omit=dev 返回 ENOLOCK。生成 lockfile 会改变安装解析，属于会影响使用者的动作，需用户点头，至今未生成。
+5.3 补发改走 wecom-cli 已评估并**否掉**：CLI 的 chat_id 必须取自本次 sessions list（技能明文禁止历史 chat_id），
+    只能发给授权人与最近 10 个会话（长任务的目标会话可能已掉出窗口），子进程时延 300~500ms 且按 botId 全局串行，
+    等于让「最后一条通道」比主路更脆。唯一可能有价值的位置是「WS 彻底不可用」时的末端兜底——今天两条推送路径共用
+    同一条 WS，都断则答案丢失；但需要先有现网 active-push-failed 证据与真机确认 message aibot send 的发送身份，
+    未验证前不写代码。
 5.2 入站视频首帧提取（ffmpeg）是**明确不做**，不是遗漏：官方 src/webhook/video-frame.ts 只在它自己的 webhook 链路，官方 Bot WS 主链路同样没有；引入 ffmpeg 是装了才生效、没装静默失效的硬外部依赖，收益在本 fork 主链路上是推测性的。要做请单独立项。
 6. 当前测试无法单独证明某个生产 LLM request failed 的原始 provider 或 network 错误。复现时要同时保存：
    - 插件日志中的 [wecom-reply] error-final 与 reqId；
@@ -199,7 +223,7 @@ src/transport/bot-ws/sdk-adapter.ts
 
 ~~~text
 OpenClaw: 2026.7.1-2
-Vitest: 58 files / 767 tests passed (75s，正常负载)
+Vitest: 58 files / 768 tests passed (74s，正常负载)
 npx tsc --noEmit: passed
 npm run build: passed
 npm run verify-dist: passed
@@ -216,12 +240,12 @@ git diff --check: passed
 ### 包指纹
 
 ~~~text
-yanhaidao-wecom-2.7.260-22.tgz
-size:        596,422 bytes
-unpacked:    2,281,692 bytes
+yanhaidao-wecom-2.7.260-23.tgz
+size:        597,507 bytes
+unpacked:    2,285,008 bytes
 files:       252
-npm shasum:  09c42cdaa8f621f3e6219365e122da9fb3a7e5ba
-SHA-256:     8014e20cd6e72b255cd7617cf90a7e4d541ce7e91148c3914668d4a99104d8fc
+npm shasum:  b6157b0f2f8ffea1bb327fa921c21e7c93b18aca
+SHA-256:     b97af83bc91e1f6c8181ab115f0e2fade52e5f95278fdbc9f27e6dbd51330e31
 ~~~
 
 重复打包 SHA-256 一致；隔离 npm install --omit=dev 后 @wecom/cli-linux-x64 可解析，二进制返回 wecom-cli 1.2.0。

@@ -1636,6 +1636,8 @@ export function createBotWsReplyHandle(params: {
   let longTaskStatusGateOverrideAt: number | undefined;
   /** Set once the run reports tool work (禁改 35: evidence only, never content). */
   let toolActivityObserved = false;
+  /** Reasoning window already carried by the push lane; never re-pushed. */
+  let pushedThinkingText = "";
   let previewExpiredNoticeInFlight = false;
   let previewExpiredNoticeCancelled = false;
   let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1813,6 +1815,14 @@ export function createBotWsReplyHandle(params: {
       maxChars?: number;
       maxBytes?: number;
       isObsolete?: () => boolean;
+      /**
+       * Reasoning window to ride along on the FIRST chunk. Once the WeCom
+       * window is dead this push is the only channel left, so a turn that is
+       * still thinking has nothing else to show for itself. Kept off the wire
+       * text on purpose: `chunkWeComMarkdownWireV2` escapes literal think tags,
+       * which is right for model output and wrong for the block we compose.
+       */
+      thinkingBlock?: string;
     },
   ): Promise<void> => {
     const throwIfObsolete = (): void => {
@@ -1821,12 +1831,20 @@ export function createBotWsReplyHandle(params: {
       }
     };
     throwIfObsolete();
+    const thinkingPrefix = options.thinkingBlock ? `${options.thinkingBlock}\n` : "";
     const markdownChunks = chunkWeComMarkdownWireV2(
       textToSend,
-      options.maxChars ?? WECOM_STREAM_MAX_CHARS,
-      options.maxBytes ?? WECOM_STREAM_MAX_BYTES,
+      // The prefix is reserved BEFORE chunking rather than trimmed after: a
+      // frame that overflows is refused whole, and the status it carries is the
+      // one thing this lane exists to deliver.
+      (options.maxChars ?? WECOM_STREAM_MAX_CHARS) - thinkingPrefix.length,
+      (options.maxBytes ?? WECOM_STREAM_MAX_BYTES) -
+        Buffer.byteLength(thinkingPrefix, "utf8"),
       options.appendCompletionMarker === true,
     );
+    if (thinkingPrefix && markdownChunks.length > 0) {
+      markdownChunks[0] = `${thinkingPrefix}${markdownChunks[0] ?? ""}`;
+    }
     const progress = options.progress;
     const firstIndex = progress ? Math.min(progress.delivered, markdownChunks.length) : 0;
     if (firstIndex >= markdownChunks.length) {
@@ -2605,9 +2623,26 @@ export function createBotWsReplyHandle(params: {
       transientFastModeText && transientFastModeText !== pushedFastModeText
         ? transientFastModeText
         : "";
+    // Reasoning used to be excluded from this lane, which was right while the
+    // bubble was alive and carrying it. Once the window is dead it is the ONLY
+    // channel, and a turn that reasons for minutes without emitting body text
+    // then goes completely silent — the model kept working and the user was
+    // shown nothing but a clock. Same bounded window the bubble used when a
+    // body was competing for room, so it can never crowd out the status line.
+    const thinkingWindow = renderInlineThinkBlock(
+      accumulatedThinkingText,
+      THINKING_BLOCK_WITH_BODY_MAX_BYTES,
+      THINKING_BLOCK_WITH_BODY_MAX_CHARS,
+    );
+    const undeliveredThinking = thinkingWindow && thinkingWindow !== pushedThinkingText
+      ? thinkingWindow
+      : "";
     const now = Date.now();
     const hasNewContent = Boolean(
-      undeliveredProgress || undeliveredTransientProgress || undeliveredFastText,
+      undeliveredProgress ||
+        undeliveredTransientProgress ||
+        undeliveredFastText ||
+        undeliveredThinking,
     );
     // New content earns its slot on the shared grid, and once the window is
     // dead that grid starts at the death — so real progress no longer waits out
@@ -2654,6 +2689,7 @@ export function createBotWsReplyHandle(params: {
       {
         reason: "preview-expired",
         isObsolete: () => streamSettled || finalDelivered || supersededByNewInbound,
+        thinkingBlock: undeliveredThinking || undefined,
       },
     )
       .then(() => {
@@ -2668,8 +2704,14 @@ export function createBotWsReplyHandle(params: {
         if (undeliveredFastText) {
           pushedFastModeText = undeliveredFastText;
         }
+        if (undeliveredThinking) {
+          // Only after a confirmed push, like every other bookmark here: a
+          // failed push must not make the next one think it already told the
+          // user what the model was thinking.
+          pushedThinkingText = undeliveredThinking;
+        }
         console.info(
-          `[wecom-preview] expired-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${elapsedMs} progressChars=${undeliveredProgress.length} transientChars=${undeliveredTransientProgress.length}`,
+          `[wecom-preview] expired-notice account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} elapsedMs=${elapsedMs} progressChars=${undeliveredProgress.length} transientChars=${undeliveredTransientProgress.length} thinkingChars=${undeliveredThinking.length}`,
         );
       })
       .catch((error) => {

@@ -12,7 +12,7 @@
   - **对抗式评审**：上一轮候选声称修好两个问题，逐条复现后两个都没修好，第二个还引入内容丢失；三项均已修复（详见第 2.0 节）。
   - **官方功能对齐**：补齐模板卡片出站能力、deferred 回合不再宣称完成、入站附件超限给出可操作提示。
 - 当前验证结果：全量 58 个测试文件、759/759 通过（正常负载 185s；高负载 3338s 同样全绿）；typecheck、build、dist、B1、B2、B3、diff check 全部通过。
-- goal.md 记录本轮结论与仍然开放的缺口，其中「入站视频首帧提取」和「生成 package-lock.json」是**明确不做**，不是遗漏；不要再删该文件。
+- goal.md 已删除：待办清单全部完成，仍然开放的缺口与明确不做的两项都并入本文件第 5 节，官方对账结论并入第 8 节。
 
 ## 1. Git 与发布边界
 
@@ -31,7 +31,7 @@
   - src/app/account-runtime.ts / account-runtime.test.ts
   - src/shared/media-service.ts / media-service.test.ts、src/http.ts
   - src/types/runtime.ts、index.ts
-  - package.json、src/version.ts、README.md、changelog/、goal.md、本文件
+  - package.json、src/version.ts、README.md、changelog/、本文件
 
 ### 发布状态
 
@@ -150,7 +150,9 @@
 2. 流仍健康但预览已冻结时，冻结之后的新正文可能要等到 final 才显示；后台推送目前只在流退休或 ACK 不可信时接管。
 3. 回合前 120 秒内流就失效且此前没有成功预览时，后台通知存在窄场景被取消的可能。
 4. ambiguous 主动推送重试仍有有限重复风险，当前上限为 3 次；这是“宁可有限重复，不静默丢答案”的明确取舍。
-5. 真实 Windows、企业微信网关和客户端尚未在本候选上验收；网关模拟器不能代替真机验证。
+5. 真实 Windows、企业微信网关和客户端尚未验收；网关模拟器不能代替真机验证。**模板卡片（2.7.260-21 新增）尤其需要真机确认渲染与交互回调**，测试步骤见第 9 节。Windows 侧还缺 CLI 子进程 spawn、插件私有 node_modules 里 @wecom/cli-win32-x64 的 require.resolve、WECOM_CLI_CONFIG_DIR 的 0700 可写性；官方没有 win32-arm64 平台包，目标机若是 ARM 则整条 CLI 链路不可用。
+5.1 仓库 package-lock.json 为 0 字节，npm audit --omit=dev 返回 ENOLOCK。生成 lockfile 会改变安装解析，属于会影响使用者的动作，需用户点头，至今未生成。
+5.2 入站视频首帧提取（ffmpeg）是**明确不做**，不是遗漏：官方 src/webhook/video-frame.ts 只在它自己的 webhook 链路，官方 Bot WS 主链路同样没有；引入 ffmpeg 是装了才生效、没装静默失效的硬外部依赖，收益在本 fork 主链路上是推测性的。要做请单独立项。
 6. 当前测试无法单独证明某个生产 LLM request failed 的原始 provider 或 network 错误。复现时要同时保存：
    - 插件日志中的 [wecom-reply] error-final 与 reqId；
    - OpenClaw 的 embedded run agent end 与 rawError；
@@ -258,15 +260,49 @@ npx vitest run \
 
 测试机负载较高时，fake-timer 套件可能超过默认墙钟预算；不要为了掩盖环境抖动修改生产 timeout。先隔离单 worker 复跑并记录断言类型。
 
-## 8. 下一步与停止条件
+## 8. 与官方实现的对账结论（2026-08-29 完成，下轮不必重做）
+
+对照 WecomTeam/wecom-openclaw-plugin，HEAD 3b1cbe3（2026.8.17，最后一次功能提交 34452cd 于 2026-08-17）。
+本轮拿到了官方**完整 TypeScript 源码**（15,627 行），此前只有 npm 包里的 dist。
+
+- CLI 层：argv / const / credentials / locate / process-output / tool 与官方逐函数比对一致。常量全等（45s / 30s / 3s+3s / 64KiB / 5min）；CLI_RESIGN_CODES 含 853000 而 auth init 自身报 853000 绝不重试的**不对称**已落地；stdio ["ignore","pipe","pipe"]（非 TTY，cli 才走 --bot-id/--secret 直连）正确；禁用集、--config-dir/--home 拦截、目录 0700、(botId,secret) 指纹隔离、全局串行、5 分钟熔断全部一致。本 fork 在官方之上多了 secret 脱敏、endpoint 裁剪、allowAuth、via 标记。
+- Skills：16 个目录与官方同名同内容。差异共 8 个文件且全部有意保留——wecomcli-preflight/SKILL.md 是**必须**的适配（本插件 ID 是 wecom，官方是 wecom-openclaw-plugin），其余 7 个只差行尾空白，本 fork 做过行尾空白规范化，逐字回同步会让 git diff --check 常红；已确认那些空白只影响人类渲染，模型读原始 Markdown 无差异。**不要再把这 8 个文件当作漏同步。**
+- 媒体阈值：图片/视频 10MB、语音 2MB、文件 20MB，与官方 const.ts 完全一致。
+- 多账号 fail-closed：resolveWecomAccount 对未知账号 ID 返回 createMissingResolvedAccount，resolveCliBot 随即因缺 botId/secret 抛错，不会回退到第一个账号。
+- MCP → CLI 兜底路由：msg→message、schedule→calendar、doc→doc/sheet/smartsheet/smartpage/media 正确；mail 与 CLI 顶层命令同名，不需要别名。模型可控的 category 走不通 auth init（被 assertSafeArgv 拦下）。
+- file-type 依赖：官方用它做魔术字节嗅探，其 openclaw-compat.ts 明写这是 SDK 缺 detectMime 时的**回退**。本 fork 锁定 OpenClaw 2026.7.1-2，直接用 SDK 的 detectMime，能力等价，不引入该依赖。
+- openclaw-compat.ts：官方用于跨 SDK 版本探测导出，我们锁定单一版本，不需要移植。
+- 上游同步度：官方 git HEAD 之后没有我们未同步的功能提交。
+
+## 9. 模板卡片真机测试步骤
+
+卡片能力在 2.7.260-21 新增，单测与集成测试全绿，但**未在真实企微客户端验证过渲染与交互回调**。
+
+1. 装包：把 tgz 复制到本地 NTFS 再 `openclaw plugins install "npm-pack:<本地路径>"`（映射盘/NAS 会触发 archive changed during validation）。
+2. 确定性触发：直接要求模型原样输出一个卡片 JSON 代码块（见下），不要依赖它自行判断该不该发卡片。
+3. 期望：聊天里出现**一张卡片**而不是一段 JSON 文本；代码块之外的文字作为普通回复单独到达。
+4. 交互：点选项并提交，卡片应就地更新——控件禁用、提交按钮变「已提交」、选中项打勾。
+5. 看日志关键行：`[wecom-card] sent account=… cardType=… taskId=…`、`[wecom-card] updated account=… taskId=…`。
+
+失败形态与含义：
+
+| 现象 | 含义 |
+| --- | --- |
+| 气泡里是裸 JSON | 抽取没生效。检查 card_type 是否是那 5 个合法值之一；不合法的代码块按设计**保留在正文里**。 |
+| 气泡停在「📋 正在生成卡片消息...」 | 这一轮被 OpenClaw deferred，卡片没走到 final。属于遮罩的正常终态，不是卡片 bug。 |
+| 卡片发出但点了没反应 | 查日志 `[wecom-card] update-skipped … reason=not-in-cache`：卡片缓存在进程内，网关在「发卡」与「点击」之间重启过就找不到原卡片。官方同样如此。 |
+| 正文出现「⚠️ 有 N 张卡片消息发送失败。」 | 卡片被企微拒绝。同一行日志 `[wecom-card] send-failed` 有原始错误。 |
+| 日志有 `send-skipped … reason=missing-<field>` | 模型给的卡片缺核心字段（button_list / checkbox / select_list），插件补不出来，按设计不发。 |
+
+注意企微要求收到 template_card_event 后**5 秒内**回复才能更新卡片，排查更新问题时先看这条链路有没有被别的耗时操作堵住。
+
+## 10. 下一步与停止条件
 
 ### 现在不要做
 
-- 不要删除 goal.md，它是本轮 review 的待办清单。
 - 不要重置或覆盖当前工作区改动。
 - 不要升级或切换 OpenClaw 版本。
 - 不要打 tag 或推送远端（本轮未获授权）。
-- 不要在没有用户拍板前动 goal.md 里 P0-1（模板卡片技能取舍）和 P0-2（完成标记）。
 
 ### 下一版发布时（需要用户明确批准）
 

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   __resetTemplateCardCacheForTests,
+  describeTemplateCardEvent,
   getTemplateCardFromCache,
   sendTemplateCards,
   updateTemplateCardOnEvent,
@@ -212,5 +213,84 @@ describe("updateTemplateCardOnEvent", () => {
       }),
     ).rejects.toThrow("timeout");
     expect(getTemplateCardFromCache("default", "task-keep")?.submit_button?.text).toBe("提交");
+  });
+});
+
+describe("describeTemplateCardEvent", () => {
+  beforeEach(() => {
+    __resetTemplateCardCacheForTests();
+  });
+
+  it("resolves the picked option back to the words the user saw", async () => {
+    const client = makeClient();
+    await sendTemplateCards({
+      client,
+      chatId: "alice",
+      chatType: "direct",
+      accountId: "default",
+      cards: [{ cardJson: voteCard("task-lunch"), cardType: "vote_interaction" }],
+    });
+
+    const text = describeTemplateCardEvent({
+      accountId: "default",
+      event: {
+        task_id: "task-lunch",
+        card_type: "vote_interaction",
+        selected_items: {
+          selected_item: [{ question_key: "q1", option_ids: { option_id: ["b"] } }],
+        },
+      },
+    });
+
+    expect(text).toContain("card_title(卡片标题): 午饭");
+    // The raw callback only carries "b"; without the cache the model has to guess.
+    expect(text).toContain("- 午饭: 饭");
+    expect(text).toContain("task_id(任务 id): task-lunch");
+  });
+
+  it("falls back to the raw ids when the card is no longer cached", () => {
+    // The cache is process-local, so a restart between send and click loses it.
+    const text = describeTemplateCardEvent({
+      accountId: "default",
+      event: {
+        task_id: "task-gone",
+        selected_items: {
+          selected_item: [{ question_key: "q1", option_ids: { option_id: ["b"] } }],
+        },
+      },
+    });
+    expect(text).toContain("- q1: b");
+  });
+
+  it("names the button a click came from", async () => {
+    const client = makeClient();
+    await sendTemplateCards({
+      client,
+      chatId: "alice",
+      chatType: "direct",
+      accountId: "default",
+      cards: [
+        {
+          cardJson: {
+            card_type: "button_interaction",
+            task_id: "task-button",
+            main_title: { title: "发布确认" },
+            button_list: [{ text: "确认发布", key: "confirm" }],
+          },
+          cardType: "button_interaction",
+        },
+      ],
+    });
+
+    const text = describeTemplateCardEvent({
+      accountId: "default",
+      event: { task_id: "task-button", event_key: "confirm" },
+    });
+    expect(text).toContain("event_key(按钮): 确认发布（confirm）");
+    expect(text).toContain("selected_items(选择项): []");
+  });
+
+  it("returns nothing when the callback carries no payload", () => {
+    expect(describeTemplateCardEvent({ accountId: "default", event: undefined })).toBeUndefined();
   });
 });

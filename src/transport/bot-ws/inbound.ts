@@ -1,5 +1,9 @@
 import type { BaseMessage, EventMessage, WsFrame } from "@wecom/aibot-node-sdk";
 
+import {
+  describeTemplateCardEvent,
+  type TemplateCardEventPayload,
+} from "../../capability/card/manager.js";
 import { buildInboundBody } from "../bot-webhook/message-shape.js";
 import type {
   ResolvedBotAccount,
@@ -51,6 +55,19 @@ function resolveEventText(message: BaseMessage | EventMessage, account: Resolved
   const event = message as EventMessage;
   if (event.event?.eventtype === "enter_chat" && account.config.welcomeText) {
     return account.config.welcomeText;
+  }
+  if (event.event?.eventtype === "template_card_event") {
+    // A card interaction IS the answer to a question this bot asked. Handing the
+    // model `[event:template_card_event]` made it reply "已收到 … 事件" and the
+    // person who asked never learned what was picked.
+    const described = describeTemplateCardEvent({
+      accountId: account.accountId,
+      event: (event.event as { template_card_event?: TemplateCardEventPayload })
+        .template_card_event,
+    });
+    if (described) {
+      return described;
+    }
   }
   return `[event:${String(event.event?.eventtype ?? "unknown")}]`;
 }

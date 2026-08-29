@@ -2108,6 +2108,76 @@ describe("createBotWsReplyHandle", () => {
     ).toHaveLength(1);
   });
 
+  it("delivers the actionable error OpenClaw sends after its generic one", async () => {
+    // Production 2026-08-29: a run that exceeded agents.defaults.timeoutSeconds
+    // emitted "LLM request failed." and then "Request timed out … increase
+    // agents.defaults.timeoutSeconds". The dedup dropped the second one, so the
+    // user was told the model failed and never told which knob to turn.
+    const expiredError = {
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockRejectedValue(expiredError);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-final-after-error" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "LLM request failed.", isError: true }, { kind: "final" });
+    await flushPromises();
+    await handle.deliver(
+      {
+        text: "Request timed out before a response was generated. Please try again, or increase `agents.defaults.timeoutSeconds` in your config.",
+        isError: true,
+      },
+      { kind: "final" },
+    );
+    await flushPromises();
+
+    const pushed = mockClient.sendMessage.mock.calls
+      .map((call) => String((call[1] as any)?.markdown?.content ?? ""))
+      .join("\n");
+    expect(pushed).toContain("LLM request failed.");
+    expect(pushed).toContain("agents.defaults.timeoutSeconds");
+  });
+
+  it("still drops a distinct second final once a real answer was delivered", async () => {
+    // The dedup exists for retries of the same answer; only an error final may
+    // be followed by another message.
+    const expiredError = {
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    };
+    mockClient.replyStream.mockRejectedValue(expiredError);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-final-after-answer" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "这是真正的答案。" }, { kind: "final" });
+    await flushPromises();
+    await handle.deliver({ text: "另一段完全不同的内容。" }, { kind: "final" });
+    await flushPromises();
+
+    const pushed = mockClient.sendMessage.mock.calls
+      .map((call) => String((call[1] as any)?.markdown?.content ?? ""))
+      .join("\n");
+    expect(pushed).toContain("这是真正的答案。");
+    expect(pushed).not.toContain("另一段完全不同的内容。");
+  });
+
   it("does not treat an ordinary code block as a card", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

@@ -1,17 +1,20 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-08-28
+> 最后更新：2026-08-29
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
-- 已发布基线：2.7.260-21，标签 released/2.7.260-21，已推送 fork。
+- 已发布基线：2.7.260-22，标签 released/2.7.260-22，已推送 fork。
 - 自测统一只使用 OpenClaw 2026.7.1-2，不再运行双版本测试矩阵。
+- 2.7.260-22 收口两处真机反馈：
+  - **长任务超时只报「LLM request failed.」**：OpenClaw embedded run 命中自身 600 秒上限（agents.defaults.timeoutSeconds）后连发两条 final，第二条点名了该配置项，却被 markFinalDelivered 当作重复投递丢弃（日志 `[wecom-b3] final-skip second-distinct`）。现改为：已投递的是错误通知时放行后续 final，已投递的是正常答案时行为不变。
+  - 卡片点选提交后，agent 只收到 `[event:template_card_event]` 占位串，只能回一句「已收到某某事件」，提问的人拿不到选择结果。现把回调渲染成含卡片标题与选项原文的可读文本（`describeTemplateCardEvent`），并用发卡缓存把 option_id 还原成用户看到的文字。
 - 2.7.260-21 有两块内容：
   - **对抗式评审**：上一轮候选声称修好两个问题，逐条复现后两个都没修好，第二个还引入内容丢失；三项均已修复（详见第 2.0 节）。
   - **官方功能对齐**：补齐模板卡片出站能力、deferred 回合不再宣称完成、入站附件超限给出可操作提示。
-- 当前验证结果：全量 58 个测试文件、759/759 通过（正常负载 185s；高负载 3338s 同样全绿）；typecheck、build、dist、B1、B2、B3、diff check 全部通过。
+- 当前验证结果：全量 58 个测试文件、767/767 通过（75s）；typecheck、build、dist、B1、B2、B3、diff check 全部通过。
 - goal.md 已删除：待办清单全部完成，仍然开放的缺口与明确不做的两项都并入本文件第 5 节，官方对账结论并入第 8 节。
 
 ## 1. Git 与发布边界
@@ -150,7 +153,7 @@
 2. 流仍健康但预览已冻结时，冻结之后的新正文可能要等到 final 才显示；后台推送目前只在流退休或 ACK 不可信时接管。
 3. 回合前 120 秒内流就失效且此前没有成功预览时，后台通知存在窄场景被取消的可能。
 4. ambiguous 主动推送重试仍有有限重复风险，当前上限为 3 次；这是“宁可有限重复，不静默丢答案”的明确取舍。
-5. 真实 Windows、企业微信网关和客户端尚未验收；网关模拟器不能代替真机验证。**模板卡片（2.7.260-21 新增）尤其需要真机确认渲染与交互回调**，测试步骤见第 9 节。Windows 侧还缺 CLI 子进程 spawn、插件私有 node_modules 里 @wecom/cli-win32-x64 的 require.resolve、WECOM_CLI_CONFIG_DIR 的 0700 可写性；官方没有 win32-arm64 平台包，目标机若是 ARM 则整条 CLI 链路不可用。
+5. 真实 Windows、企业微信网关和客户端仍未全面验收；网关模拟器不能代替真机验证。模板卡片的**渲染与点选后就地更新已由使用者在真机确认通过**（2.7.260-21）；2.7.260-22 修的回调文本仍需真机复验——点选后应看到 agent 基于实际选择的回复，而不是「已收到 … 事件」。测试步骤见第 9 节。Windows 侧还缺 CLI 子进程 spawn、插件私有 node_modules 里 @wecom/cli-win32-x64 的 require.resolve、WECOM_CLI_CONFIG_DIR 的 0700 可写性；官方没有 win32-arm64 平台包，目标机若是 ARM 则整条 CLI 链路不可用。
 5.1 仓库 package-lock.json 为 0 字节，npm audit --omit=dev 返回 ENOLOCK。生成 lockfile 会改变安装解析，属于会影响使用者的动作，需用户点头，至今未生成。
 5.2 入站视频首帧提取（ffmpeg）是**明确不做**，不是遗漏：官方 src/webhook/video-frame.ts 只在它自己的 webhook 链路，官方 Bot WS 主链路同样没有；引入 ffmpeg 是装了才生效、没装静默失效的硬外部依赖，收益在本 fork 主链路上是推测性的。要做请单独立项。
 6. 当前测试无法单独证明某个生产 LLM request failed 的原始 provider 或 network 错误。复现时要同时保存：
@@ -196,7 +199,7 @@ src/transport/bot-ws/sdk-adapter.ts
 
 ~~~text
 OpenClaw: 2026.7.1-2
-Vitest: 58 files / 759 tests passed (185s 正常负载 / 3338s 高负载，两次都全绿)
+Vitest: 58 files / 767 tests passed (75s，正常负载)
 npx tsc --noEmit: passed
 npm run build: passed
 npm run verify-dist: passed
@@ -213,12 +216,12 @@ git diff --check: passed
 ### 包指纹
 
 ~~~text
-yanhaidao-wecom-2.7.260-21.tgz
-size:        594,299 bytes
-unpacked:    2,275,320 bytes
+yanhaidao-wecom-2.7.260-22.tgz
+size:        596,422 bytes
+unpacked:    2,281,692 bytes
 files:       252
-npm shasum:  16afa1d857b9b357daf71451a1862e4b6964ba14
-SHA-256:     fc47cf87cc603d49d72e6481ac855d11329692633289a273b410427e7985654c
+npm shasum:  09c42cdaa8f621f3e6219365e122da9fb3a7e5ba
+SHA-256:     8014e20cd6e72b255cd7617cf90a7e4d541ce7e91148c3914668d4a99104d8fc
 ~~~
 
 重复打包 SHA-256 一致；隔离 npm install --omit=dev 后 @wecom/cli-linux-x64 可解析，二进制返回 wecom-cli 1.2.0。
@@ -276,7 +279,7 @@ npx vitest run \
 
 ## 9. 模板卡片真机测试步骤
 
-卡片能力在 2.7.260-21 新增，单测与集成测试全绿，但**未在真实企微客户端验证过渲染与交互回调**。
+卡片能力在 2.7.260-21 新增。渲染与点选后就地更新**已在真机验证通过**；2.7.260-22 修的「选择结果送回 agent」这一段仍待真机复验。
 
 1. 装包：把 tgz 复制到本地 NTFS 再 `openclaw plugins install "npm-pack:<本地路径>"`（映射盘/NAS 会触发 archive changed during validation）。
 2. 确定性触发：直接要求模型原样输出一个卡片 JSON 代码块（见下），不要依赖它自行判断该不该发卡片。
@@ -291,6 +294,8 @@ npx vitest run \
 | 气泡里是裸 JSON | 抽取没生效。检查 card_type 是否是那 5 个合法值之一；不合法的代码块按设计**保留在正文里**。 |
 | 气泡停在「📋 正在生成卡片消息...」 | 这一轮被 OpenClaw deferred，卡片没走到 final。属于遮罩的正常终态，不是卡片 bug。 |
 | 卡片发出但点了没反应 | 查日志 `[wecom-card] update-skipped … reason=not-in-cache`：卡片缓存在进程内，网关在「发卡」与「点击」之间重启过就找不到原卡片。官方同样如此。 |
+| 点选后 agent 回「已收到 … 事件」 | 2.7.260-21 的缺陷，已由 -22 修复。若在 -22 之后仍出现，说明 describeTemplateCardEvent 没拿到 selected_items，抓一份原始事件帧。 |
+| 点选后 agent 回复里选项显示成 `b` 而不是「饭」 | 卡片缓存缺失（进程重启过），按设计退回原始 id，不是 bug。 |
 | 正文出现「⚠️ 有 N 张卡片消息发送失败。」 | 卡片被企微拒绝。同一行日志 `[wecom-card] send-failed` 有原始错误。 |
 | 日志有 `send-skipped … reason=missing-<field>` | 模型给的卡片缺核心字段（button_list / checkbox / select_list），插件补不出来，按设计不发。 |
 
@@ -313,9 +318,26 @@ npx vitest run \
 
 ### 改 reply.ts 时必看
 
-B1/B2/B3 三个门禁脚本用**字面量匹配**校验硬化不变量，重命名局部变量就会让它们变红。
-本轮把 const outboundText 改名成 composedOutboundText 后 B2 立刻 NOT_READY，已改回。
-改动那一段前先跑 node scripts/patch-wecom-long-message.mjs --check。
+B1/B2/B3 三个门禁脚本用**字面量匹配**校验硬化不变量。不只是重命名——**给被匹配的
+调用加一个实参、或把它换行排版，同样会让门禁变红**。已经踩到两次：
+
+- 把 const outboundText 改名成 composedOutboundText → B2 NOT_READY。
+- 给 markFinalDelivered(currentFinalDeliveryKey, { peerDedup: … }) 加 isError 实参并
+  换行 → B3 NOT_READY。
+
+两次都选择改回原样、把新逻辑挪到别处（后者把「错误不是最终结论」的策略放回
+deliver 的调用点，markFinalDelivered 保持成纯去重原语），**没有去改门禁脚本**。
+门禁是防止硬化语义被无意识改掉的，为了让它变绿而放宽它就失去了意义。
+
+改动这些位置前先跑：
+
+~~~bash
+node scripts/patch-wecom-markdown-table.mjs --check
+node scripts/patch-wecom-long-message.mjs --check
+node scripts/patch-wecom-b3-merge-thinking.mjs --check
+~~~
+
+高负载下每个脚本要跑几分钟（内部会跑构建与聚焦测试）。
 
 ### Windows 包安装排障
 

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import {
+  __resetTemplateCardCacheForTests,
+  saveTemplateCardToCache,
+} from "../../capability/card/manager.js";
 import { mapBotWsFrameToInboundEvent } from "./inbound.js";
 import type { ResolvedBotAccount } from "../../types/index.js";
 
@@ -286,5 +290,66 @@ describe("mapBotWsFrameToInboundEvent", () => {
         aesKey: "mixed-key-1",
       },
     ]);
+  });
+
+  it("hands the model the card choice, not the raw event name", () => {
+    // Before this, a card click reached the agent as `[event:template_card_event]`
+    // and the model answered "已收到 template_card_event 事件" — the person who
+    // asked the question never learned what was picked.
+    __resetTemplateCardCacheForTests();
+    saveTemplateCardToCache("haidao", {
+      card_type: "vote_interaction",
+      task_id: "task-lunch",
+      main_title: { title: "午饭吃什么" },
+      checkbox: {
+        question_key: "q1",
+        option_list: [
+          { id: "a", text: "面" },
+          { id: "b", text: "饭" },
+        ],
+      },
+    } as never);
+
+    const event = mapBotWsFrameToInboundEvent({
+      account: createBotAccount(),
+      frame: {
+        headers: { req_id: "req-card-event" },
+        body: {
+          msgtype: "event",
+          chattype: "single",
+          from: { userid: "alice" },
+          event: {
+            eventtype: "template_card_event",
+            template_card_event: {
+              task_id: "task-lunch",
+              card_type: "vote_interaction",
+              selected_items: {
+                selected_item: [{ question_key: "q1", option_ids: { option_id: ["b"] } }],
+              },
+            },
+          },
+        },
+      } as never,
+    });
+
+    expect(event.text).toContain("午饭吃什么");
+    expect(event.text).toContain("- 午饭吃什么: 饭");
+    expect(event.text).not.toContain("[event:template_card_event]");
+  });
+
+  it("still falls back to the plain event marker for other event types", () => {
+    const event = mapBotWsFrameToInboundEvent({
+      account: createBotAccount(),
+      frame: {
+        headers: { req_id: "req-other-event" },
+        body: {
+          msgtype: "event",
+          chattype: "single",
+          from: { userid: "alice" },
+          event: { eventtype: "auth_change_event" },
+        },
+      } as never,
+    });
+    expect(event.text).toBe("[event:auth_change_event]");
   });
 });

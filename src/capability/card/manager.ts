@@ -73,9 +73,15 @@ export function __resetTemplateCardCacheForTests(): void {
   sentCardsByTaskId.clear();
 }
 
-type TemplateCardEventPayload = {
+/**
+ * 回调载荷。SDK 的 `TemplateCardEventData` 只声明了 eventtype / event_key /
+ * task_id，实际帧里还有 card_type 与 selected_items——这是外部输入，按系统边界
+ * 逐字段防御性读取。
+ */
+export type TemplateCardEventPayload = {
   task_id?: string;
   card_type?: string;
+  event_key?: string;
   selected_items?: {
     selected_item?: Array<{
       question_key?: string;
@@ -168,6 +174,85 @@ export async function updateTemplateCardOnEvent(params: {
   );
   saveTemplateCardToCache(params.accountId, updated);
   console.info(`${LOG} updated account=${params.accountId} taskId=${taskId}`);
+}
+
+/**
+ * 把卡片交互回调渲染成模型看得懂的文本。
+ *
+ * 不做这件事的话，回调会以 `[event:template_card_event]` 的形态进 agent 通道，
+ * 模型只能回一句「已收到 template_card_event 事件」——用户点了半天，提问的人
+ * 什么也没拿到，交互卡片就白做了。
+ *
+ * 官方同样把回调转成文本喂给模型，但只给原始的 `question_key` / `option_id`
+ * （形如 `vote_1787…: b`），模型仍得猜 `b` 是什么。我们手上有发出去那张卡片的
+ * 缓存，所以顺带把 id 还原成标题与选项原文；缓存不在（进程重启过）时退回原始 id，
+ * 与官方一致。
+ */
+export function describeTemplateCardEvent(params: {
+  accountId: string;
+  event?: TemplateCardEventPayload;
+}): string | undefined {
+  const event = params.event;
+  const taskId = event?.task_id?.trim();
+  if (!event) {
+    return undefined;
+  }
+  const cached = taskId ? getTemplateCardFromCache(params.accountId, taskId) : undefined;
+
+  /** question_key → { title, options: id → text }，用于把回调里的 id 还原成人话。 */
+  const questions = new Map<string, { title?: string; options: Map<string, string> }>();
+  const collect = (
+    questionKey: string | undefined,
+    title: string | undefined,
+    optionList: ReadonlyArray<{ id: string; text?: string }> | undefined,
+  ): void => {
+    if (!questionKey) return;
+    const options = new Map<string, string>();
+    for (const option of optionList ?? []) {
+      if (option?.id) options.set(option.id, option.text ?? option.id);
+    }
+    questions.set(questionKey, { title, options });
+  };
+  if (cached) {
+    collect(cached.checkbox?.question_key, cached.main_title?.title, cached.checkbox?.option_list);
+    for (const selection of cached.select_list ?? []) {
+      collect(selection.question_key, selection.title, selection.option_list);
+    }
+    collect(
+      cached.button_selection?.question_key,
+      cached.button_selection?.title,
+      cached.button_selection?.option_list,
+    );
+  }
+
+  const selectedLines: string[] = [];
+  for (const item of event.selected_items?.selected_item ?? []) {
+    const questionKey = item.question_key?.trim();
+    if (!questionKey) continue;
+    const question = questions.get(questionKey);
+    const optionIds = item.option_ids?.option_id?.filter(Boolean) ?? [];
+    const rendered = optionIds.map((id) => question?.options.get(id) ?? id);
+    selectedLines.push(
+      `- ${question?.title || questionKey}: ${rendered.length > 0 ? rendered.join("、") : "(未选择)"}`,
+    );
+  }
+
+  const buttonKey = event.event_key?.trim();
+  const buttonText = cached?.button_list?.find((button) => button.key === buttonKey)?.text;
+
+  return [
+    "[企业微信模板卡片回调]",
+    cached?.main_title?.title ? `card_title(卡片标题): ${cached.main_title.title}` : undefined,
+    event.card_type ?? cached?.card_type
+      ? `card_type(卡片类型): ${event.card_type ?? cached?.card_type}`
+      : undefined,
+    taskId ? `task_id(任务 id): ${taskId}` : undefined,
+    buttonKey ? `event_key(按钮): ${buttonText ? `${buttonText}（${buttonKey}）` : buttonKey}` : undefined,
+    selectedLines.length > 0 ? "selected_items(选择项):" : "selected_items(选择项): []",
+    ...selectedLines,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
 }
 
 /**

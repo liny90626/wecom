@@ -1563,6 +1563,8 @@ export function createBotWsReplyHandle(params: {
   };
 
   let finalDelivered = false;
+  /** The delivered final was an error notice, so a distinct successor may still land. */
+  let finalDeliveredWasError = false;
   /** This handle has already pushed its template cards; they cannot be recalled. */
   let templateCardsDispatched = false;
   let finalDeliveryKey = "";
@@ -1661,16 +1663,30 @@ export function createBotWsReplyHandle(params: {
         console.info(
           `[wecom-b3] final-skip already-delivered account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
         );
-      } else {
-        // A SECOND final with different content on one handle. The dedup is
-        // built for retries of the same answer, so this drops a distinct
-        // message; no WeCom case has been observed, and this line is what would
-        // prove one.
+        return false;
+      }
+      // A SECOND final with different content on one handle. The dedup exists
+      // for RETRIES OF THE SAME ANSWER, so dropping a distinct message is only
+      // safe when the delivered one was the answer. It was not: an OpenClaw run
+      // that dies on its own timeout emits the generic "LLM request failed."
+      // first and the actionable "Request timed out … increase
+      // agents.defaults.timeoutSeconds" second — and the user only ever saw the
+      // useless one. An error is never the final word; let the successor land as
+      // its own message.
+      if (!finalDeliveredWasError) {
         console.warn(
           `[wecom-b3] final-skip second-distinct account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
         );
+        return false;
       }
-      return false;
+      console.info(
+        `[wecom-b3] final-after-error account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"}`,
+      );
+      finalDelivered = false;
+      finalDeliveryKey = "";
+      // The successor is a separate message on the push lane, not a repaint of
+      // the error the user already has, so the chunk ledger must start clean.
+      finalPushProgress = undefined;
     }
     if (options.peerDedup && shouldSkipRecentPeerFinal(key)) {
       finalDelivered = true;
@@ -3743,6 +3759,7 @@ export function createBotWsReplyHandle(params: {
         ) {
           return;
         }
+        finalDeliveredWasError = payload.isError === true;
         const mediaFailures: string[] = [];
         const mediaNotes: string[] = [];
         let mediaSent = 0;
@@ -3853,6 +3870,7 @@ export function createBotWsReplyHandle(params: {
         if (!markFinalDelivered(currentFinalDeliveryKey, { peerDedup: currentFinalUsesPeerDedup })) {
           return;
         }
+        finalDeliveredWasError = payload.isError === true;
       }
 
       // Event frames do not support streaming chunks

@@ -6,8 +6,11 @@
 
 ## 0. 先读结论
 
-- 已发布基线：2.7.260-23，标签 released/2.7.260-23，已推送 fork。
+- 已发布基线：2.7.260-25，标签 released/2.7.260-25，已推送 fork。
 - 自测统一只使用 OpenClaw 2026.7.1-2，不再运行双版本测试矩阵。
+- 2.7.260-25 收口两处真机反馈：
+  - **同一份答案发两遍，并漏出本地路径**。根因在 OpenClaw 核心：block 走 `createBlockReplyDeliveryHandler` 的 `extractMediaDirectives: false`（`MEDIA:` 原样保留），final 走 `splitMediaFromOutput`（剥指令**且把所有空行压掉**）。插件按字节比对判成两段不同文字后拼接。修两层：摄入边界剥指令（`stripMediaDirectives`），比对处改用核心那三条替换本身（`respaceLikeCore`）。**第二层是根治**——复刻上游解析器必输，只要还依赖字节相等，任何规则猜错都等于重发整份答案。
+  - **「长任务处理中，请勿打断」早了三分钟**。流窗口早死时 gate override 把推送车道首格拉到 5 分钟，而该车道把措辞写死不看时钟。现让 `formatElapsedStatus` 按 `elapsedMs` 自选前缀，取消所有调用点跟 8 分钟阈值唱反调的能力。现场描述的「2 分钟」版本未复现且可证明出不来（下一格恒 ≥ 开始 + 5 分钟）。
 - 2.7.260-23 修一处真机反馈：**企微流窗口关闭后，模型产出的东西全部被丢弃**。推送车道原本写死「Reasoning stays out」——气泡活着时是分工，气泡一死（约 6 分钟）就成了丢弃，只思考不出正文的回合从此完全静音。现让推送车道携带思考窗口。探针复现见 changelog；先复现再改，改完同一探针验证。
 - 2.7.260-22 收口两处真机反馈：
   - **长任务超时只报「LLM request failed.」**：OpenClaw embedded run 命中自身 600 秒上限（agents.defaults.timeoutSeconds）后连发两条 final，第二条点名了该配置项，却被 markFinalDelivered 当作重复投递丢弃（日志 `[wecom-b3] final-skip second-distinct`）。现改为：已投递的是错误通知时放行后续 final，已投递的是正常答案时行为不变。
@@ -39,11 +42,44 @@
 
 ### 发布状态
 
-- 版本号 2.7.260-21，包指纹见第 7 节。
-- tag released/2.7.260-21 与 main 均已推送 fork，已核对：fork/main = a40c7c9 = 本地 HEAD。
+- 版本号 2.7.260-25，包指纹见第 7 节。
+- tag released/2.7.260-25 与 main 均已推送 fork，核对结果见第 7 节。
 - origin 仍停在 f5f5650，无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-3 媒体指令导致的整份重复与措辞阈值（2.7.260-25）
+
+**重复内容。** OpenClaw 核心把同一个答案用两种形状交给插件：
+
+- block 走 createBlockReplyDeliveryHandler → normalizeReplyPayloadDirectives，写死 `extractMediaDirectives: false`，
+  所以 `MEDIA:<path>` 原样留在块文本里；
+- final 走 splitMediaFromOutput，剥掉指令之后还执行
+  `.replace(/[ \t]+\n/g,"\n").replace(/[ \t]{2,}/g," ").replace(/\n{2,}/g,"\n").trim()`——**所有空行被压掉**。
+
+插件按字节比对判成两段不同文字，拼接：整份答案发两遍，中间还漏一条本地路径给用户看。
+
+修复两层，第二层才是根治：
+
+1. 摄入边界 `stripMediaDirectives`（在 `const text = ...` 处对每个 payload 生效），镜像核心规则：
+   围栏用**真实**状态机（同字符、长度不短于开围栏、其后只有空白才闭合；布尔量切换会在 ```js … ~~~ … ``` 上错位）；
+   逐 token 只认 https URL 与路径，**裸文件名不在此列**（核心只在整段 payload 上才用裸文件名规则，
+   这正是 `MEDIA: 设计稿 v2.png` 仍能成为附件的原因）；一行里指令旁边的字保留；
+   恰好一个 token 命中且整段读起来是一条路径时整行让位。
+2. 比对处 `mergeReplyText` 在字节判定失败后，用 `respaceLikeCore`（核心那三条替换本身）再比一次。
+
+**不要**改用「抹掉所有空白」来比：那会把「先错误缩进、再正确缩进」的两段代码判成同一段而丢掉后者。
+**不要**在这两条新分支上用 `normalizeDedupText`：它连标点与大小写都抹平，`内存 15GB` 会盖掉修正后的 `内存 1.5GB`。
+
+**书签不变式（改这里必看）**：final 是块的超集时，拼接结果必须是「保留已发出的字节 + 只追加新增尾巴」
+（`offsetAfterSqueezedPrefix` 按非空白字符计数定位切点）。整体换成 final 的排版会让
+lastDeliveredBodySourceText / previewFrozenDeliveredSourceText 全部失效，死流后的补发会重发用户看过的内容。
+
+**措辞阈值。** 流窗口早死时 longTaskStatusGateOverrideAt 把推送车道首格拉到 5 分钟，
+而该车道原本把「长任务处理中，请勿打断」写死、不看时钟（实测 t=300s 即出现）。
+现让 formatElapsedStatus 按 elapsedMs 自选前缀——不是修一个调用点，是取消所有调用点跟阈值唱反调的能力。
+五条 gateway-sim 用例的期望值随之改为轻量措辞并追加 not.toContain(LONG_TASK_STATUS_PREFIX)，断言比原来强；
+一条 8m00s 的用例不变（走回执不可信路径、无 gate override）。
 
 ### 2.-2 流窗口关闭后的思考块传递（2.7.260-23）
 
@@ -173,6 +209,12 @@
 3. 回合前 120 秒内流就失效且此前没有成功预览时，后台通知存在窄场景被取消的可能。
 4. ambiguous 主动推送重试仍有有限重复风险，当前上限为 3 次；这是“宁可有限重复，不静默丢答案”的明确取舍。
 5. 真实 Windows、企业微信网关和客户端仍未全面验收；网关模拟器不能代替真机验证。模板卡片的**渲染与点选后就地更新已由使用者在真机确认通过**（2.7.260-21）；2.7.260-22 修的回调文本仍需真机复验——点选后应看到 agent 基于实际选择的回复，而不是「已收到 … 事件」。测试步骤见第 9 节。Windows 侧还缺 CLI 子进程 spawn、插件私有 node_modules 里 @wecom/cli-win32-x64 的 require.resolve、WECOM_CLI_CONFIG_DIR 的 0700 可写性；官方没有 win32-arm64 平台包，目标机若是 ARM 则整条 CLI 链路不可用。
+5.4 2.7.260-25 的一个**刻意取舍**：两段文字只差空白时，已经发出去的那份字节胜出。
+    好处是所有投递书签保持有效，推送车道不会重发用户看过的内容；代价是模型「先给错误缩进、
+    再给正确缩进」的同一段代码，气泡里留的是前一份。属产品取舍而非技术限制，可以反过来。
+5.5 2.7.260-25 需真机复验两点：①带附件的长报告只出现一次、且不含 `MEDIA:` 本地路径；
+    ②8 分钟以内不再出现「长任务处理中，请勿打断」。若仍见到后者，需要 `[wecom-preview] expired-notice … elapsedMs=` 日志行——
+    现场描述的「2 分钟」版本本轮未能复现，且静态可证下一格恒 ≥ 开始 + 5 分钟。
 5.1 仓库 package-lock.json 为 0 字节，npm audit --omit=dev 返回 ENOLOCK。生成 lockfile 会改变安装解析，属于会影响使用者的动作，需用户点头，至今未生成。
 5.3 补发改走 wecom-cli 已评估并**否掉**：CLI 的 chat_id 必须取自本次 sessions list（技能明文禁止历史 chat_id），
     只能发给授权人与最近 10 个会话（长任务的目标会话可能已掉出窗口），子进程时延 300~500ms 且按 botId 全局串行，
@@ -206,6 +248,7 @@ src/transport/bot-ws/sdk-adapter.ts
 - WeCom stream frame 预算：15360 bytes；final 单段上限约 5000 字符。
 - 流式过程预览冻结阈值：约 5 分钟或 3000 字符。
 - 长任务状态首格：回合开始后 8 分钟；正常状态网格每 60 秒。
+- 状态措辞由时钟决定，不由调用点决定：< 8 分钟一律「【处理中，已用时X】」，≥ 8 分钟才是「【长任务处理中，请勿打断，已用时X】」。死流会把推送首格拉到 5 分钟，但措辞不跟着提前。
 - 工具阶段沉默心跳：90 秒；无新内容的后台状态推送静默 5 分钟。
 - 本地单次 WeCom 发送超时：8 秒；pending ACK 宽限约 5.5 秒。
 - callback claim TTL：8 分钟；状态刷新看门狗上限：1 小时。
@@ -223,30 +266,38 @@ src/transport/bot-ws/sdk-adapter.ts
 
 ~~~text
 OpenClaw: 2026.7.1-2
-Vitest: 58 files / 768 tests passed (74s，正常负载)
-npx tsc --noEmit: passed
+Vitest: 58 / 59 files passed（唯一失败见下）
+差分用例 media-directive-alignment: 47 形状 × 3 流式模式 = 141 次跑动，0 缺陷
 npm run build: passed
 npm run verify-dist: passed
 B1: READY
-B2: READY
-B3: READY
-git diff --check: passed
+B2: READY（buildReady / focusedTestReady / b1Ready 全 true）
+B3: READY（buildReady / focusedTestReady / b2Ready 全 true）
 ~~~
 
-高负载下的一次全量（load average 49 / 8 核）耗时 3086 秒，gateway-sim 的 30 秒墙钟用例超时；
-负载回落到 5 后该文件隔离复跑 33/33 通过（868ms），随后全量 721/721 通过。
-不要为掩盖负载抖动修改生产 timeout。
+唯一失败：gateway-sim 的 `carries real narration` —— 仓库里最慢的用例，52 秒对 30 秒上限，
+`--retry=2` 三次全撞墙。A/B 对照（同一台机器、同一时段）：
+**未改动基线 28.3s / 28.9s，改动后 19.0s / 37.0s** —— 同一份代码两次相差 18 秒，
+属机器负载（当时 8 核 load 35–48，来自本仓库之外的工作负载），非回归。
+`--no-file-parallelism` 串行全量在该负载下 40 分钟跑不完，已放弃该模式。
+**不要为掩盖负载抖动修改生产 timeout 或用例断言。**
+
+差分用例的反向证据（每次改 stripMediaDirectives / mergeReplyText 都应复跑）：
+关掉 stripMediaDirectives → 78 处缺陷；围栏状态机退回布尔量 → 24 处；
+looksLikeMediaTarget 恒真（模拟过度剥离）→ 12 处。
 
 ### 包指纹
 
 ~~~text
-yanhaidao-wecom-2.7.260-23.tgz
-size:        597,507 bytes
-unpacked:    2,285,008 bytes
+yanhaidao-wecom-2.7.260-25.tgz
+size:        602,140 bytes
+unpacked:    2,297,705 bytes
 files:       252
-npm shasum:  b6157b0f2f8ffea1bb327fa921c21e7c93b18aca
-SHA-256:     b97af83bc91e1f6c8181ab115f0e2fade52e5f95278fdbc9f27e6dbd51330e31
+npm shasum:  fcce883f9eb2b614c45569c87198dcfa7babc4e5
+SHA-256:     3f2f0f7970c24f428422555c0623e5a6f24fcd41ca6f0ea5bf96dff48fdcca1a
 ~~~
+
+重复打包字节一致；包内无测试文件、无 node_modules、无凭据文件。
 
 重复打包 SHA-256 一致；隔离 npm install --omit=dev 后 @wecom/cli-linux-x64 可解析，二进制返回 wecom-cli 1.2.0。
 包内含 dist/src/capability/card/，无测试文件、node_modules、credentials.enc 或 .encryption_key。

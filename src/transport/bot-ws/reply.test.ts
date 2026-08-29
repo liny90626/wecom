@@ -3097,6 +3097,349 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
   });
 
+  it("does not repeat the answer when the core leaves a MEDIA directive in the block", async () => {
+    // OpenClaw streams block replies with `extractMediaDirectives: false`, so
+    // the directive is still in the block text; the final has it stripped AND
+    // every blank line collapsed (splitMediaFromOutput). Accumulating the block
+    // verbatim showed the user a raw local path and left the final unable to
+    // match the accumulated body, so the whole answer was sent a second time.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const answer = "评估完成，核心结论：\n\nC 盘剩 26.4GB。\n\n清理方案四档：A/B/C/D。";
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-directive" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: `${answer}\n\nMEDIA:C:\\Users\\me\\report.md` },
+      { kind: "block" },
+    );
+    await handle.deliver(
+      {
+        text: answer.replace(/\n{2,}/g, "\n"),
+        mediaUrls: ["C:\\Users\\me\\report.md"],
+      },
+      { kind: "final" },
+    );
+
+    const frames = mockClient.replyStream.mock.calls.map((call) => String(call[2] ?? ""));
+    const finalFrame = frames.at(-1) ?? "";
+    expect(finalFrame).not.toContain("MEDIA:");
+    expect(finalFrame.split("评估完成，核心结论：")).toHaveLength(2);
+    expect(finalFrame).toContain("清理方案四档：A/B/C/D。");
+  });
+
+  it("keeps a MEDIA line whose payload is prose rather than a file", async () => {
+    // The core only treats a directive as media when the payload resolves to a
+    // URL, a path or a filename; anything else stays in the text. Dropping it
+    // here would delete a line of the model's answer.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const answer = "结论如下：\n\nMEDIA: 这一段是说明文字，不是附件";
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-prose" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: answer }, { kind: "block" });
+    await handle.deliver({ text: answer }, { kind: "final" });
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).toContain("MEDIA: 这一段是说明文字，不是附件");
+    expect(finalFrame.split("结论如下：")).toHaveLength(2);
+  });
+
+  it("does not repeat the answer when the blocks re-send it as it grows", async () => {
+    // A producer that streams cumulative text puts the directive in the LAST
+    // block only. Normalizing that block alone (and not the ones before it)
+    // left the two shapes unalignable and appended the answer all over again.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const opening = "评估完成，核心结论：\n\nC 盘剩 26.4GB。";
+    const answer = `${opening}\n\n清理方案四档：A/B/C/D。`;
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-cumulative" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: opening }, { kind: "block" });
+    await handle.deliver(
+      { text: `${answer}\n\nMEDIA:C:\\Users\\me\\report.md` },
+      { kind: "block" },
+    );
+    await handle.deliver(
+      {
+        text: answer.replace(/\n{2,}/g, "\n"),
+        mediaUrls: ["C:\\Users\\me\\report.md"],
+      },
+      { kind: "final" },
+    );
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).not.toContain("MEDIA:");
+    expect(finalFrame.split("评估完成，核心结论：")).toHaveLength(2);
+    expect(finalFrame.split("清理方案四档：A/B/C/D。")).toHaveLength(2);
+  });
+
+  it("keeps the words sharing a line with the attachment", async () => {
+    // The core removes the tokens it accepted and keeps the rest of the line;
+    // dropping the whole line deleted a sentence of the model's answer.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-inline-words" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: "答案在这里。\n\nMEDIA: https://example.com/a.png 请查收" },
+      { kind: "block" },
+    );
+    await handle.deliver(
+      { text: "答案在这里。\n请查收", mediaUrls: ["https://example.com/a.png"] },
+      { kind: "final" },
+    );
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).toContain("请查收");
+    expect(finalFrame).not.toContain("MEDIA:");
+    expect(finalFrame.split("答案在这里。")).toHaveLength(2);
+  });
+
+  it("matches the core on which targets count as an attachment", async () => {
+    // A long extension is a filename the core takes; a non-https URL is one it
+    // refuses and leaves in the text. Diverging either way puts the bubble and
+    // the final back out of step.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-target-shapes" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: "答案。\n\nMEDIA: 报告.markdown\nMEDIA:http://example.com/a.png" },
+      { kind: "block" },
+    );
+    await handle.deliver(
+      { text: "答案。\nMEDIA:http://example.com/a.png", mediaUrls: ["报告.markdown"] },
+      { kind: "final" },
+    );
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).not.toContain("报告.markdown");
+    expect(finalFrame).toContain("MEDIA:http://example.com/a.png");
+    expect(finalFrame.split("答案。")).toHaveLength(2);
+  });
+
+  it("does not repeat a short attachment answer that followed earlier blocks", async () => {
+    // Multi-block turn whose final is short: the length floor on the content
+    // comparison is there for finals whose spacing the core never touched, and
+    // a turn carrying a directive is not one of those.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-short-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "先扫描一遍。" }, { kind: "block" });
+    await handle.deliver(
+      { text: "评估完成。\n\n报告见附件。\nMEDIA:C:\\Users\\me\\report.md" },
+      { kind: "block" },
+    );
+    await handle.deliver(
+      { text: "评估完成。\n报告见附件。", mediaUrls: ["C:\\Users\\me\\report.md"] },
+      { kind: "final" },
+    );
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).toContain("先扫描一遍。");
+    expect(finalFrame.split("评估完成。")).toHaveLength(2);
+    expect(finalFrame.split("报告见附件。")).toHaveLength(2);
+  });
+
+  it("does not repeat the answer when the final carries more than the blocks", async () => {
+    // The shape `next.startsWith(base)` exists for: a producer re-sending its
+    // text as it grows. Once the core respaces the final, that raw prefix test
+    // fails and the whole answer used to be appended to itself.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-superset-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "第一段结论。\n\n第二段结论。" }, { kind: "block" });
+    await handle.deliver(
+      { text: "第一段结论。\n第二段结论。\n第三段结论。", mediaUrls: ["/tmp/a.png"] },
+      { kind: "final" },
+    );
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame.split("第一段结论。")).toHaveLength(2);
+    expect(finalFrame.split("第二段结论。")).toHaveLength(2);
+    expect(finalFrame).toContain("第三段结论。");
+  });
+
+  it("keeps the newer text when a correction differs by more than spacing", async () => {
+    // The spacing-blind compare must not let an older block win over a final
+    // that actually says something different.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-correction" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "内存 15GB。" }, { kind: "block" });
+    await handle.deliver(
+      { text: "内存 1.5GB。", mediaUrls: ["/tmp/a.png"] },
+      { kind: "final" },
+    );
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).toContain("内存 1.5GB。");
+  });
+
+  it("keeps the words between two attachments on one directive line", async () => {
+    // The core only retries the whole payload as one path when a SINGLE token
+    // matched; with two, what sits between them is prose. Swallowing it left
+    // the body unable to line up with the final — the answer twice again.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-two-targets" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: "第一段。\n\nMEDIA: 见 /tmp/a.png 与 /tmp/b.png 的对比\n\n第二段。" },
+      { kind: "block" },
+    );
+    await handle.deliver(
+      {
+        text: "第一段。\n见 与 的对比\n第二段。",
+        mediaUrls: ["/tmp/a.png", "/tmp/b.png"],
+      },
+      { kind: "final" },
+    );
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).not.toContain("MEDIA:");
+    expect(finalFrame.split("第一段。")).toHaveLength(2);
+    expect(finalFrame.split("第二段。")).toHaveLength(2);
+  });
+
+  it("keeps a block that re-sends the same words with new indentation", async () => {
+    // The spacing-blind compare exists to absorb the core's respacing, which
+    // never touches indentation. A model showing a wrong form and then the
+    // corrected one has to keep both.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-reindented-block" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "def f():\nreturn 1" }, { kind: "block" });
+    await handle.deliver({ text: "def f():\n    return 1" }, { kind: "block" });
+    await handle.deliver({ text: "以上。" }, { kind: "final" });
+
+    // The indented copy reaches WeCom through the markdown adapter, which
+    // labels an indented code block rather than passing the spaces through —
+    // what matters here is that the second block survived the merge at all.
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame.split("def f():")).toHaveLength(3);
+    expect(finalFrame).toContain("代码：");
+  });
+
+  it("keeps a MEDIA line that belongs to a fenced code sample", async () => {
+    // The core keeps fenced lines and then leaves the whole text untouched, so
+    // touching it here would reintroduce the mismatch this strip exists to end.
+    const runtime = await import("../../runtime.js");
+    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    const answer = "用法如下：\n\n```\nMEDIA:/path/to/file.png\n```\n\n就这样。";
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-media-fence" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: answer }, { kind: "block" });
+    await handle.deliver({ text: answer }, { kind: "final" });
+
+    const finalFrame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalFrame).toContain("MEDIA:/path/to/file.png");
+    expect(finalFrame.split("用法如下：")).toHaveLength(2);
+  });
+
   it("stops a media final after supersede makes the first attachment visible", async () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({

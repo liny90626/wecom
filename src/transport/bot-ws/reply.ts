@@ -95,6 +95,16 @@ const REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT =
   "上一轮任务还在处理中或会话状态刚发生变化，这条消息未能处理，请稍后重新发送。";
 const FINAL_PUSH_RETRY_BASE_MS = 20_000;
 const FINAL_PUSH_MAX_RETRIES = 3;
+/** The core's own line rule: `MEDIA:` opens the line, fenced samples aside. */
+const MEDIA_DIRECTIVE_LINE_RE = /^[^\S\n]*MEDIA:[^\S\n]*(.*)$/i;
+const MEDIA_DIRECTIVE_PROBE_RE = /^[^\S\n]*MEDIA:/im;
+/** The core's fence rule verbatim: up to three spaces, then three+ markers. */
+const CODE_FENCE_LINE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const MEDIA_WINDOWS_DRIVE_RE = /^[a-zA-Z]:[\\/]/;
+const MEDIA_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+const MEDIA_FILE_EXT_RE = /\.\w{1,10}$/;
+const MEDIA_QUOTED_PAYLOAD_RE = /^(["'`])[\s\S]*\1$/;
+
 const THINK_TAG_RE = /<\/?think>/gi;
 const OPEN_THINK_TAG_RE = /<think>/gi;
 const CLOSE_THINK_TAG_RE = /<\/think>/gi;
@@ -549,6 +559,169 @@ function normalizePeerKey(peerId: string): string {
   return peerId.trim().toLowerCase();
 }
 
+/**
+ * What the core takes as an attachment ONE token at a time: an https URL or a
+ * filesystem path. A bare filename is deliberately not here — the core only
+ * reaches that rule on the whole payload, which is what lets a filename with a
+ * space in it still attach. Its remote-host allowlist is left out: a blocked
+ * host still reads as an attachment to the user, and stripping one the core
+ * kept is harmless because this runs over the core's own final as well.
+ */
+function looksLikeMediaTarget(candidate: string): boolean {
+  if (!candidate || candidate.length > 4096) {
+    return false;
+  }
+  if (MEDIA_SCHEME_RE.test(candidate) && !MEDIA_WINDOWS_DRIVE_RE.test(candidate)) {
+    return candidate.toLowerCase().startsWith("https://");
+  }
+  return candidate.includes("/") || candidate.includes("\\");
+}
+
+/** Whether the core would read the whole payload, spaces and all, as one path. */
+function looksLikeLocalMediaPath(payload: string): boolean {
+  return (
+    MEDIA_WINDOWS_DRIVE_RE.test(payload) ||
+    payload.startsWith("\\\\") ||
+    payload.startsWith("~") ||
+    (!MEDIA_SCHEME_RE.test(payload) && (payload.includes("/") || payload.includes("\\")))
+  );
+}
+
+/** …and what it takes on the whole payload once no single token qualified: the
+ *  same paths, plus a bare filename, spaces included. */
+function looksLikeWholeMediaPayload(payload: string): boolean {
+  return (
+    looksLikeLocalMediaPath(payload) ||
+    (!MEDIA_SCHEME_RE.test(payload) && MEDIA_FILE_EXT_RE.test(payload))
+  );
+}
+
+/** The core's `cleanCandidate` plus `normalizeMediaSource`: wrapping punctuation
+ *  is not the path, and `file://` is a path spelled long. */
+function cleanMediaCandidate(raw: string): string {
+  const cleaned = raw.replace(/^[`"'[{(]+/, "").replace(/[`"'\\})\],]+$/, "");
+  return cleaned.startsWith("file://") ? cleaned.slice("file://".length) : cleaned;
+}
+
+/**
+ * The text that survives a `MEDIA:` line, or undefined when the line is not a
+ * directive at all. The core removes only the tokens it accepted and keeps the
+ * rest of the line, so `MEDIA: https://x/a.png 请查收` has to leave 请查收 behind.
+ */
+function stripMediaDirectiveFromLine(line: string): string | undefined {
+  const match = MEDIA_DIRECTIVE_LINE_RE.exec(line);
+  if (!match) {
+    return undefined;
+  }
+  const payload = (match[1] ?? "").trim();
+  // A fully quoted payload is ONE target, spaces and all — the core's
+  // `unwrapQuoted`. Otherwise every whitespace-separated token is its own.
+  const quoted = MEDIA_QUOTED_PAYLOAD_RE.test(payload) ? payload.slice(1, -1).trim() : undefined;
+  const parts = quoted === undefined ? payload.split(/\s+/).filter(Boolean) : [quoted];
+  const kept = parts.filter((part) => !looksLikeMediaTarget(cleanMediaCandidate(part)));
+  const cleanedPayload = cleanMediaCandidate(quoted ?? payload);
+  if (kept.length === parts.length) {
+    // No token qualified on its own. The core then retries the payload whole,
+    // which is how `报告 v2.png` attaches; if that fails too, the line is prose
+    // the model happened to open with "MEDIA:" and it stays.
+    return looksLikeWholeMediaPayload(cleanedPayload) ? "" : undefined;
+  }
+  // One target plus loose words: the core retries the whole payload before it
+  // gives up, so those words belong to the path. Two targets means the words
+  // between them are prose and stay.
+  const swallowsWholeLine =
+    parts.length - kept.length === 1 && looksLikeLocalMediaPath(cleanedPayload);
+  return swallowsWholeLine ? "" : kept.join(" ");
+}
+
+/**
+ * OpenClaw streams block replies with `extractMediaDirectives: false`, so a
+ * `MEDIA:<path>` line the core WILL strip from the final is still sitting in
+ * the block text. Left alone it costs twice: the user reads a raw local path,
+ * and the accumulated body no longer matches the final, so the final dedupe
+ * appends the whole answer a second time.
+ *
+ * Only the directive tokens go. The core also collapses blank lines when it
+ * strips one, but copying that here would normalize SOME blocks and not others
+ * — a producer that re-sends its text as it grows would then fail to line up
+ * with what it already sent. That spacing difference is settled where the two
+ * texts actually meet, in `mergeReplyText`.
+ */
+function stripMediaDirectives(text: string): string {
+  if (!MEDIA_DIRECTIVE_PROBE_RE.test(text)) {
+    return text;
+  }
+  let openFence: string | undefined;
+  let strippedAny = false;
+  const keptLines: string[] = [];
+  for (const line of text.split("\n")) {
+    const fence = CODE_FENCE_LINE_RE.exec(line);
+    if (fence) {
+      const marker = fence[1] as string;
+      if (openFence === undefined) {
+        openFence = marker;
+      } else if (
+        // The core's `scanFenceSpans` closes on the same character, a run at
+        // least as long, and nothing but spaces after it. Toggling on any
+        // fence-looking line instead desynchronizes on a sample that shows one
+        // fence style inside another, and every line after it is misjudged.
+        marker[0] === openFence[0] &&
+        marker.length >= openFence.length &&
+        /^[ \t]*$/.test(fence[2] ?? "")
+      ) {
+        openFence = undefined;
+      }
+      keptLines.push(line);
+      continue;
+    }
+    // A fenced sample may legitimately contain the directive; the core keeps
+    // those lines too, so stripping them here would break the very alignment
+    // this exists to restore.
+    const remainder = openFence === undefined ? stripMediaDirectiveFromLine(line) : undefined;
+    if (remainder === undefined) {
+      keptLines.push(line);
+      continue;
+    }
+    strippedAny = true;
+    if (remainder) {
+      keptLines.push(remainder);
+    }
+  }
+  return strippedAny ? keptLines.join("\n").trim() : text;
+}
+
+/** Spacing is the only thing the core rewrites when it strips a directive. */
+function squeezeWhitespace(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
+/**
+ * The core's respacing, verbatim (`splitMediaFromOutput`'s cleanup). Comparing
+ * on this absorbs exactly the rewrite it performs and nothing else: two copies
+ * of one answer match, while a block that re-sends the same words with new
+ * INDENTATION still reads as different text and is kept.
+ */
+function respaceLikeCore(value: string): string {
+  return value
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{2,}/g, "\n");
+}
+
+/** Where `text` stands once `count` non-whitespace characters have gone by. */
+function offsetAfterSqueezedPrefix(text: string, count: number): number | undefined {
+  let seen = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (!/\s/.test(text[index] as string)) {
+      seen += 1;
+      if (seen === count) {
+        return index + 1;
+      }
+    }
+  }
+  return undefined;
+}
+
 function mergeReplyText(previous: string, incoming: string): string {
   const base = previous.trim();
   const next = incoming.trim();
@@ -556,6 +729,22 @@ function mergeReplyText(previous: string, incoming: string): string {
   if (!next) return base;
   if (base === next || base.startsWith(next)) return base;
   if (next.startsWith(base)) return next;
+  // Same text, different spacing. The core collapses every blank line out of a
+  // payload it took a media directive from, while the blocks already delivered
+  // kept theirs, so the byte tests above call one text two — and this function
+  // answers that by sending the whole answer a second time. Nothing else can
+  // make these two forms differ, so comparing without spacing is safe here and
+  // it keeps a rule divergence over some exotic directive cosmetic instead.
+  const respacedBase = respaceLikeCore(base);
+  const respacedNext = respaceLikeCore(next);
+  if (respacedBase.startsWith(respacedNext)) return base;
+  if (respacedNext.startsWith(respacedBase)) {
+    // Keep the bytes already on the wire and append only what is new: every
+    // lane bookmarks the text it delivered, and adopting the respaced form
+    // wholesale would strand those bookmarks and re-send what they cover.
+    const tailAt = offsetAfterSqueezedPrefix(next, squeezeWhitespace(base).length);
+    return tailAt === undefined ? next : `${base}${next.slice(tailAt)}`;
+  }
 
   const maxOverlap = Math.min(base.length, next.length);
   for (let overlap = maxOverlap; overlap >= 16; overlap -= 1) {
@@ -566,7 +755,18 @@ function mergeReplyText(previous: string, incoming: string): string {
   return `${base}\n${next}`;
 }
 
-function mergeFinalReplyText(previous: string, incoming: string): string {
+/**
+ * @param incomingWasRespaced The turn carried a media directive, so the core
+ * collapsed every blank line out of THIS final while the blocks kept theirs.
+ * The two can then only be compared on content, at any length: equal normalized
+ * text is the same text, and the length floor below exists for finals whose
+ * spacing was never touched.
+ */
+function mergeFinalReplyText(
+  previous: string,
+  incoming: string,
+  incomingWasRespaced = false,
+): string {
   const base = previous.trim();
   const next = incoming.trim();
   if (!base || !next) {
@@ -578,6 +778,13 @@ function mergeFinalReplyText(previous: string, incoming: string): string {
     normalizedNext.length >= LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS &&
     normalizeDedupText(base).endsWith(normalizedNext)
   ) {
+    return base;
+  }
+  // A respaced final that repeats only the TAIL of the body. The length floor
+  // above guards `normalizeDedupText`, which also folds punctuation and case —
+  // too blunt to let the older block text win. Spacing alone cannot change what
+  // the answer says, so this needs no floor.
+  if (incomingWasRespaced && respaceLikeCore(base).endsWith(respaceLikeCore(next))) {
     return base;
   }
 
@@ -773,8 +980,15 @@ function formatElapsedDuration(elapsedMs: number): string {
   return `${elapsedMinutes}m${String(remainingSeconds).padStart(2, "0")}s`;
 }
 
-function formatElapsedStatus(elapsedMs: number, longTask = true): string {
-  const prefix = longTask ? LONG_TASK_STATUS_PREFIX : RUN_ALIVE_STATUS_PREFIX;
+/**
+ * The copy follows the clock, never the call site. "请勿打断" asks the user to
+ * change their behaviour, so it belongs to the absolute long-task threshold
+ * (禁改 25/34) — the push lane hard-coded it instead and therefore said "长任务"
+ * over a five-minute clock whenever a dead window pulled its gate forward.
+ */
+function formatElapsedStatus(elapsedMs: number): string {
+  const prefix =
+    elapsedMs >= LONG_TASK_STATUS_AFTER_MS ? LONG_TASK_STATUS_PREFIX : RUN_ALIVE_STATUS_PREFIX;
   return `${prefix}${formatElapsedDuration(elapsedMs)}】`;
 }
 
@@ -1117,6 +1331,8 @@ export function createBotWsReplyHandle(params: {
 }): ReplyHandle {
   let streamId: string | undefined;
   let accumulatedText = "";
+  /** This turn carried a `MEDIA:` directive, so the core respaced its final. */
+  let mediaDirectiveStripped = false;
   let accumulatedThinkingText = "";
   let deferredMediaUrls: string[] = [];
 
@@ -1391,10 +1607,7 @@ export function createBotWsReplyHandle(params: {
     const layout = resolveThinkingFrameLayout(accumulatedThinkingText, Boolean(accumulatedText));
     const thinkingBlock = layout.block;
     const bodyLimits = { maxChars: layout.maxChars, maxBytes: layout.maxBytes };
-    const statusText = formatElapsedStatus(
-      elapsedMs,
-      elapsedMs >= LONG_TASK_STATUS_AFTER_MS,
-    );
+    const statusText = formatElapsedStatus(elapsedMs);
     // The status line is this frame's whole purpose (禁改 25) — reserve its
     // budget up front so an ample log can never squeeze it off the wire.
     const statusReserveChars = statusText.length + 2;
@@ -3700,7 +3913,15 @@ export function createBotWsReplyHandle(params: {
           await sendThinkingSnapshot({ force: true });
         }
       }
-      const text = extracted.bodyText;
+      // Ingestion boundary: the core leaves its `MEDIA:` directives in streamed
+      // blocks and only strips them on the final, so every lane downstream would
+      // otherwise compare a body that still carries them against one that does
+      // not. A payload without a directive comes back untouched.
+      const text = stripMediaDirectives(extracted.bodyText);
+      // Once this turn has carried a directive, the core has respaced the final
+      // it is going to send, and only its content can be matched against the
+      // blocks that already went out.
+      mediaDirectiveStripped ||= text !== extracted.bodyText;
       const incomingMediaUrls = payload.mediaUrls || (payload.mediaUrl ? [payload.mediaUrl] : []);
       const hasIncomingMedia = incomingMediaUrls.length > 0;
       if (info.kind !== "final" && hasIncomingMedia) {
@@ -3731,7 +3952,7 @@ export function createBotWsReplyHandle(params: {
 
       const outboundText =
         info.kind === "final"
-          ? mergeFinalReplyText(accumulatedText, text)
+          ? mergeFinalReplyText(accumulatedText, text, mediaDirectiveStripped)
           : accumulatedText || text;
 
       // OpenClaw deferred this turn's answer to a later run. Everything that

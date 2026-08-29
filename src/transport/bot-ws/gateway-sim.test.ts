@@ -67,6 +67,9 @@ const deliverAndTick = async (
 describe("WeCom gateway simulation", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
+    // The media mock is module-scoped, so its call count has to be reset per
+    // test or an upload from an earlier turn is counted against a later one.
+    vi.mocked(uploadAndSendBotWsMedia).mockClear();
     __resetBotWsReplyTestState();
     vi.stubEnv("OPENCLAW_STATE_DIR", "/tmp/wecom-sim-state");
     const runtime = await import("../../runtime.js");
@@ -243,7 +246,10 @@ describe("WeCom gateway simulation", () => {
     await tick(8 * 60_000);
     const pushes = sim.chat.filter((entry) => entry.kind === "push");
     expect(pushes.length).toBeGreaterThanOrEqual(1);
-    expect(pushes[0]?.content).toContain("长任务处理中，请勿打断");
+    // Five minutes in, the copy is the lighter clock: "请勿打断" belongs to the
+    // absolute 8-minute threshold, not to a gate a dead window pulled forward.
+    expect(pushes[0]?.content).toContain("【处理中，已用时5m00s】");
+    expect(pushes[0]?.content).not.toContain(LONG_TASK_STATUS_PREFIX);
     // Once the window is dead this push is the only channel left, so it carries
     // the reasoning the bubble can no longer show.
     expect(pushes[0]?.content).toContain("<think>长任务进度</think>");
@@ -314,8 +320,107 @@ describe("WeCom gateway simulation", () => {
     await tick(8 * 60_000);
     const pushes = sim.chat.filter((entry) => entry.kind === "push");
     expect(pushes.length).toBeGreaterThanOrEqual(1);
-    expect(pushes[0]?.content).toContain("长任务处理中，请勿打断");
+    // No gate override here (the ACK ledger went untrusted, the window did
+    // not die), so the first push lands on the absolute threshold and keeps
+    // the "请勿打断" copy.
+    expect(pushes[0]?.content).toContain("【长任务处理中，请勿打断，已用时8m00s】");
     expect(pushes[0]?.content).toContain("<think>长任务进度</think>");
+  });
+
+  it("only asks the user not to interrupt once the turn really is a long task", async () => {
+    // A dead window pulls the push lane's gate forward to the five-minute mark,
+    // and the lane used to hard-code the "长任务处理中，请勿打断" copy — so a turn
+    // that had not reached the eight-minute threshold was still telling the
+    // user to sit still. The copy now follows the clock on every lane.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 60_000 });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "第一步：扫描目录" }, { kind: "block" }, 500);
+    await tick(90_000);
+    await deliverAndTick(handle, { text: "第一步：扫描目录\n第二步：统计占用" }, { kind: "block" }, 500);
+
+    await tick(5 * 60_000);
+    const firstPush = sim.chat.find((entry) => entry.kind === "push")?.content ?? "";
+    expect(firstPush).toContain("第二步：统计占用");
+    expect(firstPush).toContain("【处理中，已用时5m00s】");
+    expect(firstPush).not.toContain(LONG_TASK_STATUS_PREFIX);
+
+    await deliverAndTick(
+      handle,
+      { text: "第一步：扫描目录\n第二步：统计占用\n第三步：出报告" },
+      { kind: "block" },
+      500,
+    );
+    await tick(5 * 60_000);
+    const longTaskPush = sim.chat
+      .filter((entry) => entry.kind === "push")
+      .map((entry) => entry.content)
+      .find((content) => content.includes("第三步：出报告"));
+    expect(longTaskPush).toContain(LONG_TASK_STATUS_PREFIX);
+  });
+
+  it("does not repeat an attachment answer once the window is dead", async () => {
+    // Same asymmetry as the bubble case, but through the push lane: the block
+    // still carries the core's `MEDIA:` directive while the final arrives with
+    // it stripped and its blank lines collapsed, so the two could not be
+    // aligned and the whole answer was pushed a second time.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 60_000 });
+    const handle = startTurn(sim);
+    await tick(100);
+    const answer = "扫描完成。\n\nC 盘剩 26.4GB。\n\n建议先清 Temp 与 npm 缓存。";
+    await deliverAndTick(handle, { text: "扫描完成。" }, { kind: "block" }, 500);
+    await tick(90_000);
+    await deliverAndTick(
+      handle,
+      { text: `${answer}\n\nMEDIA:C:\\Users\\me\\report.md` },
+      { kind: "block" },
+      500,
+    );
+    await tick(5 * 60_000);
+    await deliverAndTick(
+      handle,
+      { text: answer.replace(/\n{2,}/g, "\n"), mediaUrls: ["C:\\Users\\me\\report.md"] },
+      { kind: "final" },
+      3_000,
+    );
+
+    const pushed = sim.chat
+      .filter((entry) => entry.kind === "push")
+      .map((entry) => entry.content)
+      .join("\n---\n");
+    expect(pushed).toContain("建议先清 Temp 与 npm 缓存。");
+    expect(pushed).not.toContain("MEDIA:");
+    expect(pushed.split("建议先清 Temp 与 npm 缓存。")).toHaveLength(2);
+  });
+
+  it("pushes only the new tail when a respaced final extends the answer", async () => {
+    // Dead window + an attachment: the final arrives with its blank lines gone
+    // and more text than the bubble ever showed. The push lane resolves its
+    // remainder against the bytes it delivered, so the merge has to keep those
+    // bytes intact or the user reads the whole answer twice.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 60_000 });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "第一段结论。\n\n第二段结论。" }, { kind: "block" }, 500);
+    await tick(5 * 60_000);
+    await deliverAndTick(
+      handle,
+      {
+        text: "第一段结论。\n第二段结论。\n第三段结论。",
+        mediaUrls: ["C:\\Users\\me\\report.md"],
+      },
+      { kind: "final" },
+      3_000,
+    );
+
+    const pushed = sim.chat
+      .filter((entry) => entry.kind === "push")
+      .map((entry) => entry.content)
+      .join("\n---\n");
+    expect(pushed).toContain("第三段结论。");
+    // What the bubble already carried must not travel again.
+    expect(pushed).not.toContain("第一段结论。");
+    expect(pushed).not.toContain("第二段结论。");
   });
 
   it("does not arm background notices after a single recovered ACK hiccup", async () => {
@@ -354,7 +459,7 @@ describe("WeCom gateway simulation", () => {
     expect(notice).toContain("第三段进度");
     // A closed window makes the push lane the only channel, so unseen output
     // travels as soon as the turn is long — it no longer waits for 8 minutes.
-    expect(notice).toContain("【长任务处理中，请勿打断，已用时5m00s】");
+    expect(notice).toContain("【处理中，已用时5m00s】");
 
     await deliverAndTick(
       handle,
@@ -397,9 +502,7 @@ describe("WeCom gateway simulation", () => {
     await tick(8 * 60_000);
     const statusPushes = sim.chat.filter((entry) => entry.kind === "push");
     expect(statusPushes[0]?.content).toContain("文件分析失败，正在回退");
-    expect(statusPushes[0]?.content).toContain(
-      "【长任务处理中，请勿打断，已用时5m00s】",
-    );
+    expect(statusPushes[0]?.content).toContain("【处理中，已用时5m00s】");
 
     // Nothing new happened, so the minutes in between stay quiet.
     await tick(60_000);
@@ -458,7 +561,7 @@ describe("WeCom gateway simulation", () => {
     expect(progressPush).not.toContain("正在读取依赖清单");
     expect(progressPush).toContain("正在核对依赖");
     expect(progressPush).toContain("Fast: auto-off(62s>=60s)");
-    expect(progressPush).toContain("【长任务处理中，请勿打断");
+    expect(progressPush).toContain("【处理中，已用时5m00s】");
   });
 
   it("keeps body and transient bookmarks independent across a dead stream", async () => {
@@ -499,7 +602,7 @@ describe("WeCom gateway simulation", () => {
     expect(firstPush?.content).toContain("新增正文。");
     expect(firstPush?.content).not.toContain("已显示正文。");
     expect(firstPush?.content).toContain("依赖检查失败");
-    expect(firstPush?.content).toContain("【长任务处理中，请勿打断");
+    expect(firstPush?.content).toContain("【处理中，已用时5m00s】");
 
     await tick(6 * 60_000);
     const statusPushes = sim.chat.filter((entry) => entry.kind === "push");

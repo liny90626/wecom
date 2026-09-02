@@ -6,8 +6,13 @@
 
 ## 0. 先读结论
 
-- 已发布基线：2.7.260-25，标签 released/2.7.260-25，已推送 fork。
-- 自测统一只使用 OpenClaw 2026.7.1-2，不再运行双版本测试矩阵。
+- 已发布基线：2.7.260-26，标签 released/2.7.260-26，已推送 fork。
+- 兼容目标：OpenClaw 2026.7.1-2（用户生产）与**最新稳定版**（发版时为 2026.8.2）。devDependency 仍钉 2026.7.1-2；`npm run compat:check` 对两条线各跑 typecheck 与全量测试，**发版前必跑**。2026.6.x 不再维护。
+- 2.7.260-26 收口四件事（详见 changelog/v2.7.260-26.md）：
+  - **长任务结尾的假状态**有两条独立机制：推送车道把时钟押在答案正文上（现场 12m24s 是死亡时刻 + N×60s 网格的指纹）；一次 ACK 丢失后 final 改走推送而冻结气泡永不 finish。前者改为带正文的推送不缀钟，后者在答案推送落地后补一帧去钟的 best-effort finish。收尾推送只发「（回复完毕）」。
+  - **8.x 兼容**：根入口与约 55 个子路径被删、`loadConfig` 删除、`assertLocalMediaAllowed` 私有化、`useAccessGroups` 删除、`agents.entries` 成为名册正典（`agents.list` 只是只读投影）、真实分发器要求 SQLite 迁移——全部改成两条线共有的接口。8.x 上操作侧必须放行 `plugins.entries.wecom.hooks.allowConversationAccess=true`（向导已自动写入；7.x 该钩子不受此闩）。
+  - **Bot WS 提速**：死窗后正文按 20 秒推送；气泡帧与冻结阈值从 3500/3000 抬到 5000 字（B2 门禁字面量同步改，属有意识的决定）。
+  - **Agent API 车道**：移植上游字节切分与 1100ms 节流；不影响 Bot WS。
 - 2.7.260-25 收口两处真机反馈：
   - **同一份答案发两遍，并漏出本地路径**。根因在 OpenClaw 核心：block 走 `createBlockReplyDeliveryHandler` 的 `extractMediaDirectives: false`（`MEDIA:` 原样保留），final 走 `splitMediaFromOutput`（剥指令**且把所有空行压掉**）。插件按字节比对判成两段不同文字后拼接。修两层：摄入边界剥指令（`stripMediaDirectives`），比对处改用核心那三条替换本身（`respaceLikeCore`）。**第二层是根治**——复刻上游解析器必输，只要还依赖字节相等，任何规则猜错都等于重发整份答案。
   - **「长任务处理中，请勿打断」早了三分钟**。流窗口早死时 gate override 把推送车道首格拉到 5 分钟，而该车道把措辞写死不看时钟。现让 `formatElapsedStatus` 按 `elapsedMs` 自选前缀，取消所有调用点跟 8 分钟阈值唱反调的能力。现场描述的「2 分钟」版本未复现且可证明出不来（下一格恒 ≥ 开始 + 5 分钟）。
@@ -26,27 +31,39 @@
 ### 当前 Git 状态
 
 - 分支：main
-- HEAD：5e6b87c，与 fork/main 相同
+- HEAD：released/2.7.260-26 所指提交（其前三个功能提交 a9b1882 / f53c974 / 821f413），与 fork/main 相同
 - 维护远端：fork = git@github.com:liny90626/wecom.git
-- 上游远端：origin = https://github.com/YanHaidao/wecom.git
+- 上游远端：origin = https://github.com/YanHaidao/wecom.git（已对账其 25 个新提交，见第 8 节）
 - 允许推送的目标只有 fork；禁止向 origin 推送。
-- 2.7.260-21 涉及的文件：
-  - src/capability/card/{parser,manager}.ts 与两个测试（新增）
-  - src/transport/bot-ws/reply.ts / reply.test.ts
-  - src/transport/bot-ws/sdk-adapter.ts
-  - src/runtime/reply-orchestrator.ts / reply-orchestrator.test.ts
-  - src/app/account-runtime.ts / account-runtime.test.ts
-  - src/shared/media-service.ts / media-service.test.ts、src/http.ts
-  - src/types/runtime.ts、index.ts
-  - package.json、src/version.ts、README.md、changelog/、本文件
+- 2.7.260-26 涉及的文件：
+  - src/transport/bot-ws/reply.ts / reply.test.ts / gateway-sim.test.ts / long-task-progress.test.ts / media.ts / media.test.ts
+  - src/app/index.ts、src/runtime.ts（getWecomRuntimeConfig）、src/dynamic-agent.ts（+ dynamic-agent.roster.test.ts 新增）、src/shared/command-auth.ts、src/onboarding.ts / onboarding.test.ts
+  - src/shared/byte-chunking.ts、src/shared/send-pacing.ts（+ 测试，上游原文）、src/types/constants.ts、src/monitor/limits.ts、Agent 车道四个发送点、src/outbound.ts
+  - 53 个文件只改 openclaw import 路径；src/openclaw-sdk-imports.test.ts（新增守卫）
+  - scripts/check-openclaw-compat.mjs（新增）、scripts/patch-wecom-long-message.mjs（门禁字面量 3_000 → 5_000）
+  - src/runtime/reply-orchestrator.test.ts（独立临时状态目录、8.x 兜底契约）、mcp 两个测试的 runtime 替身
+  - package.json、src/version.ts、.gitignore、README.md、changelog/、本文件
 
 ### 发布状态
 
-- 版本号 2.7.260-25，包指纹见第 7 节。
-- tag released/2.7.260-25 与 main 均已推送 fork，核对结果见第 7 节。
+- 版本号 2.7.260-26，包指纹见第 7 节。
+- tag released/2.7.260-26 与 main 均已推送 fork，核对结果见第 7 节。
 - origin 仍停在 f5f5650，无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-4 长任务收尾、双版本兼容、Bot WS 提速（2.7.260-26）
+
+收尾假状态两条机制的复现用例：`long-task-progress.test.ts`「死窗后的收尾…」、`gateway-sim.test.ts`「closes an ACK-untrusted bubble…」与「finishes an externally answered bubble…」。三条不变量：
+- 带正文的推送不缀时钟；只带步骤 / 思考 / 什么都没带的推送照旧（`maybeSendPreviewExpiredNotice` 里 `undeliveredProgress ? "" : formatElapsedStatus(elapsedMs)`）。
+- 任何 finish 帧都经 `stripElapsedStatusLine`；`closeUntrustedBubbleAfterPush` 只在 `deliverNormalFinalViaStream` 的两个「活着但不可信」分支、推送成功之后调用，从不用于 terminal-fallback 分支（final 帧可能已落地）。迟到 ACK 确认在 settle 后也刷新 `lastPreviewText`（评审发现的正文丢失窗口）。
+- `resolveStreamFallbackText` 余量为空且非错误时只返回 `FINAL_COMPLETION_MARKER`。
+
+双版本兼容的规则：**不探测版本、不分叉**，每个 openclaw import 必须在两条线的导出表里都存在，`src/openclaw-sdk-imports.test.ts` 维护允许列表；新增子路径前用 `npm view openclaw@<version> exports` 两边核对。`infra-runtime` 仅为 `resolvePreferredOpenClawTmpDir` 保留（8.x 的 focused 家在 file-access-runtime，7.1-2 没有）。8.2 的 `file-access-runtime` 不带 .d.ts，compat 脚本用 shim；`agents.list` 在 8.x 是非枚举只读投影，名册探测用属性访问而不是 structuredClone。8.x 上 `runEmbeddedAgent` 直接调用需要网关准备的执行上下文，探针改用 `openclaw plugins inspect wecom --runtime --json`（临时 OPENCLAW_STATE_DIR）。
+
+提速两项：死窗后带正文的推送用 `PUSH_BODY_MIN_INTERVAL_MS`（20 s）自己的节奏，仍在 `longTaskStatusGateAt()` 之后；死窗上新到的 block 直接唤醒推送车道。气泡帧 `WECOM_STREAM_PREVIEW_MAX_CHARS` 与冻结阈值 `BLOCK_PREVIEW_MAX_CHARS` 都是 5000（final 帧早已 5000/15360）；推送分片 `WECOM_STREAM_MAX_CHARS` 仍 3500，因为主动推送 15 KB 上限没有现网证据。**没有做滑动尾巴**：窗口一死气泡就是永久记录，滑过去的正文要么整段重发要么按前缀书签丢失。
+
+已知但未改：正文预览 5 分钟冻结后不再向企微发帧，死窗只能由步骤帧、工具阶段 90 秒心跳或 8 分钟状态帧撞出来；纯正文、无工具的回合会等到 8 分钟。可选修法是冻结后每 20 秒发一帧同内容探测帧。
 
 ### 2.-3 媒体指令导致的整份重复与措辞阈值（2.7.260-25）
 
@@ -205,7 +222,7 @@ lastDeliveredBodySourceText / previewFrozenDeliveredSourceText 全部失效，�
 这些不是本轮声称已解决的内容：
 
 1. 群聊中不同成员接管任务时，旧回合提示仍偏向“合并思考”，文案没有完全区分跨成员场景。
-2. 流仍健康但预览已冻结时，冻结之后的新正文可能要等到 final 才显示；后台推送目前只在流退休或 ACK 不可信时接管。
+2. 流仍健康但预览已冻结（5 分钟或 5000 字）时，冻结之后的新正文要等到 final 才显示，这是刻意的：气泡活着时 final 会整帧替换它，提前推送余量只会在 final 到达时重复。死窗后的余量自 2.7.260-26 起按 20 秒推送；但冻结后正文块不再发帧，死窗要靠步骤帧 / 90 秒工具心跳 / 8 分钟状态帧撞出来（见 2.-4）。
 3. 回合前 120 秒内流就失效且此前没有成功预览时，后台通知存在窄场景被取消的可能。
 4. ambiguous 主动推送重试仍有有限重复风险，当前上限为 3 次；这是“宁可有限重复，不静默丢答案”的明确取舍。
 5. 真实 Windows、企业微信网关和客户端仍未全面验收；网关模拟器不能代替真机验证。模板卡片的**渲染与点选后就地更新已由使用者在真机确认通过**（2.7.260-21）；2.7.260-22 修的回调文本仍需真机复验——点选后应看到 agent 基于实际选择的回复，而不是「已收到 … 事件」。测试步骤见第 9 节。Windows 侧还缺 CLI 子进程 spawn、插件私有 node_modules 里 @wecom/cli-win32-x64 的 require.resolve、WECOM_CLI_CONFIG_DIR 的 0700 可写性；官方没有 win32-arm64 平台包，目标机若是 ARM 则整条 CLI 链路不可用。
@@ -215,6 +232,8 @@ lastDeliveredBodySourceText / previewFrozenDeliveredSourceText 全部失效，�
 5.5 2.7.260-25 需真机复验两点：①带附件的长报告只出现一次、且不含 `MEDIA:` 本地路径；
     ②8 分钟以内不再出现「长任务处理中，请勿打断」。若仍见到后者，需要 `[wecom-preview] expired-notice … elapsedMs=` 日志行——
     现场描述的「2 分钟」版本本轮未能复现，且静态可证下一格恒 ≥ 开始 + 5 分钟。
+5.6 2.7.260-26 需真机复验：①长任务答案末尾不再有时钟；②答案改走推送时上方气泡应已关闭且不带时钟（日志 `stream-final-skip-unreliable` 新增 `ackUntrusted` / `windowDead` 字段区分两种收尾）；③气泡帧最大从约 10 KB 变为最多 15 KB、每 1.5 秒一帧，看长答案流式是否顺畅；④死窗后长任务后段消息条数会变多（每 20 秒最多一条正文推送）。
+5.7 8.x 行为差异（未改代码）：零可见输出的回合，8.x 核心自己投递英文兜底「No reply was generated for this message…」并报告 `noVisibleReplyFallbackDelivered`，7.x 由插件发中文提示；插件对两种形态都处理正确，措辞不同。已安装实例升到 8.x 必须手动补 `plugins.entries.wecom.hooks.allowConversationAccess=true`（向导只在安装时写）。
 5.1 仓库 package-lock.json 为 0 字节，npm audit --omit=dev 返回 ENOLOCK。生成 lockfile 会改变安装解析，属于会影响使用者的动作，需用户点头，至今未生成。
 5.3 补发改走 wecom-cli 已评估并**否掉**：CLI 的 chat_id 必须取自本次 sessions list（技能明文禁止历史 chat_id），
     只能发给授权人与最近 10 个会话（长任务的目标会话可能已掉出窗口），子进程时延 300~500ms 且按 botId 全局串行，
@@ -245,9 +264,9 @@ src/transport/bot-ws/sdk-adapter.ts
 
 ### 关键时序常量
 
-- WeCom stream frame 预算：15360 bytes；final 单段上限约 5000 字符。
-- 流式过程预览冻结阈值：约 5 分钟或 3000 字符。
-- 长任务状态首格：回合开始后 8 分钟；正常状态网格每 60 秒。
+- WeCom stream frame 预算：15360 bytes；气泡帧与 final 单段上限均为 5000 字符；主动推送分片 3500 字符。
+- 流式过程预览冻结阈值：约 5 分钟或 5000 字符（B2 门禁字面匹配该值）。
+- 长任务状态首格：回合开始后 8 分钟；正常状态网格每 60 秒；死窗后带正文的推送自己按 20 秒节奏，不缀时钟。
 - 状态措辞由时钟决定，不由调用点决定：< 8 分钟一律「【处理中，已用时X】」，≥ 8 分钟才是「【长任务处理中，请勿打断，已用时X】」。死流会把推送首格拉到 5 分钟，但措辞不跟着提前。
 - 工具阶段沉默心跳：90 秒；无新内容的后台状态推送静默 5 分钟。
 - 本地单次 WeCom 发送超时：8 秒；pending ACK 宽限约 5.5 秒。
@@ -265,46 +284,47 @@ src/transport/bot-ws/sdk-adapter.ts
 ### 已完成
 
 ~~~text
-OpenClaw: 2026.7.1-2
-Vitest: 58 / 59 files passed（唯一失败见下）
-差分用例 media-directive-alignment: 47 形状 × 3 流式模式 = 141 次跑动，0 缺陷
-npm run build: passed
-npm run verify-dist: passed
+OpenClaw: 2026.7.1-2 与 2026.8.2（npm run compat:check，两条线各一遍）
+Vitest: 63 / 63 files，811 / 811 tests（两条线数字相同）
+typecheck: 两条线 PASS（8.2 由 compat 脚本为 file-access-runtime 补类型 shim，8.2 该子路径不带 .d.ts）
+npm run build / verify-dist: passed
 B1: READY
-B2: READY（buildReady / focusedTestReady / b1Ready 全 true）
-B3: READY（buildReady / focusedTestReady / b2Ready 全 true）
+B2: READY（BLOCK_PREVIEW_MAX_CHARS 字面量已同步为 5_000）
+B3: READY
+8.2 plugins inspect wecom --runtime --json: status loaded（channel、2 tools、service、2 http routes）
+真实 mutateConfigFile 名册写入 e2e：7.1-2 list、8.2 entries / list / 空配置 均正确
 ~~~
 
-唯一失败：gateway-sim 的 `carries real narration` —— 仓库里最慢的用例，52 秒对 30 秒上限，
-`--retry=2` 三次全撞墙。A/B 对照（同一台机器、同一时段）：
-**未改动基线 28.3s / 28.9s，改动后 19.0s / 37.0s** —— 同一份代码两次相差 18 秒，
-属机器负载（当时 8 核 load 35–48，来自本仓库之外的工作负载），非回归。
-`--no-file-parallelism` 串行全量在该负载下 40 分钟跑不完，已放弃该模式。
-**不要为掩盖负载抖动修改生产 timeout 或用例断言。**
+本轮新增的复现用例（改这些路径前先跑）：
+- long-task-progress「死窗后的收尾：答案正文随推送出门时不再押着「长任务处理中」的状态尾巴」
+- gateway-sim「closes an ACK-untrusted bubble without its clock once the answer went out as a push」
+- gateway-sim「finishes an externally answered bubble without the clock」
+- gateway-sim「pushes new body text every 20 seconds once the window is dead while steps keep the minute grid」
+- gateway-sim「keeps streaming a long answer into the bubble up to the frame budget」
+- media.test「reads a local file that sits under an approved root」/「refuses a local file outside every approved root」
+- dynamic-agent.roster.test 全部；openclaw-sdk-imports.test
 
-差分用例的反向证据（每次改 stripMediaDirectives / mergeReplyText 都应复跑）：
-关掉 stripMediaDirectives → 78 处缺陷；围栏状态机退回布尔量 → 24 处；
-looksLikeMediaTarget 恒真（模拟过度剥离）→ 12 处。
+负载提示不变：机器忙时 fake-timer 套件会撞 30 秒墙钟（本轮 gateway-sim「carries real narration」并发时 68–110 秒、单跑 0.7 秒）。**不要为掩盖负载抖动修改生产 timeout 或用例断言。**
+差分用例 media-directive-alignment 的反向证据（改 stripMediaDirectives / mergeReplyText 时复跑）：关掉 stripMediaDirectives → 78 处缺陷；围栏状态机退回布尔量 → 24 处；looksLikeMediaTarget 恒真 → 12 处（2.7.260-25 记录，本轮未动这两处）。
 
 ### 包指纹
 
 ~~~text
-yanhaidao-wecom-2.7.260-25.tgz
-size:        602,140 bytes
-unpacked:    2,297,705 bytes
-files:       252
-npm shasum:  fcce883f9eb2b614c45569c87198dcfa7babc4e5
-SHA-256:     3f2f0f7970c24f428422555c0623e5a6f24fcd41ca6f0ea5bf96dff48fdcca1a
+yanhaidao-wecom-2.7.260-26.tgz
+size:        611,374 bytes
+unpacked:    2,320,890 bytes
+files:       254
+npm shasum:  ae5463b86bdf6d8c7fd84af5d20806ed768e2bbf
+SHA-256:     b302822b28a51fb2285df1863363a9f6a4d233ba85cdb7c7c80cec4bdf78bb74
 ~~~
 
-重复打包字节一致；包内无测试文件、无 node_modules、无凭据文件。
-
-重复打包 SHA-256 一致；隔离 npm install --omit=dev 后 @wecom/cli-linux-x64 可解析，二进制返回 wecom-cli 1.2.0。
-包内含 dist/src/capability/card/，无测试文件、node_modules、credentials.enc 或 .encryption_key。
+重复打包字节一致；包内无测试文件、无 node_modules、无凭据文件；含 dist/src/shared/byte-chunking.js 与 send-pacing.js。
+（隔离 npm install --omit=dev 后 @wecom/cli-linux-x64 可解析、二进制返回 wecom-cli 1.2.0，为 2.7.260-25 时的验证，本轮依赖未变、未重做。）
 
 全量命令：
 
 ~~~bash
+npm run compat:check            # 2026.7.1-2 + 最新稳定版：typecheck + 全量 Vitest 各一遍
 npx vitest run --pool=threads --maxWorkers=1 --minWorkers=1
 npx tsc --noEmit
 npm run build
@@ -335,6 +355,10 @@ npx vitest run \
 - does not claim a visible preview is complete when OpenClaw defers the final
 - keeps long tasks alive when timeout-frozen status updates expire before final delivery
 - delivers every long-final chunk after a task runs longer than ten minutes
+- 死窗后的收尾：答案正文随推送出门时不再押着「长任务处理中」的状态尾巴
+- closes an ACK-untrusted bubble without its clock once the answer went out as a push
+- pushes new body text every 20 seconds once the window is dead while steps keep the minute grid
+- keeps streaming a long answer into the bubble up to the frame budget
 
 测试机负载较高时，fake-timer 套件可能超过默认墙钟预算；不要为了掩盖环境抖动修改生产 timeout。先隔离单 worker 复跑并记录断言类型。
 
@@ -348,9 +372,10 @@ npx vitest run \
 - 媒体阈值：图片/视频 10MB、语音 2MB、文件 20MB，与官方 const.ts 完全一致。
 - 多账号 fail-closed：resolveWecomAccount 对未知账号 ID 返回 createMissingResolvedAccount，resolveCliBot 随即因缺 botId/secret 抛错，不会回退到第一个账号。
 - MCP → CLI 兜底路由：msg→message、schedule→calendar、doc→doc/sheet/smartsheet/smartpage/media 正确；mail 与 CLI 顶层命令同名，不需要别名。模型可控的 category 走不通 auth init（被 assertSafeArgv 拦下）。
-- file-type 依赖：官方用它做魔术字节嗅探，其 openclaw-compat.ts 明写这是 SDK 缺 detectMime 时的**回退**。本 fork 锁定 OpenClaw 2026.7.1-2，直接用 SDK 的 detectMime，能力等价，不引入该依赖。
-- openclaw-compat.ts：官方用于跨 SDK 版本探测导出，我们锁定单一版本，不需要移植。
+- file-type 依赖：官方用它做魔术字节嗅探，其 openclaw-compat.ts 明写这是 SDK 缺 detectMime 时的**回退**。本 fork 直接用 SDK 的 detectMime（两条线都导出），能力等价，不引入该依赖。
+- openclaw-compat.ts：官方用于跨 SDK 版本探测导出。本 fork 的做法不同：只用两条线都存在的子路径，静态守卫加 compat 矩阵，不做运行时探测。
 - 上游同步度：官方 git HEAD 之后没有我们未同步的功能提交。
+- 2026-09-02 对账 YanHaidao/wecom（origin）自分叉点 b4e297a 起的 25 个提交：Bot WS 车道没有必须补的修复；已移植 0d85ccb（Agent 车道字节切分）与 b28611d（1100ms 分片节流）；markdown.format 系列是 Agent 车道新功能、Bot WS 不需要；上游对 2026.8.x 零适配。
 
 ## 9. 模板卡片真机测试步骤
 
@@ -381,13 +406,13 @@ npx vitest run \
 ### 现在不要做
 
 - 不要重置或覆盖当前工作区改动。
-- 不要升级或切换 OpenClaw 版本。
-- 不要打 tag 或推送远端（本轮未获授权）。
+- 不要把 devDependency 从 2026.7.1-2 挪走；新版 OpenClaw 用 `npm run compat:check <版本>` 验证，不换基线。
+- 未获授权不要打 tag 或推送远端。
 
 ### 下一版发布时（需要用户明确批准）
 
 1. 更新 package.json 与 src/version.ts（version.test.ts 会对账）。
-2. 全量 typecheck / build / verify-dist / Vitest / B1 / B2 / B3 / diff check。
+2. `npm run compat:check`（两条线 typecheck + 全量 Vitest）/ build / verify-dist / B1 / B2 / B3 / diff check。
 3. 打包并记录指纹，重复打包校验 SHA-256 一致。
 4. 创建 released/<完整版本号> tag，只推 fork（git@github.com:liny90626/wecom.git），绝不推 origin。
 

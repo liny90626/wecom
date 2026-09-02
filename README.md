@@ -23,11 +23,19 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-当前维护版本为 `v2.7.260-23`，发布标签 `released/2.7.260-23`。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留。
+当前维护版本为 `v2.7.260-26`，发布标签 `released/2.7.260-26`。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留。
 
 本轮收口 `wecom_mcp` 的 `851003 no authority`。根因是**结构性**的：`aibot_get_mcp_config` 签发的是 `/mcp/robot-doc`（「企微机器人文档 MCP」，**只有机器人自身作用域**），而后台「查看使用方式」的 apikey 签发的是 `/mcp/v2/bot/<biz_type>`（「动态文档 MCP」，**内嵌授权真人用户**）——不是授权没生效，是产品定位不同。因此新增 **`bot.mcpServers`** 配置项：按 `biz_type` 直接配后台地址，八个能力全部可用。同时严格对齐官方 MCP 实现（身份头、官方 UA、官方错误码分工、文档授权引导卡片），`tools/list` 按实测体积限幅，并与官方插件仓库同步了事件白名单、`enter_check_update` 版本握手与 `auth_change_event` 清缓存。完整说明见 [`changelog/v2.7.260-17.md`](./changelog/v2.7.260-17.md)。
 
-开发与后续自测统一固定为 OpenClaw `2026.7.1-2`，不再运行其他 OpenClaw 版本或双版本矩阵。`peerDependencies` 继续保留既有 `^2026.6.11` 安装兼容范围，只表示安装兼容声明。
+兼容目标是 OpenClaw `2026.7.1-2` 与**最新稳定版**（`2.7.260-26` 发版时为 `2026.8.2`），一份构建同时运行在两条线上，不探测版本、不分叉；`devDependencies` 仍钉 `2026.7.1-2`，`npm run compat:check` 会对两条线各跑一遍 typecheck 与全量测试。2026.6.x 不再维护，`peerDependencies` 的 `^2026.6.11` 只表示安装兼容声明。
+
+**在 OpenClaw 2026.8.x 上运行必须放行会话钩子**：8.x 会拦截非内置插件的 `before_prompt_build` 钩子，而本插件的媒体、模板卡片与 `wecom-cli` 使用指引正是通过它注入的。安装向导已自动写入该配置；已安装的实例升级到 8.x 时请在 `openclaw.json` 补上：
+
+```json
+"plugins": { "entries": { "wecom": { "hooks": { "allowConversationAccess": true } } } }
+```
+
+正文首次出现的快慢主要取决于 OpenClaw 的 block 切分：默认攒够 800 字才把第一个 block 交给渠道。想让正文更早出现，可在 `openclaw.json` 调低 `agents.defaults.blockStreamingChunk.minChars`（例如 200，配合 `breakPreference: "newline"`），这是纯配置，与插件版本无关。
 
 本候选同时固定 `@wecom/cli@1.2.0` 为插件私有依赖。插件通过专用 `wecom-cli` tool 按当前会话账号注入隔离配置目录，不使用 PATH 上的全局命令，也不要求用户手动执行 `auth init`。
 
@@ -54,6 +62,7 @@ node scripts/patch-wecom-long-message.mjs --check
 node scripts/patch-wecom-b3-merge-thinking.mjs --check
 npm run build
 npx vitest run
+npm run compat:check   # 对 2026.7.1-2 与最新稳定版各跑一遍 typecheck + 全量测试（首次会下载两个 OpenClaw 到 .openclaw-compat/）
 ```
 
 如只改 README 等文档文件，可使用 `git diff --check` 做格式自检。
@@ -307,6 +316,16 @@ npx vitest run
 ## 📋 本 fork 近期更新
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
+
+#### 📌 v2.7.260-26（2026-09-02，LinKy fork）
+
+四件事：**长任务结尾的假状态**、**同时运行在 OpenClaw 2026.7.1-2 与 2026.8.2**、**Bot WS 两处提速**、评审与上游对账收口。全部先复现再修。
+
+- **[修复] 答案末尾挂着「【长任务处理中，请勿打断，已用时12m24s】」**：两条独立机制。① 窗口死后答案正文只能以 block 到达推送车道，而推送车道给每条带新内容的推送缀上时钟，final 随后只能补一句「回复已完成」，时钟便永远留在答案末尾——现在带正文的推送不再缀钟，只带步骤或纯时钟的推送照旧。② 回合中一次 ACK 丢失就把流标为不可信，final 改走推送，冻结气泡却没人再发 finish 帧，用户看到一个仍在转圈、末尾是时钟的气泡压着「回复完毕」——现在答案推送落地后补一帧去掉时钟的 finish。所有收尾帧都剥掉时钟；正文全部送达时收尾只发「（回复完毕）」。
+- **[兼容] OpenClaw 2026.8.x**：8.1 删除了 `openclaw/plugin-sdk` 根入口与约 55 个子路径，插件在 8.x 上无法加载；`loadConfig` 删除、`assertLocalMediaAllowed` 私有化、`useAccessGroups` 删除、`agents.entries` 成为名册正典。全部改成两条线共有的接口，一份构建同时运行；新增 `npm run compat:check` 与 import 面守卫测试。8.x 上须放行 `plugins.entries.wecom.hooks.allowConversationAccess=true`（向导已自动写入，见上文）。
+- **[提速] Bot WS 车道**：窗口死后新到的正文按 20 秒推送，不再等 60 秒时钟网格；气泡跟随答案到 5000 字再冻结（原 3000 字，一帧本就能装 5000 字，final 早已如此）。
+- **[移植] Agent API 车道**：上游字节切分（message/send 上限 2048 **字节**，纯中文按字符切会被静默截断）与 1100ms 分片节流。不影响 Bot WS 车道。
+- **[验证]**：`npm run compat:check`：2026.7.1-2 与 2026.8.2 各 **63 文件 / 811 用例全绿**、typecheck 全过；B1/B2/B3 READY；8.2 的 `plugins inspect wecom --runtime` 报 `status: loaded`。详见 `changelog/v2.7.260-26.md`。
 
 #### 📌 v2.7.260-25（2026-08-29，LinKy fork）
 

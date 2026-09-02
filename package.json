@@ -14,6 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "verify-dist": "node -e \"const fs=require('fs');const f='./dist/index.js';if(!fs.existsSync(f)){console.error('Missing compiled runtime output:',f);process.exit(1)}\"",
+    "compat:check": "node scripts/check-openclaw-compat.mjs",
     "prepack": "node -e \"require('fs').rmSync('./dist',{recursive:true,force:true})\" && npm run build && npm run verify-dist"
   },
   "license": "ISC",

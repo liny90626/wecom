@@ -1,11 +1,9 @@
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 
-import {
-  type ChannelAccountSnapshot,
-  type ChannelGatewayContext,
-  type OpenClawConfig,
-} from "openclaw/plugin-sdk";
+import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/core";
+import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import { createRuntimeEnv } from "./test-utils/runtime-env.js";

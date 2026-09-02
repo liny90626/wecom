@@ -1,7 +1,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 
 import { resolveWecomMediaMaxBytes, shouldRejectWecomDefaultRoute } from "../../config/index.js";
 import { ensureDynamicAgentListed, generateAgentId, shouldUseDynamicAgent } from "../../dynamic-agent.js";

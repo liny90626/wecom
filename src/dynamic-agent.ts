@@ -5,7 +5,7 @@
  * 参考: openclaw-plugin-wecom/dynamic-agent.js
  */
 
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 
 export interface DynamicAgentConfig {
     enabled: boolean;
@@ -98,8 +98,21 @@ const ensuredDynamicAgentIds = new Set<string>();
  */
 let ensureDynamicAgentWriteQueue: Promise<void> = Promise.resolve();
 
+/** Normalized agent ids on the roster, whichever shape the config uses. */
+function listRosterAgentIds(cfg: unknown): Set<string> {
+    const agents = (cfg as { agents?: Record<string, unknown> } | undefined)?.agents;
+    const entries = agents?.entries;
+    const ids =
+        entries && typeof entries === "object" && !Array.isArray(entries)
+            ? Object.keys(entries)
+            : Array.isArray(agents?.list)
+              ? (agents.list as Array<{ id?: unknown }>).map((entry) => String(entry?.id ?? ""))
+              : [];
+    return new Set(ids.map((id) => id.trim().toLowerCase()).filter(Boolean));
+}
+
 /**
- * 将 Agent ID 插入 agents.list（如果不存在）
+ * 将 Agent ID 插入 agents.entries / agents.list（如果不存在）
  */
 function upsertAgentIdOnlyEntry(cfg: Record<string, unknown>, agentId: string): boolean {
     if (!cfg.agents || typeof cfg.agents !== "object") {
@@ -107,6 +120,26 @@ function upsertAgentIdOnlyEntry(cfg: Record<string, unknown>, agentId: string): 
     }
 
     const agentsObj = cfg.agents as Record<string, unknown>;
+    // OpenClaw 2026.8.x keeps the roster in `agents.entries` (keyed by id) and
+    // only projects `agents.list` from it at runtime; a config authored that
+    // way must be extended in `entries`, or the write drops the roster. Same
+    // precedence as the core's own reader: `entries` wins whenever present.
+    if (agentsObj.entries && typeof agentsObj.entries === "object" && !Array.isArray(agentsObj.entries)) {
+        const entries = agentsObj.entries as Record<string, unknown>;
+        const existingIds = new Set(Object.keys(entries).map((id) => id.trim().toLowerCase()));
+        let changed = false;
+        if (existingIds.size === 0) {
+            entries.main = {};
+            existingIds.add("main");
+            changed = true;
+        }
+        if (!existingIds.has(agentId.toLowerCase())) {
+            entries[agentId] = {};
+            changed = true;
+        }
+        return changed;
+    }
+
     const currentList: Array<{ id: string }> = Array.isArray(agentsObj.list) ? agentsObj.list as Array<{ id: string }> : [];
     const existingIds = new Set(
         currentList
@@ -151,19 +184,29 @@ export async function ensureDynamicAgentListed(agentId: string, runtime: any): P
     if (!normalizedId) return;
     if (ensuredDynamicAgentIds.has(normalizedId)) return;
 
+    // `loadConfig` / `writeConfigFile` left the plugin runtime in 2026.8.x;
+    // `current()` + `mutateConfigFile()` are on 2026.7.1-2 as well. The old
+    // guard silently skipped the roster write on 8.x, and 8.x refuses to run an
+    // agent that is not on the roster ("run workspace resolution requires an
+    // explicit roster"), so this write is what keeps dynamic agents usable.
     const configRuntime = runtime?.config;
-    if (!configRuntime?.loadConfig || !configRuntime?.writeConfigFile) return;
+    if (typeof configRuntime?.mutateConfigFile !== "function") return;
 
     ensureDynamicAgentWriteQueue = ensureDynamicAgentWriteQueue
         .then(async () => {
             if (ensuredDynamicAgentIds.has(normalizedId)) return;
 
-            const latestConfig = configRuntime.loadConfig!();
-            if (!latestConfig || typeof latestConfig !== "object") return;
-
-            const changed = upsertAgentIdOnlyEntry(latestConfig as Record<string, unknown>, normalizedId);
-            if (changed) {
-                await configRuntime.writeConfigFile!(latestConfig as unknown);
+            // Probe the live snapshot first: an agent that is already listed
+            // must not cost a config write and the reload that follows it. Read
+            // through property access, not a clone — on 2026.8.x `agents.list`
+            // is a non-enumerable runtime projection that a clone would drop.
+            if (!listRosterAgentIds(configRuntime.current()).has(normalizedId)) {
+                await configRuntime.mutateConfigFile({
+                    afterWrite: { mode: "auto" },
+                    mutate(draft: Record<string, unknown>) {
+                        upsertAgentIdOnlyEntry(draft, normalizedId);
+                    },
+                });
             }
 
             ensuredDynamicAgentIds.add(normalizedId);

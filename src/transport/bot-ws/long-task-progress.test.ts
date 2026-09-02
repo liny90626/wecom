@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 import { __resetBotWsReplyTestState, createBotWsReplyHandle } from "./reply.js";
@@ -6,6 +9,8 @@ import { asWsClient, WecomGatewaySim } from "../../test-utils/wecom-gateway-sim.
 import type { ReplyHandle } from "../../types/index.js";
 
 vi.setConfig({ testTimeout: 30_000 });
+
+const LONG_TASK_STATUS_PREFIX = "【长任务处理中，请勿打断，已用时";
 
 type Frame = Parameters<typeof createBotWsReplyHandle>[0]["frame"];
 
@@ -45,10 +50,13 @@ describe("长任务过程可见性（真实 orchestrator + 网关模拟）", () 
   beforeEach(async () => {
     vi.useFakeTimers();
     __resetBotWsReplyTestState();
-    vi.stubEnv("OPENCLAW_STATE_DIR", "/tmp/wecom-process-record-state");
+    vi.stubEnv(
+      "OPENCLAW_STATE_DIR",
+      mkdtempSync(path.join(os.tmpdir(), "wecom-process-record-state-")),
+    );
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
-      config: { loadConfig: () => ({ channels: { wecom: {} } }) },
+      config: { current: () => ({ channels: { wecom: {} } }) },
     } as never);
   });
 
@@ -335,6 +343,45 @@ describe("长任务过程可见性（真实 orchestrator + 网关模拟）", () 
     // ④ 答案以推送到达，且不再跟一条「过程记录」。
     expect(pushes.at(-1)).toContain(ANSWER);
     expect(joined).not.toContain("过程记录");
+  });
+
+  it("死窗后的收尾：答案正文随推送出门时不再押着「长任务处理中」的状态尾巴", async () => {
+    // 现场：任务实际已经结束，聊天记录里最后一段正文却以
+    // 「【长任务处理中，请勿打断，已用时12m24s】」收尾。窗口一死，答案正文只能以
+    // block 到达推送车道，而推送车道给每条带新内容的推送都缀上时钟——正文是答案
+    // 本身而不是过程；final 紧随其后只能再补一句「回复已完成」，那行状态就永远
+    // 留在了答案的末尾。12m24s 这种非整分的读数正是「死亡时刻 + N×60s」网格的
+    // 指纹，而不是 8m00s 起算的气泡网格。
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 6 * 60_000 });
+    const handle = startTurn(sim);
+    await tick(100);
+
+    await runTurn(handle, async ({ onItemEvent, deliverBlock, deliverFinal }) => {
+      // 9 步 × 45 秒：第 9 步在 6m45s 撞上 846608，推送车道从这一刻接手。
+      for (let i = 0; i < 9; i += 1) {
+        await tick(45_000);
+        await onItemEvent({
+          itemId: `commentary-ending-${i + 1}`,
+          kind: "preamble",
+          progressText: `第 ${i + 1} 步：核对第 ${i + 1} 项配置`,
+        });
+      }
+      // 模型静默工作到 12m30s，答案正文以 block 到达；下一格状态网格
+      // （死亡时刻 + N×60s = 12m45s）落在 final 之前。
+      await tick(5 * 60_000 + 45_000);
+      await deliverBlock({ text: ANSWER });
+      await tick(30_000);
+      await deliverFinal({ text: ANSWER });
+    });
+
+    const pushes = pushContents(sim);
+    const answerPushes = pushes.filter((push) => push.includes(ANSWER));
+    // 答案恰好出现一次（不因去掉状态行而重复），且不带任何状态尾巴。
+    expect(answerPushes).toHaveLength(1);
+    expect(answerPushes[0]).not.toContain(LONG_TASK_STATUS_PREFIX);
+    expect(answerPushes[0]).not.toContain("【处理中，已用时");
+    // 收尾之后，聊天记录的最后一条不是一句状态。
+    expect(pushes.at(-1)).not.toContain(LONG_TASK_STATUS_PREFIX);
   });
 
   it("正文帧把日志挤出气泡后，这些步骤仍会随推送落到聊天记录", async () => {

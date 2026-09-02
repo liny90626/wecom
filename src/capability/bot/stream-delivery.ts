@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 
 import { wecomFetch } from "../../http.js";
 import { LIMITS, type StreamStore } from "../../monitor/state.js";

@@ -18,7 +18,8 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("../../runtime.js", () => ({
-  getWecomRuntime: () => ({ config: { loadConfig: () => state.cfg } }),
+  getWecomRuntime: () => ({ config: { current: () => state.cfg } }),
+  getWecomRuntimeConfig: () => state.cfg,
   getBotWsPushHandle: () => ({
     isConnected: () => state.connected,
     replyCommand: state.replyCommand,

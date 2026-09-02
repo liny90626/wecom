@@ -1,4 +1,4 @@
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 
 const DEFAULT_INBOUND_SESSION_METADATA_TIMEOUT_MS = 60_000;
 

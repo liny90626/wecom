@@ -7,9 +7,9 @@ import {
   type EventMessage,
   type WSClient,
 } from "@wecom/aibot-node-sdk";
-import { formatErrorMessage } from "openclaw/plugin-sdk/infra-runtime";
+import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { resolveWecomMediaMaxBytes, resolveWecomMergedMediaLocalRoots } from "../../config/index.js";
-import { getBotWsPushHandle, getWecomRuntime } from "../../runtime.js";
+import { getBotWsPushHandle, getWecomRuntimeConfig } from "../../runtime.js";
 import { isRetryableReplySessionAdmissionError } from "../../shared/reply-errors.js";
 import type { ReplyHandle, ReplyPayload } from "../../types/index.js";
 import {
@@ -990,6 +990,20 @@ function formatElapsedStatus(elapsedMs: number): string {
   const prefix =
     elapsedMs >= LONG_TASK_STATUS_AFTER_MS ? LONG_TASK_STATUS_PREFIX : RUN_ALIVE_STATUS_PREFIX;
   return `${prefix}${formatElapsedDuration(elapsedMs)}】`;
+}
+
+/**
+ * Every lane composes the clock as the LAST line of its frame. A frame that
+ * finishes the bubble after the turn ended must not keep it: the field saw an
+ * answer sitting under a permanent "长任务处理中，请勿打断". (The two prefixes
+ * contain no regex metacharacters.)
+ */
+const ELAPSED_STATUS_TAIL_RE = new RegExp(
+  `\\n*(?:${LONG_TASK_STATUS_PREFIX}|${RUN_ALIVE_STATUS_PREFIX})[^】]*】\\s*$`,
+);
+
+function stripElapsedStatusLine(text: string): string {
+  return text.replace(ELAPSED_STATUS_TAIL_RE, "").trimEnd();
 }
 
 function appendFinalCompletionMarker(text: string): string {
@@ -2520,11 +2534,14 @@ export function createBotWsReplyHandle(params: {
       } catch (fallbackError) {
         return settleActivePushFailure(fallbackError);
       }
+      closeUntrustedBubbleAfterPush();
       return true;
     }
     if (streamDeliveryUntrusted()) {
+      // Same log key as the dead-window branch above; the flags tell a lost
+      // ACK apart from a closed window, two very different endings in the field.
       console.warn(
-        `[wecom-b3] stream-final-skip-unreliable account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId}`,
+        `[wecom-b3] stream-final-skip-unreliable account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${finalStreamId} ackUntrusted=${String(streamAckUnreliable)} windowDead=${String(streamUpdateUnreliable)}`,
       );
       try {
         await sendMarkdownChunksViaActivePush(fallbackText, {
@@ -2536,6 +2553,7 @@ export function createBotWsReplyHandle(params: {
       } catch (fallbackError) {
         return settleActivePushFailure(fallbackError);
       }
+      closeUntrustedBubbleAfterPush();
       return true;
     }
 
@@ -2667,14 +2685,55 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     try {
+      // The last painted frame may have been a status frame; the turn is over,
+      // so the bubble closes on that frame's content without its clock.
       await withHandleSendTimeout(
-        params.client.replyStream(params.frame, finalStreamId, content, true),
+        params.client.replyStream(
+          params.frame,
+          finalStreamId,
+          stripElapsedStatusLine(content),
+          true,
+        ),
         "source stream final",
       );
       params.onDeliver?.();
     } catch (error) {
       params.onFail?.(error);
     }
+  };
+
+  /**
+   * The answer just went out as a push while the bubble was still writable but
+   * no longer trusted (one lost ACK, a slot that never cleared). Nothing else
+   * would ever finish that bubble, so it stayed OPEN on its last frame — clock
+   * included — above an answer that said 回复完毕. Best effort: finish it on
+   * that same frame minus the clock. A refusal is logged, not retried: the
+   * answer is already with the user and this frame is all this lane still owes.
+   * Never used after a final frame was attempted on the stream — it may have
+   * landed, and repainting would overwrite the answer with its own preview.
+   */
+  const closeUntrustedBubbleAfterPush = (): void => {
+    const content = stripElapsedStatusLine(lastPreviewText);
+    if (
+      streamId === undefined ||
+      isEvent ||
+      supersededByNewInbound ||
+      streamUpdateUnreliable ||
+      !content ||
+      // An expired callback claim never touches the old stream again.
+      !refreshCallbackStreamOwnership()
+    ) {
+      return;
+    }
+    const bubbleStreamId = streamId;
+    void withHandleSendTimeout(
+      params.client.replyStream(params.frame, bubbleStreamId, content, true),
+      "untrusted bubble close",
+    ).catch((error) => {
+      console.info(
+        `[wecom-b3] untrusted-bubble-close-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${bubbleStreamId} error=${formatFallbackError(error)}`,
+      );
+    });
   };
 
   const renderPreviewFrame = (
@@ -2889,11 +2948,18 @@ export function createBotWsReplyHandle(params: {
     // does not hand the slot back and cannot make two lanes race for it.
     markLongTaskStatusPainted(now);
     const elapsedMs = now - handleStartedAt;
+    // Body text is the answer being written, not process. Closing it with the
+    // clock told the user "still working" under the very text that was the
+    // result, and when the final followed seconds later — able to add only
+    // "回复已完成" — that line stood at the end of the answer for good (the
+    // field's 12m24s: a slot on the dead-window grid, not the 8-minute one).
+    // The body proves the turn alive by itself; the clock stays on pushes that
+    // carry only process, or nothing at all (禁改 25/34 untouched).
     const noticeText = [
       undeliveredProgress,
       undeliveredTransientProgress,
       undeliveredFastText,
-      formatElapsedStatus(elapsedMs),
+      undeliveredProgress ? "" : formatElapsedStatus(elapsedMs),
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -3138,6 +3204,11 @@ export function createBotWsReplyHandle(params: {
                 visibleReplyStarted = true;
               }
               recordDeliveredBodySource(options);
+              // The bubble now shows this frame, and the push remainder is
+              // computed after it — so the finish frame that may follow the
+              // push must re-send this frame, not an older one, or the text
+              // between the two would be in neither the bubble nor the push.
+              lastPreviewText = previewText;
             } else {
               recordDeliveredPreview(previewText, now, options);
             }
@@ -4002,7 +4073,7 @@ export function createBotWsReplyHandle(params: {
       let currentFinalUsesPeerDedup =
         info.kind === "final" && !supersededByNewInbound && !forceActivePushRequired();
       if (info.kind === "final" && mediaUrls.length > 0) {
-        const cfg = getWecomRuntime().config.loadConfig();
+        const cfg = getWecomRuntimeConfig();
         const mediaLocalRoots = resolveWecomMergedMediaLocalRoots({ cfg });
         const mediaMaxBytes = resolveWecomMediaMaxBytes(cfg, params.accountId);
         currentFinalDeliveryKey = buildFinalDeliveryKey({

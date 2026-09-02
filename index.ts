@@ -1,8 +1,8 @@
 /**
  * Author: YanHaidao
  */
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk/core";
 import { registerWecomCalendarTools } from "./src/capability/calendar/tool.js";
 import {
   CLI_TOOL_NAME,

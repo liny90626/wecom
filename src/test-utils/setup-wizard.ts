@@ -1,4 +1,6 @@
-import type { ChannelPlugin, OpenClawConfig, WizardPrompter } from "openclaw/plugin-sdk";
+import type { ChannelPlugin } from "openclaw/plugin-sdk/core";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { WizardPrompter } from "openclaw/plugin-sdk/setup";
 
 type SetupWizard = NonNullable<ChannelPlugin["setupWizard"]>;
 

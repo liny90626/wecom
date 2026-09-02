@@ -1,4 +1,5 @@
-import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { resolveActiveEmbeddedRunSessionId } from "openclaw/plugin-sdk/agent-harness";
 import { hasVisibleReplyBody } from "../shared/reply-visibility.js";
 import type { ReplyHandle, ReplyPayload } from "../types/index.js";

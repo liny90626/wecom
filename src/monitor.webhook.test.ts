@@ -3,7 +3,7 @@ import { Socket } from "node:net";
 
 import { describe, expect, it } from "vitest";
 
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 
 import type { ResolvedBotAccount } from "./types/index.js";
 import { computeWecomMsgSignature, decryptWecomEncrypted, encryptWecomPlaintext } from "./crypto.js";

@@ -1,4 +1,4 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 
 import { resolveWecomAccount } from "./accounts.js";
 import type { WecomCliConfig, WecomConfig } from "../types/index.js";

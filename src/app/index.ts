@@ -1,4 +1,5 @@
-import type { PluginRuntime } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { clearWecomSourceAccount } from "../runtime/source-registry.js";
 import type { ReplyHandle } from "../types/index.js";
 import { WecomAccountRuntime } from "./account-runtime.js";
@@ -68,6 +69,17 @@ export function getWecomRuntime(): PluginRuntime {
     throw new Error("WeCom runtime not initialized");
   }
   return runtime;
+}
+
+/**
+ * The gateway's live config snapshot. 2026.7.x still ships the deprecated
+ * `config.loadConfig()` (a fresh disk read per call); 2026.8.x removed it and
+ * keeps only `current()`, which both versions provide. `current()` hands the
+ * snapshot out DeepReadonly — the plugin only reads config and every consumer
+ * is typed on OpenClawConfig, so the cast lives here once.
+ */
+export function getWecomRuntimeConfig(): OpenClawConfig {
+  return getWecomRuntime().config.current() as OpenClawConfig;
 }
 
 export function registerAccountRuntime(accountRuntime: WecomAccountRuntime): void {

@@ -70,7 +70,7 @@ describe("createBotWsReplyHandle", () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
       config: {
-        loadConfig: () => ({
+        current: () => ({
           channels: {
             wecom: {},
           },
@@ -515,9 +515,11 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
     expect(mockClient.sendMessage).toHaveBeenCalledTimes(1);
     // The preview never became writable, so this progress has not been seen at
-    // all — it travels out with the status instead of being dropped.
+    // all — it travels out instead of being dropped. Body text is the answer in
+    // progress, so it goes without the clock (the clock under an answer's last
+    // push is the stale "长任务处理中" the field reported).
     expect(String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content)).toBe(
-      "正在读取材料\n\n【长任务处理中，请勿打断，已用时8m00s】",
+      "正在读取材料",
     );
     await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
@@ -1945,9 +1947,10 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
 
     expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
-    expect(String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content)).toContain(
-      "【长任务处理中，请勿打断，已用时8m00s】",
-    );
+    // The frozen body travels on the push lane; body text never carries the clock.
+    const firstPush = String((mockClient.sendMessage.mock.calls[0]?.[1] as any).markdown.content);
+    expect(firstPush).toContain("预览内容。");
+    expect(firstPush).not.toContain("已用时");
 
     await vi.advanceTimersByTimeAsync(5 * 60_000);
     await flushPromises();
@@ -3018,7 +3021,7 @@ describe("createBotWsReplyHandle", () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
       config: {
-        loadConfig: () => ({}),
+        current: () => ({}),
       },
     } as any);
 
@@ -3071,7 +3074,7 @@ describe("createBotWsReplyHandle", () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
       config: {
-        loadConfig: () => ({}),
+        current: () => ({}),
       },
     } as any);
     const handle = createBotWsReplyHandle({
@@ -3104,7 +3107,7 @@ describe("createBotWsReplyHandle", () => {
     // verbatim showed the user a raw local path and left the final unable to
     // match the accumulated body, so the whole answer was sent a second time.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const answer = "评估完成，核心结论：\n\nC 盘剩 26.4GB。\n\n清理方案四档：A/B/C/D。";
     const handle = createBotWsReplyHandle({
       client: mockClient,
@@ -3141,7 +3144,7 @@ describe("createBotWsReplyHandle", () => {
     // URL, a path or a filename; anything else stays in the text. Dropping it
     // here would delete a line of the model's answer.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const answer = "结论如下：\n\nMEDIA: 这一段是说明文字，不是附件";
     const handle = createBotWsReplyHandle({
       client: mockClient,
@@ -3167,7 +3170,7 @@ describe("createBotWsReplyHandle", () => {
     // block only. Normalizing that block alone (and not the ones before it)
     // left the two shapes unalignable and appended the answer all over again.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const opening = "评估完成，核心结论：\n\nC 盘剩 26.4GB。";
     const answer = `${opening}\n\n清理方案四档：A/B/C/D。`;
     const handle = createBotWsReplyHandle({
@@ -3204,7 +3207,7 @@ describe("createBotWsReplyHandle", () => {
     // The core removes the tokens it accepted and keeps the rest of the line;
     // dropping the whole line deleted a sentence of the model's answer.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -3236,7 +3239,7 @@ describe("createBotWsReplyHandle", () => {
     // refuses and leaves in the text. Diverging either way puts the bubble and
     // the final back out of step.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -3268,7 +3271,7 @@ describe("createBotWsReplyHandle", () => {
     // comparison is there for finals whose spacing the core never touched, and
     // a turn carrying a directive is not one of those.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -3301,7 +3304,7 @@ describe("createBotWsReplyHandle", () => {
     // text as it grows. Once the core respaces the final, that raw prefix test
     // fails and the whole answer used to be appended to itself.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -3329,7 +3332,7 @@ describe("createBotWsReplyHandle", () => {
     // The spacing-blind compare must not let an older block win over a final
     // that actually says something different.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -3356,7 +3359,7 @@ describe("createBotWsReplyHandle", () => {
     // matched; with two, what sits between them is prose. Swallowing it left
     // the body unable to line up with the final — the answer twice again.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -3391,7 +3394,7 @@ describe("createBotWsReplyHandle", () => {
     // never touches indentation. A model showing a wrong form and then the
     // corrected one has to keep both.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -3419,7 +3422,7 @@ describe("createBotWsReplyHandle", () => {
     // The core keeps fenced lines and then leaves the whole text untouched, so
     // touching it here would reintroduce the mismatch this strip exists to end.
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const answer = "用法如下：\n\n```\nMEDIA:/path/to/file.png\n```\n\n就这样。";
     const handle = createBotWsReplyHandle({
       client: mockClient,
@@ -3444,7 +3447,7 @@ describe("createBotWsReplyHandle", () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
       config: {
-        loadConfig: () => ({}),
+        current: () => ({}),
       },
     } as any);
     let releaseMedia!: () => void;
@@ -3502,7 +3505,7 @@ describe("createBotWsReplyHandle", () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
       config: {
-        loadConfig: () => ({}),
+        current: () => ({}),
       },
     } as any);
     const expiredError = {
@@ -3543,7 +3546,7 @@ describe("createBotWsReplyHandle", () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
       config: {
-        loadConfig: () => ({}),
+        current: () => ({}),
       },
     } as any);
     mockClient.sendMessage.mockRejectedValue(new Error("remainder rejected before delivery"));
@@ -3579,10 +3582,10 @@ describe("createBotWsReplyHandle", () => {
   it("does not claim a media final before configuration is resolved", async () => {
     const runtime = await import("../../runtime.js");
     const configError = new Error("config unavailable");
-    const loadConfig = vi.fn().mockImplementationOnce(() => {
+    const current = vi.fn().mockImplementationOnce(() => {
       throw configError;
     }).mockReturnValue({});
-    runtime.setWecomRuntime({ config: { loadConfig } } as any);
+    runtime.setWecomRuntime({ config: { current } } as any);
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -3610,7 +3613,7 @@ describe("createBotWsReplyHandle", () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
       config: {
-        loadConfig: () => ({
+        current: () => ({
           agents: {
             defaults: {
               mediaMaxMb: 12,
@@ -4352,7 +4355,16 @@ describe("createBotWsReplyHandle", () => {
       { kind: "final" },
     );
 
-    expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
+    // Two previews, then — once the answer is out as a push — a best-effort
+    // finish frame that closes the bubble on the text it already shows, so it
+    // does not sit open ("generating") above an answer that says 回复完毕.
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(3);
+    expect(mockClient.replyStream).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.any(String),
+      "已经显示的前半段",
+      true,
+    );
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
       chat_type: 1,
@@ -4403,7 +4415,16 @@ describe("createBotWsReplyHandle", () => {
     await finalDelivery;
 
     expect(nonBlockingClient.replyStreamNonBlocking).toHaveBeenCalledTimes(1);
-    expect(mockClient.replyStream).not.toHaveBeenCalled();
+    // The final never touches the stream while the ACK is pending; the only
+    // stream write is the best-effort finish frame queued after the push, on
+    // the text the bubble already shows.
+    expect(mockClient.replyStream).toHaveBeenCalledTimes(1);
+    expect(mockClient.replyStream).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      "已经显示的前半段",
+      true,
+    );
     expect(mockClient.sendMessage).toHaveBeenCalledWith("alice", {
       msgtype: "markdown",
       chat_type: 1,
@@ -6729,7 +6750,7 @@ describe("createBotWsReplyHandle", () => {
 
   it("resends only unconfirmed chunks when the stream remainder push fails ambiguously", async () => {
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const ackTimeout = new Error("Reply ack timeout (5000ms) for reqId: req-remainder-ambiguous");
     // First chunk streams fine; the remainder active push fails ambiguously
     // once and then succeeds on the scheduled retry.
@@ -6773,7 +6794,7 @@ describe("createBotWsReplyHandle", () => {
 
   it("does not revive a partially visible superseded final through an ambiguous retry", async () => {
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as any);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as any);
     const ackTimeout = new Error("Reply ack timeout (5000ms) for reqId: req-superseded-partial");
     // Superseded-final push: chunk 1 confirms, chunk 2 fails ambiguously.
     mockClient.sendMessage.mockResolvedValueOnce({} as any);

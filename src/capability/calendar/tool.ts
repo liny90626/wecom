@@ -2,7 +2,7 @@
 // Calendar Tool - Complete Implementation
 // 严格遵循企业微信官方 API 文档：https://developer.work.weixin.qq.com/document/path/93329
 // ============================================================================
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { isWecomAgentSource } from "../../runtime/source-registry.js";
 import type { ResolvedAgentAccount } from "../../types/index.js";
 import { resolveAgentAccountOrUndefined } from "../bot/fallback-delivery.js";

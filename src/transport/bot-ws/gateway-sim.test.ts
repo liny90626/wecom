@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 import { __resetBotWsReplyTestState, createBotWsReplyHandle } from "./reply.js";
@@ -71,10 +74,12 @@ describe("WeCom gateway simulation", () => {
     // test or an upload from an earlier turn is counted against a later one.
     vi.mocked(uploadAndSendBotWsMedia).mockClear();
     __resetBotWsReplyTestState();
-    vi.stubEnv("OPENCLAW_STATE_DIR", "/tmp/wecom-sim-state");
+    // One real-dispatcher case below creates a SQLite state store here; a store
+    // left by another OpenClaw version fails 8.x's schema check, so never share it.
+    vi.stubEnv("OPENCLAW_STATE_DIR", mkdtempSync(path.join(os.tmpdir(), "wecom-sim-state-")));
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({
-      config: { loadConfig: () => ({ channels: { wecom: {} } }) },
+      config: { current: () => ({ channels: { wecom: {} } }) },
     } as never);
   });
 
@@ -331,13 +336,19 @@ describe("WeCom gateway simulation", () => {
     // A dead window pulls the push lane's gate forward to the five-minute mark,
     // and the lane used to hard-code the "长任务处理中，请勿打断" copy — so a turn
     // that had not reached the eight-minute threshold was still telling the
-    // user to sit still. The copy now follows the clock on every lane.
+    // user to sit still. The copy now follows the clock on every lane. The clock
+    // itself rides only on process pushes (steps): body text is the answer and
+    // never carries it, or the answer's last push ends in a stale status line.
     const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 60_000 });
     const handle = startTurn(sim);
     await tick(100);
-    await deliverAndTick(handle, { text: "第一步：扫描目录" }, { kind: "block" }, 500);
+    const step = (text: string) => ({
+      text,
+      channelData: { openclawProgressKind: "preamble" },
+    });
+    await deliverAndTick(handle, step("第一步：扫描目录"), { kind: "block" }, 500);
     await tick(90_000);
-    await deliverAndTick(handle, { text: "第一步：扫描目录\n第二步：统计占用" }, { kind: "block" }, 500);
+    await deliverAndTick(handle, step("第二步：统计占用"), { kind: "block" }, 500);
 
     await tick(5 * 60_000);
     const firstPush = sim.chat.find((entry) => entry.kind === "push")?.content ?? "";
@@ -345,18 +356,73 @@ describe("WeCom gateway simulation", () => {
     expect(firstPush).toContain("【处理中，已用时5m00s】");
     expect(firstPush).not.toContain(LONG_TASK_STATUS_PREFIX);
 
-    await deliverAndTick(
-      handle,
-      { text: "第一步：扫描目录\n第二步：统计占用\n第三步：出报告" },
-      { kind: "block" },
-      500,
-    );
-    await tick(5 * 60_000);
+    await tick(3 * 60_000);
+    await deliverAndTick(handle, step("第三步：出报告"), { kind: "block" }, 500);
+    await tick(2 * 60_000);
     const longTaskPush = sim.chat
       .filter((entry) => entry.kind === "push")
       .map((entry) => entry.content)
       .find((content) => content.includes("第三步：出报告"));
     expect(longTaskPush).toContain(LONG_TASK_STATUS_PREFIX);
+  });
+
+  it("closes an ACK-untrusted bubble without its clock once the answer went out as a push", async () => {
+    // Second mechanism behind 「答案在，末尾却是长任务处理中」: one lost ACK
+    // anywhere in the turn latches the stream as untrusted, so the final is
+    // routed to push — yet the frozen bubble kept painting the clock and nobody
+    // ever finished it. The user got an OPEN bubble ending in 【长任务处理中…】
+    // above an answer that said 回复完毕.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, dropAckOnSend: [2] });
+    const handle = startTurn(sim);
+    await tick(100);
+    // Frame 2 (the first body frame) loses its ACK; the body keeps painting.
+    await deliverAndTick(handle, { text: "第一段正文。" }, { kind: "block" }, 6_000);
+    await deliverAndTick(handle, { text: "第一段正文。第二段正文。" }, { kind: "block" }, 2_000);
+    // Frozen at five minutes, clock painted at the eight-minute gate.
+    await tick(8 * 60_000);
+    expect(sim.streamBubble("req-sim")?.content).toContain(LONG_TASK_STATUS_PREFIX);
+
+    await deliverAndTick(
+      handle,
+      { text: "第一段正文。第二段正文。最终结论。" },
+      { kind: "final" },
+      3_000,
+    );
+    await tick(10_000);
+
+    const pushes = sim.chat.filter((entry) => entry.kind === "push").map((entry) => entry.content);
+    expect(pushes.at(-1)).toContain("最终结论");
+    const bubble = sim.streamBubble("req-sim");
+    expect(bubble?.closed).toBe(true);
+    expect(bubble?.content).toContain("第一段正文。");
+    expect(bubble?.content).not.toContain("已用时");
+    // The finish frame re-sends what the bubble already showed — never the answer,
+    // which lives in the push and must not appear twice.
+    expect(bubble?.content).not.toContain("最终结论");
+  });
+
+  it("finishes an externally answered bubble without the clock", async () => {
+    // The message tool delivered the answer itself, so the source stream is only
+    // closed — but it was closed on the last painted frame, clock included, and
+    // that frame is what the user keeps for good.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "正文预览。" }, { kind: "block" }, 500);
+    await tick(8 * 60_000 + 100);
+    expect(sim.streamBubble("req-sim")?.content).toContain(LONG_TASK_STATUS_PREFIX);
+
+    await deliverAndTick(
+      handle,
+      { text: "", channelData: { wecomExternalFinalDelivered: true } },
+      { kind: "final" },
+      3_000,
+    );
+
+    const bubble = sim.streamBubble("req-sim");
+    expect(bubble?.closed).toBe(true);
+    expect(bubble?.content).toContain("正文预览。");
+    expect(bubble?.content).not.toContain("已用时");
   });
 
   it("does not repeat an attachment answer once the window is dead", async () => {
@@ -451,15 +517,18 @@ describe("WeCom gateway simulation", () => {
     await deliverAndTick(handle, { text: "第一段进度\n第二段进度" }, { kind: "block" }, 2_000);
     await deliverAndTick(handle, { text: "第一段进度\n第二段进度\n第三段进度" }, { kind: "block" }, 2_000);
 
-    await tick(8 * 60_000);
+    // A closed window makes the push lane the only channel, so unseen output
+    // travels as soon as the turn is long — it no longer waits for 8 minutes.
+    await tick(5 * 60_000 + 500);
     const notice =
       sim.chat.find(
         (entry) => entry.kind === "push" && entry.content.includes("第三段进度"),
       )?.content ?? "";
     expect(notice).toContain("第三段进度");
-    // A closed window makes the push lane the only channel, so unseen output
-    // travels as soon as the turn is long — it no longer waits for 8 minutes.
-    expect(notice).toContain("【处理中，已用时5m00s】");
+    // Body text is the answer in progress, not process: it never carries the
+    // clock, so the answer's last push cannot end in a stale status line.
+    expect(notice).not.toContain("已用时");
+    await tick(3 * 60_000 - 500);
 
     await deliverAndTick(
       handle,
@@ -602,7 +671,8 @@ describe("WeCom gateway simulation", () => {
     expect(firstPush?.content).toContain("新增正文。");
     expect(firstPush?.content).not.toContain("已显示正文。");
     expect(firstPush?.content).toContain("依赖检查失败");
-    expect(firstPush?.content).toContain("【处理中，已用时5m00s】");
+    // The push carries body text, so it goes out without the clock.
+    expect(firstPush?.content).not.toContain("已用时");
 
     await tick(6 * 60_000);
     const statusPushes = sim.chat.filter((entry) => entry.kind === "push");

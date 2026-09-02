@@ -1,4 +1,5 @@
-import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 
 import type { WecomAgentConfig, WecomBotConfig } from "../types/index.js";
 import { isWecomSenderAllowed, normalizeWecomAllowFromEntry } from "../domain/policies.js";
@@ -38,7 +39,12 @@ export async function resolveWecomCommandAuthorization(params: {
   const senderAllowed = isWecomSenderAllowed(senderUserId, effectiveAllowFrom);
   const allowAllConfigured = effectiveAllowFrom.some((entry) => normalizeWecomAllowFromEntry(entry) === "*");
   const authorizerConfigured = allowAllConfigured || effectiveAllowFrom.length > 0;
-  const useAccessGroups = cfg.commands?.useAccessGroups !== false;
+  // 2026.7.x exposes `commands.useAccessGroups` (default true); 2026.8.x
+  // dropped the knob and always gates by access groups. Reading it
+  // structurally honours the knob where it exists and lands on the 8.x
+  // default where it does not.
+  const useAccessGroups =
+    (cfg.commands as { useAccessGroups?: boolean } | undefined)?.useAccessGroups !== false;
 
   const commandAuthorized = shouldComputeAuth
     ? core.channel.commands.resolveCommandAuthorizedFromAuthorizers({

@@ -4,6 +4,7 @@ export {
   getAccountRuntimeSnapshot,
   getBotWsPushHandle,
   getWecomRuntime,
+  getWecomRuntimeConfig,
   registerActiveBotWsReplyHandle,
   registerAccountRuntime,
   registerBotWsPushHandle,

@@ -26,7 +26,8 @@ vi.mock("../../runtime.js", () => ({
     isConnected: runtimeMock.isConnected,
     replyCommand: runtimeMock.replyCommand,
   }),
-  getWecomRuntime: () => ({ config: { loadConfig: () => runtimeMock.cfg } }),
+  getWecomRuntime: () => ({ config: { current: () => runtimeMock.cfg } }),
+  getWecomRuntimeConfig: () => runtimeMock.cfg,
 }));
 
 vi.mock("../../config/accounts.js", () => ({

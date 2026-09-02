@@ -1,5 +1,17 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WSClient } from "@wecom/aibot-node-sdk";
+
+/**
+ * The real dispatcher persists a SQLite state store under OPENCLAW_STATE_DIR.
+ * Every run gets its own directory: a store left behind by another OpenClaw
+ * version fails the schema check (2026.8.x demands a migration that a
+ * 2026.7.x file never had), which is exactly what a shared /tmp path produced.
+ */
+const freshStateDir = (label: string): string =>
+  mkdtempSync(path.join(os.tmpdir(), `wecom-openclaw-${label}-`));
 
 const agentHarnessState = vi.hoisted(() => ({
   resolveActiveEmbeddedRunSessionId: vi.fn(),
@@ -399,7 +411,8 @@ describe("dispatchRuntimeReply", () => {
   it("keeps real commentary flowing through the real OpenClaw dispatcher", async () => {
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    process.env.OPENCLAW_STATE_DIR = "/tmp/wecom-openclaw-commentary-dispatcher-test";
+    const stateDir = freshStateDir("commentary-dispatcher");
+    process.env.OPENCLAW_STATE_DIR = stateDir;
     process.env.OPENCLAW_TEST_FAST = "1";
     try {
       const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
@@ -478,13 +491,15 @@ describe("dispatchRuntimeReply", () => {
       } else {
         process.env.OPENCLAW_TEST_FAST = previousTestFast;
       }
+      rmSync(stateDir, { recursive: true, force: true });
     }
   });
 
   it("keeps every real-dispatcher lifecycle event out of the channel", async () => {
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    process.env.OPENCLAW_STATE_DIR = "/tmp/wecom-openclaw-lifecycle-dispatcher-test";
+    const stateDir = freshStateDir("lifecycle-dispatcher");
+    process.env.OPENCLAW_STATE_DIR = stateDir;
     process.env.OPENCLAW_TEST_FAST = "1";
     try {
       const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
@@ -605,6 +620,7 @@ describe("dispatchRuntimeReply", () => {
       } else {
         process.env.OPENCLAW_TEST_FAST = previousTestFast;
       }
+      rmSync(stateDir, { recursive: true, force: true });
     }
   });
 
@@ -627,7 +643,8 @@ describe("dispatchRuntimeReply", () => {
     async (caseId, itemEvent) => {
       const previousStateDir = process.env.OPENCLAW_STATE_DIR;
       const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-      process.env.OPENCLAW_STATE_DIR = `/tmp/wecom-openclaw-filtered-item-${caseId}`;
+      const stateDir = freshStateDir(`filtered-item-${caseId}`);
+      process.env.OPENCLAW_STATE_DIR = stateDir;
       process.env.OPENCLAW_TEST_FAST = "1";
       try {
         const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
@@ -646,42 +663,59 @@ describe("dispatchRuntimeReply", () => {
         const deliver = vi.fn().mockResolvedValue(undefined);
         const fail = vi.fn().mockResolvedValue(undefined);
 
-        await expect(
-          dispatchRuntimeReply({
-            core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
-            cfg: {} as any,
-            session: {
-              ctx: {
-                Body: `执行过滤事件回归 ${caseId}`,
-                RawBody: `执行过滤事件回归 ${caseId}`,
-                CommandBody: `执行过滤事件回归 ${caseId}`,
-                From: `user-filtered-${caseId}`,
-                To: "wecom-bot",
-                SessionKey: `agent:main:wecom:direct:user-filtered-${caseId}`,
-                Provider: "wecom",
-                Surface: "wecom",
-                ChatType: "direct",
-                AccountId: "default",
-                MessageSid: `msg-filtered-${caseId}`,
-              },
-            } as any,
-            replyHandle: {
-              context: {
-                transport: "bot-ws",
-                accountId: "default",
-                raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
-              },
-              deliver,
-              fail,
-            } as any,
-          }),
-        ).rejects.toMatchObject({ name: "WeComReplyNoVisibleOutputError" });
+        const outcome = await dispatchRuntimeReply({
+          core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+          cfg: {} as any,
+          session: {
+            ctx: {
+              Body: `执行过滤事件回归 ${caseId}`,
+              RawBody: `执行过滤事件回归 ${caseId}`,
+              CommandBody: `执行过滤事件回归 ${caseId}`,
+              From: `user-filtered-${caseId}`,
+              To: "wecom-bot",
+              SessionKey: `agent:main:wecom:direct:user-filtered-${caseId}`,
+              Provider: "wecom",
+              Surface: "wecom",
+              ChatType: "direct",
+              AccountId: "default",
+              MessageSid: `msg-filtered-${caseId}`,
+            },
+          } as any,
+          replyHandle: {
+            context: {
+              transport: "bot-ws",
+              accountId: "default",
+              raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+            },
+            deliver,
+            fail,
+          } as any,
+        }).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
 
-        expect(deliver).not.toHaveBeenCalled();
-        expect(fail).toHaveBeenCalledOnce();
-        expect(fail.mock.calls[0]?.[0]).toMatchObject({
-          name: "WeComReplyNoVisibleOutputError",
-        });
+        // Two OpenClaw contracts for a run that produced no visible output.
+        // 2026.7.x only flags the turn (noVisibleReplyFallbackEligible) and
+        // leaves the notice to the channel, so the plugin raises its own.
+        // 2026.8.x delivers its fallback final through the handle itself and
+        // reports noVisibleReplyFallbackDelivered; the plugin then closes
+        // normally and must not add a second notice. Under both, the filtered
+        // item's content never reaches the user.
+        const dispatchResult = await dispatchReplyWithBufferedBlockDispatcher.mock.results[0]?.value;
+        if (dispatchResult?.noVisibleReplyFallbackDelivered === true) {
+          expect(outcome).toBeUndefined();
+          expect(deliver).toHaveBeenCalledOnce();
+          expect(deliver.mock.calls[0]?.[1]).toMatchObject({ kind: "final" });
+          expect(fail).not.toHaveBeenCalled();
+        } else {
+          expect(outcome).toMatchObject({ name: "WeComReplyNoVisibleOutputError" });
+          expect(deliver).not.toHaveBeenCalled();
+          expect(fail).toHaveBeenCalledOnce();
+          expect(fail.mock.calls[0]?.[0]).toMatchObject({
+            name: "WeComReplyNoVisibleOutputError",
+          });
+        }
         expect(JSON.stringify(deliver.mock.calls)).not.toContain("SECRET_FUTURE");
       } finally {
         if (previousStateDir === undefined) {
@@ -694,6 +728,7 @@ describe("dispatchRuntimeReply", () => {
         } else {
           process.env.OPENCLAW_TEST_FAST = previousTestFast;
         }
+        rmSync(stateDir, { recursive: true, force: true });
       }
     },
   );

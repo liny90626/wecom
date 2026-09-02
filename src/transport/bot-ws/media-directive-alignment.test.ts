@@ -86,7 +86,7 @@ describe("plugin block text vs the core's own final", () => {
     __resetBotWsReplyTestState();
     vi.stubEnv("OPENCLAW_STATE_DIR", "/tmp/wecom-diff-state");
     const runtime = await import("../../runtime.js");
-    runtime.setWecomRuntime({ config: { loadConfig: () => ({}) } } as never);
+    runtime.setWecomRuntime({ config: { current: () => ({}) } } as never);
   });
 
   afterEach(() => {

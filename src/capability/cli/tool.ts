@@ -4,12 +4,12 @@ import type {
   OpenClawPluginToolContext,
   OpenClawPluginToolFactory,
 } from "openclaw/plugin-sdk/core";
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import * as path from "node:path";
 
 import { listWecomAccountIds, resolveWecomAccount } from "../../config/accounts.js";
 import { resolveWecomCliConfig } from "../../config/cli.js";
-import { getWecomRuntime } from "../../runtime.js";
+import { getWecomRuntimeConfig } from "../../runtime.js";
 import type { WecomCliEnv } from "../../types/config.js";
 import {
   CLI_ENV_PASSTHROUGH,
@@ -73,7 +73,7 @@ function normalizeConfig(value: unknown): OpenClawConfig | undefined {
 
 function loadConfig(config?: OpenClawConfig): OpenClawConfig {
   if (config) return config;
-  return getWecomRuntime().config.loadConfig();
+  return getWecomRuntimeConfig();
 }
 
 type ResolvedCliBot = {

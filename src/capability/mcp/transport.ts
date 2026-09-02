@@ -2,7 +2,7 @@ import { generateReqId } from "@wecom/aibot-node-sdk";
 import { fetch as undiciFetch } from "undici";
 
 import { resolveWecomAccount } from "../../config/accounts.js";
-import { getBotWsPushHandle, getWecomRuntime } from "../../runtime.js";
+import { getBotWsPushHandle, getWecomRuntimeConfig } from "../../runtime.js";
 import { PLUGIN_VERSION } from "../../version.js";
 
 const HTTP_REQUEST_TIMEOUT_MS = 30_000;
@@ -148,7 +148,7 @@ export class McpConfigError extends Error {
  * 等价——现网 `tools/list` 能过、单文档读取 851003，正是这种形态。
  */
 function resolveConfiguredMcpUrl(accountId: string, bizType: string): string | undefined {
-  const cfg = getWecomRuntime().config.loadConfig();
+  const cfg = getWecomRuntimeConfig();
   const account = resolveWecomAccount({ cfg, accountId });
   const configured = account.bot?.config?.mcpServers?.[bizType];
   const url = String(configured ?? "").trim();

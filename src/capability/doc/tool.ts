@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { isWecomAgentSource } from "../../runtime/source-registry.js";
 import type { ResolvedAgentAccount } from "../../types/index.js";
 import { resolveAgentAccountOrUndefined } from "../bot/fallback-delivery.js";

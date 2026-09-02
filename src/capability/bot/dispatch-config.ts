@@ -1,4 +1,4 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 
 export function buildWecomBotDispatchConfig(config: OpenClawConfig): OpenClawConfig {
   const baseAgents = (config as any)?.agents ?? {};

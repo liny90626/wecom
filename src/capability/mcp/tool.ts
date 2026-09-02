@@ -2,9 +2,9 @@ import type {
   OpenClawPluginToolContext,
   OpenClawPluginToolFactory,
 } from "openclaw/plugin-sdk/core";
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { resolveWecomAccount } from "../../config/accounts.js";
-import { getWecomRuntime } from "../../runtime.js";
+import { getWecomRuntimeConfig } from "../../runtime.js";
 import { resolveWecomSourceSnapshot } from "../../runtime/source-registry.js";
 import { cleanSchemaForGemini } from "./schema.js";
 import {
@@ -143,7 +143,7 @@ function extractBizError(result: unknown): BizError | undefined {
 }
 
 function hasCliCredentials(accountId: string, config?: OpenClawConfig): boolean {
-  const cfg = config ?? getWecomRuntime().config.loadConfig();
+  const cfg = config ?? getWecomRuntimeConfig();
   const account = resolveWecomAccount({ cfg, accountId });
   return Boolean(
     (account.bot?.ws?.botId?.trim() || account.bot?.botId?.trim()) &&

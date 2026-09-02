@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { copyFile, mkdir, stat } from "node:fs/promises";
 
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { resolveAgentConfig, resolveAgentWorkspaceDir } from "openclaw/plugin-sdk/agent-runtime";
 
 import { resolveWecomMediaMaxBytes } from "../../config/index.js";

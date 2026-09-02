@@ -1,4 +1,4 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 
 import type { WecomConfig } from "../types/index.js";
 import { detectMode } from "./accounts.js";

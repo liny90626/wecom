@@ -1,4 +1,5 @@
-import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 
 import type { ResolvedBotAccount } from "./account.js";
 import type { RawFrameReference, TransportSessionPatch, WecomAuditCategory, WecomTransportKind } from "./runtime.js";

@@ -425,6 +425,80 @@ describe("WeCom gateway simulation", () => {
     expect(bubble?.content).not.toContain("已用时");
   });
 
+  it("pushes new body text every 20 seconds once the window is dead while steps keep the minute grid", async () => {
+    // After the WeCom window closes, the push lane is the only way out for new
+    // answer text, and the shared 60-second clock grid made every fresh
+    // paragraph wait up to a minute. Body text is the answer arriving: it gets
+    // its own cadence. Process steps and the bare clock stay on the grid.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: 6 * 60_000 });
+    const handle = startTurn(sim);
+    await tick(100);
+    await deliverAndTick(handle, { text: "第一段。" }, { kind: "block" }, 500);
+    const startedAt = Date.now();
+    const step = (text: string) => ({ text, channelData: { openclawProgressKind: "preamble" } });
+    const pushes = () => sim.chat.filter((entry) => entry.kind === "push").map((e) => e.content);
+
+    // 6m05s: a process step is the first frame after the window closed; it is
+    // refused, the lane takes over and carries the step out with the clock.
+    await tick(6 * 60_000 + 5_000 - (Date.now() - startedAt));
+    await deliverAndTick(handle, step("开始整理结论"), { kind: "block" }, 500);
+    expect(pushes()).toHaveLength(1);
+    expect(pushes()[0]).toContain("开始整理结论");
+
+    // 6m10s: new body text goes out at once — it used to wait for the 7m05s
+    // grid slot behind the step that had just spent it.
+    await tick(4_500);
+    await deliverAndTick(handle, { text: "第一段。第二段。" }, { kind: "block" }, 500);
+    expect(pushes()).toHaveLength(2);
+    expect(pushes()[1]).toContain("第二段");
+    expect(pushes()[1]).not.toContain("已用时");
+
+    // 6m30s: twenty seconds later the next paragraph follows right away.
+    await tick(19_500);
+    await deliverAndTick(handle, { text: "第一段。第二段。第三段。" }, { kind: "block" }, 500);
+    expect(pushes()).toHaveLength(3);
+    expect(pushes()[2]).toContain("第三段");
+
+    // 6m40s: too soon after the last body push; it waits until 6m50s.
+    await tick(9_500);
+    await deliverAndTick(handle, { text: "第一段。第二段。第三段。第四段。" }, { kind: "block" }, 500);
+    expect(pushes()).toHaveLength(3);
+    await tick(9_600);
+    expect(pushes()).toHaveLength(4);
+    expect(pushes()[3]).toContain("第四段");
+
+    // A process step alone still waits for the minute grid (7m05s) and keeps
+    // the clock.
+    await deliverAndTick(handle, step("核对最后一项"), { kind: "block" }, 500);
+    await tick(12_000);
+    expect(pushes()).toHaveLength(4);
+    await tick(3_500);
+    expect(pushes()).toHaveLength(5);
+    expect(pushes()[4]).toContain("核对最后一项");
+    expect(pushes()[4]).toContain("【处理中，已用时");
+  });
+
+  it("keeps streaming a long answer into the bubble up to the frame budget", async () => {
+    // The preview used to freeze on its first 3000 characters, so a 4800-
+    // character answer stopped updating at 3000 and the user saw nothing new
+    // until the final. A stream frame holds 5000 characters (finals already use
+    // that), so the bubble now follows the answer that far before freezing.
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(100);
+    const body1 = "甲".repeat(1_500);
+    const body2 = body1 + "乙".repeat(1_500);
+    const body3 = body2 + "丙".repeat(1_000);
+    const body4 = body3 + "丁".repeat(800);
+    for (const body of [body1, body2, body3, body4]) {
+      await deliverAndTick(handle, { text: body }, { kind: "block" }, 5_000);
+    }
+    const bubble = sim.streamBubble("req-sim");
+    expect(bubble?.content).toContain("丁");
+    expect(bubble?.content.length ?? 0).toBeGreaterThanOrEqual(4_800);
+    expect(bubble?.content.length ?? 0).toBeLessThanOrEqual(5_000);
+  });
+
   it("does not repeat an attachment answer once the window is dead", async () => {
     // Same asymmetry as the bubble case, but through the push lane: the block
     // still carries the core's `MEDIA:` directive while the final arrives with
@@ -773,7 +847,7 @@ describe("WeCom gateway simulation", () => {
     const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
     const handle = startTurn(sim);
     await tick(100);
-    await deliverAndTick(handle, { text: "真实过程。".repeat(700) }, { kind: "block" }, 500);
+    await deliverAndTick(handle, { text: "真实过程。".repeat(1_100) }, { kind: "block" }, 500);
 
     expect(sim.streamBubble("req-sim")?.content).toContain("真实过程。");
     expect(sim.streamBubble("req-sim")?.content).not.toContain("长任务处理中");

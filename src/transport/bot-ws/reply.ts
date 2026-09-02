@@ -38,7 +38,21 @@ const WECOM_STREAM_MAX_CHARS = 3_500;
 const WECOM_STREAM_FINAL_MAX_CHARS = 5_000;
 const WECOM_STREAM_MAX_BYTES = 15_360;
 const BLOCK_PREVIEW_MAX_MS = 300_000;
-const BLOCK_PREVIEW_MAX_CHARS = 3_000;
+/**
+ * The bubble follows the answer this far before freezing on its prefix. A
+ * stream frame carries 5 000 chars / 15 360 bytes (finals already ship that),
+ * so the preview uses the same room: at the old 3 000 a longer answer stopped
+ * updating with two fifths of the frame still empty.
+ */
+const BLOCK_PREVIEW_MAX_CHARS = 5_000;
+/** Bubble frames get the full stream budget; pushes keep the tighter chunk size below. */
+const WECOM_STREAM_PREVIEW_MAX_CHARS = 5_000;
+/**
+ * Once the window is dead, new answer text goes out on this cadence instead
+ * of the 60 s clock grid: it is the answer arriving, not a status, and a
+ * paragraph should not wait a minute for a slot spent by a step.
+ */
+const PUSH_BODY_MIN_INTERVAL_MS = 20_000;
 const BLOCK_PREVIEW_MIN_UPDATE_MS = 1_500;
 /** How often the long-task status line may repaint, on ANY lane. */
 const LONG_TASK_STATUS_INTERVAL_MS = 60_000;
@@ -1304,12 +1318,12 @@ function resolveThinkingFrameLayout(
     hasBody ? THINKING_BLOCK_WITH_BODY_MAX_CHARS : THINKING_BLOCK_MAX_CHARS,
   );
   if (!block) {
-    return { block: "", maxChars: WECOM_STREAM_MAX_CHARS, maxBytes: WECOM_STREAM_MAX_BYTES };
+    return { block: "", maxChars: WECOM_STREAM_PREVIEW_MAX_CHARS, maxBytes: WECOM_STREAM_MAX_BYTES };
   }
   const prefix = `${block}\n`;
   return {
     block,
-    maxChars: Math.max(100, WECOM_STREAM_MAX_CHARS - prefix.length),
+    maxChars: Math.max(100, WECOM_STREAM_PREVIEW_MAX_CHARS - prefix.length),
     maxBytes: Math.max(512, WECOM_STREAM_MAX_BYTES - Buffer.byteLength(prefix, "utf8")),
   };
 }
@@ -1858,6 +1872,8 @@ export function createBotWsReplyHandle(params: {
   // is now ONE clock on an absolute grid anchored to the turn start: every
   // lane asks it whether a repaint is due, and reports back when it painted.
   let longTaskStatusPaintedAt = 0;
+  /** When the push lane last dispatched answer text; drives PUSH_BODY_MIN_INTERVAL_MS. */
+  let lastBodyPushAt = 0;
   /** Set when the bubble stops being repaintable: from then on the push lane is
    *  the only channel, so the shared grid starts there instead of at 8 minutes. */
   let longTaskStatusGateOverrideAt: number | undefined;
@@ -2923,23 +2939,31 @@ export function createBotWsReplyHandle(params: {
     // clock: it keeps the absolute 8-minute threshold (禁改 34) and on top of it
     // waits out a quiet stretch, because it exists to prove a silent turn is
     // alive, not to tick every minute.
+    // Answer text has its own, shorter cadence behind the same gate: the gate
+    // still keeps a young turn from becoming a push conversation, but a new
+    // paragraph no longer waits out a minute slot a step just spent.
+    const bodyDueAt = Math.max(longTaskStatusGateAt(), lastBodyPushAt + PUSH_BODY_MIN_INTERVAL_MS);
+    const dueForBody = Boolean(undeliveredProgress) && now >= bodyDueAt;
     const dueForContent = hasNewContent && isLongTaskStatusDue(now);
     const dueForStatus =
       !hasNewContent &&
       now - handleStartedAt >= PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS &&
       isLongTaskStatusDue(now) &&
       now - longTaskStatusPaintedAt >= LONG_TASK_QUIET_STATUS_INTERVAL_MS;
-    if (!dueForContent && !dueForStatus) {
-      if (!previewExpiredNoticeTimer) {
-        const dueAt = hasNewContent
+    if (!dueForBody && !dueForContent && !dueForStatus) {
+      const dueAt = undeliveredProgress
+        ? Math.min(bodyDueAt, nextLongTaskStatusDueAt())
+        : hasNewContent
           ? nextLongTaskStatusDueAt()
           : Math.max(
               nextLongTaskStatusDueAt(),
               handleStartedAt + PREVIEW_EXPIRED_NOTICE_MIN_TASK_MS,
               longTaskStatusPaintedAt + LONG_TASK_QUIET_STATUS_INTERVAL_MS,
             );
-        schedulePreviewExpiredNotice(Math.max(0, dueAt - now), allowUnfrozen);
-      }
+      // Re-arm on the recomputed due time: a timer left armed for the minute
+      // grid would hold answer text back to that grid.
+      stopPreviewExpiredNoticeTimer();
+      schedulePreviewExpiredNotice(Math.max(0, dueAt - now), allowUnfrozen);
       return;
     }
     stopPreviewExpiredNoticeTimer();
@@ -2948,6 +2972,9 @@ export function createBotWsReplyHandle(params: {
     // fails is no more provably unseen than a frame with a missing ACK, so it
     // does not hand the slot back and cannot make two lanes race for it.
     markLongTaskStatusPainted(now);
+    if (undeliveredProgress) {
+      lastBodyPushAt = now;
+    }
     const elapsedMs = now - handleStartedAt;
     // Body text is the answer being written, not process. Closing it with the
     // clock told the user "still working" under the very text that was the
@@ -3570,6 +3597,12 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     if (forceActivePushRequired()) {
+      maybeSendPreviewExpiredNotice(true);
+      return;
+    }
+    if (streamUpdateUnreliable) {
+      // The bubble is gone; hand the new text to the push lane now, so its
+      // body cadence starts from this arrival instead of the lane's next timer.
       maybeSendPreviewExpiredNotice(true);
       return;
     }

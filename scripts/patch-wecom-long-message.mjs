@@ -106,7 +106,7 @@ function status() {
     reply.includes("fitsPreviewWireBudget") &&
     reply.includes("const B2_PEER_FINAL_DEDUP_TTL_MS = 120_000") &&
     reply.includes("const BLOCK_PREVIEW_MAX_MS = 300_000") &&
-    reply.includes("const BLOCK_PREVIEW_MAX_CHARS = 3_000") &&
+    reply.includes("const BLOCK_PREVIEW_MAX_CHARS = 5_000") &&
     reply.includes("appendFinalCompletionMarker") &&
     reply.includes("finalAppendCompletionMarker") &&
     reply.includes("dedupeLongFinalText(finalText, { previewFrozen })") &&

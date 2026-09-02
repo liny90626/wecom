@@ -1009,7 +1009,8 @@ describe("createBotWsReplyHandle", () => {
 
     for (const call of mockClient.replyStream.mock.calls) {
       const content = String(call[2] ?? "");
-      expect(content.length).toBeLessThanOrEqual(3_500);
+      // Bubble frames get the same room as finals: 5 000 chars / 15 360 bytes.
+      expect(content.length).toBeLessThanOrEqual(5_000);
       expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(15_360);
     }
     const frame = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
@@ -1293,7 +1294,8 @@ describe("createBotWsReplyHandle", () => {
       inboundKind: "text",
       autoSendPlaceholder: false,
     });
-    const body = "文".repeat(3_000);
+    // Longer than the 5 000-char frame, so the thinking block has to squeeze it.
+    const body = "文".repeat(5_000);
 
     await handle.deliver(
       { text: "思".repeat(2_500), isReasoning: true },
@@ -1308,7 +1310,7 @@ describe("createBotWsReplyHandle", () => {
     const visibleBodyChars = preview.match(/文/g)?.length ?? 0;
     expect(visibleBodyChars).toBeGreaterThan(0);
     expect(visibleBodyChars).toBeLessThan(body.length);
-    expect(preview.length).toBeLessThanOrEqual(3_500);
+    expect(preview.length).toBeLessThanOrEqual(5_000);
     expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(15_360);
 
     const pushed = mockClient.sendMessage.mock.calls
@@ -1332,7 +1334,7 @@ describe("createBotWsReplyHandle", () => {
     const fastText = "💨Fast: auto-off(62s>=60s)";
 
     await handle.deliver(
-      { text: "正".repeat(3_000), isReasoning: false },
+      { text: "正".repeat(5_000), isReasoning: false },
       { kind: "block" },
     );
     await vi.advanceTimersByTimeAsync(16_000);
@@ -1346,7 +1348,7 @@ describe("createBotWsReplyHandle", () => {
 
     const fastPreview = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(fastPreview).toContain(fastText);
-    expect(fastPreview.length).toBeLessThanOrEqual(3_500);
+    expect(fastPreview.length).toBeLessThanOrEqual(5_000);
     expect(Buffer.byteLength(fastPreview, "utf8")).toBeLessThanOrEqual(15_360);
   });
 
@@ -1372,7 +1374,9 @@ describe("createBotWsReplyHandle", () => {
       autoSendPlaceholder: false,
     });
     const hiddenSentinel = "FAST-HIDDEN-SENTINEL";
-    const bodyText = `${"A".repeat(2_000)}${hiddenSentinel}${"B".repeat(600)}`;
+    // The sentinel sits past what the frame keeps of the body once the transient
+    // lane (log tail + Fast banner) takes its share of the 5 000-char budget.
+    const bodyText = `${"A".repeat(3_800)}${hiddenSentinel}${"B".repeat(600)}`;
     const fastText = "💨Fast: auto-off(62s>=60s)";
     const stepText = `正在核对第一批配置项与运行记录，${"逐条比对默认值。".repeat(100)}`;
 
@@ -1638,7 +1642,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text }, { kind: "block" });
     const preview = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(preview).toContain("&lt;think&gt;");
-    expect(preview.length).toBeLessThanOrEqual(3_500);
+    expect(preview.length).toBeLessThanOrEqual(5_000);
     expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(15_360);
 
     const finalDelivery = handle.deliver({ text }, { kind: "final" });
@@ -1793,7 +1797,7 @@ describe("createBotWsReplyHandle", () => {
       inboundKind: "text",
       autoSendPlaceholder: false,
     });
-    const longBlock = `${"预览内容。".repeat(700)}END-FROZEN`;
+    const longBlock = `${"预览内容。".repeat(1_000)}END-FROZEN`;
 
     await handle.deliver({ text: longBlock, isReasoning: false }, { kind: "block" });
 
@@ -1839,7 +1843,7 @@ describe("createBotWsReplyHandle", () => {
       autoSendPlaceholder: false,
     });
 
-    await handle.deliver({ text: "预览内容。".repeat(700) }, { kind: "block" });
+    await handle.deliver({ text: "预览内容。".repeat(1_100) }, { kind: "block" });
     const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
 
     await vi.advanceTimersByTimeAsync(8 * 60_000 + 25);
@@ -1871,7 +1875,7 @@ describe("createBotWsReplyHandle", () => {
       autoSendPlaceholder: false,
     });
 
-    await handle.deliver({ text: "预览内容。".repeat(700) }, { kind: "block" });
+    await handle.deliver({ text: "预览内容。".repeat(1_100) }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(8 * 60_000);
     await flushPromises();
     expect(mockClient.replyStream).toHaveBeenCalledTimes(2);
@@ -1908,7 +1912,7 @@ describe("createBotWsReplyHandle", () => {
       autoSendPlaceholder: false,
     });
 
-    await handle.deliver({ text: "预览内容。".repeat(700) }, { kind: "block" });
+    await handle.deliver({ text: "预览内容。".repeat(1_100) }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(8 * 60_000);
     await flushPromises();
 
@@ -1942,7 +1946,7 @@ describe("createBotWsReplyHandle", () => {
       isCallbackStreamCurrent: () => Date.now() < callbackClaimExpiresAt,
     });
 
-    await handle.deliver({ text: "预览内容。".repeat(700) }, { kind: "block" });
+    await handle.deliver({ text: "预览内容。".repeat(1_100) }, { kind: "block" });
     await vi.advanceTimersByTimeAsync(8 * 60_000);
     await flushPromises();
 
@@ -2278,12 +2282,12 @@ describe("createBotWsReplyHandle", () => {
     });
 
     await handle.deliver(
-      { text: `${"a".repeat(2_999)}😀`, isReasoning: false },
+      { text: `${"a".repeat(4_999)}😀`, isReasoning: false },
       { kind: "block" },
     );
 
     expect(String(mockClient.replyStream.mock.calls[0]?.[2] ?? "")).toBe(
-      "a".repeat(2_999),
+      "a".repeat(4_999),
     );
   });
 
@@ -2302,7 +2306,7 @@ describe("createBotWsReplyHandle", () => {
     // Tool/reasoning work can run for a while before the first visible block.
     // The progress clock must not restart when that block freezes the preview.
     await vi.advanceTimersByTimeAsync(65_000);
-    const longBlock = "预览内容。".repeat(700);
+    const longBlock = "预览内容。".repeat(1_100);
     await handle.deliver({ text: longBlock, isReasoning: false }, { kind: "block" });
 
     const statusContents = () =>
@@ -2413,6 +2417,8 @@ describe("createBotWsReplyHandle", () => {
     };
     mockClient.replyStream.mockRejectedValueOnce(previewError);
     mockClient.replyStream.mockRejectedValueOnce(expiredError);
+    // Kept under one push chunk: this case is about an UNDELIVERED preview
+    // falling back to the whole final, not about the freeze threshold.
     const prefix = Array.from({ length: 420 }, (_, index) =>
       `预览内容${String(index).padStart(3, "0")}。`,
     ).join("");
@@ -4133,7 +4139,7 @@ describe("createBotWsReplyHandle", () => {
     };
     mockClient.replyStream.mockResolvedValueOnce({} as any);
     mockClient.replyStream.mockRejectedValue(expiredError);
-    const prefix = Array.from({ length: 420 }, (_, index) =>
+    const prefix = Array.from({ length: 700 }, (_, index) =>
       `预览内容${String(index).padStart(3, "0")}。`,
     ).join("");
     const final = `${prefix}\n\n后续最终内容`;
@@ -4157,7 +4163,7 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed).toContain("继续输出：");
     expect(pushed).toContain("后续最终内容");
     expect(pushed).not.toContain("预览内容000。");
-    expect(pushed).toContain("预览内容390。");
+    expect(pushed).toContain("预览内容690。");
   });
 
   it("pushes only the continuation after a late preview success", async () => {
@@ -4508,7 +4514,7 @@ describe("createBotWsReplyHandle", () => {
   });
 
   it("skips the old final push when a visible frozen preview is later superseded", async () => {
-    const prefix = Array.from({ length: 420 }, (_, index) =>
+    const prefix = Array.from({ length: 700 }, (_, index) =>
       `预览内容${String(index).padStart(3, "0")}。`,
     ).join("");
     const final = `${prefix}\n\n后续最终内容`;
@@ -6205,7 +6211,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: bodyText }, { kind: "block" });
     await handle.deliver(
       {
-        text: "P".repeat(3_499),
+        text: "P".repeat(4_999),
         channelData: { openclawProgressKind: "preamble" },
       },
       { kind: "block" },
@@ -6352,7 +6358,7 @@ describe("createBotWsReplyHandle", () => {
     await handle.deliver({ text: bodyText }, { kind: "block" });
     await handle.deliver(
       {
-        text: "P".repeat(3_450),
+        text: "P".repeat(4_950),
         channelData: { openclawProgressKind: "preamble" },
       },
       { kind: "block" },
@@ -6362,7 +6368,7 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
 
     const preview = String(pendingClient.replyStreamNonBlocking.mock.calls[0]?.[2] ?? "");
-    expect(preview.length).toBeLessThanOrEqual(3_500);
+    expect(preview.length).toBeLessThanOrEqual(5_000);
     expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(15_360);
 
     await handle.deliver({ text: `${bodyText}\n最终新增内容` }, { kind: "final" });
@@ -6396,7 +6402,7 @@ describe("createBotWsReplyHandle", () => {
 
     const preview = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(preview).toContain("&lt;think&gt;");
-    expect(preview.length).toBeLessThanOrEqual(3_500);
+    expect(preview.length).toBeLessThanOrEqual(5_000);
     expect(Buffer.byteLength(preview, "utf8")).toBeLessThanOrEqual(15_360);
   });
 

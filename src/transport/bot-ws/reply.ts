@@ -2381,9 +2381,10 @@ export function createBotWsReplyHandle(params: {
     }
     const remainder = finalText.slice(deliveredSourceText.length).trimStart();
     if (!remainder) {
-      return isError
-        ? "任务未完成，以上为本次已完成的进度。"
-        : "最终回复已完成，以上预览内容即为完整回复。";
+      // Everything already reached the user, whether as the bubble or as
+      // pushes; a bare marker closes the turn without calling that a "预览"
+      // (and without a second "完成" once the marker is appended).
+      return isError ? "任务未完成，以上为本次已完成的进度。" : FINAL_COMPLETION_MARKER;
     }
     if (remainder === FINAL_COMPLETION_MARKER) {
       return FINAL_COMPLETION_MARKER;

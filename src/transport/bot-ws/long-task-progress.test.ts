@@ -380,8 +380,10 @@ describe("长任务过程可见性（真实 orchestrator + 网关模拟）", () 
     expect(answerPushes).toHaveLength(1);
     expect(answerPushes[0]).not.toContain(LONG_TASK_STATUS_PREFIX);
     expect(answerPushes[0]).not.toContain("【处理中，已用时");
-    // 收尾之后，聊天记录的最后一条不是一句状态。
+    // 收尾之后，聊天记录的最后一条不是一句状态；正文已全部送达时只剩一个
+    // 收尾标记，不再是「最终回复已完成，以上预览内容即为完整回复。」。
     expect(pushes.at(-1)).not.toContain(LONG_TASK_STATUS_PREFIX);
+    expect(pushes.at(-1)).toBe("（回复完毕）");
   });
 
   it("正文帧把日志挤出气泡后，这些步骤仍会随推送落到聊天记录", async () => {

@@ -79,6 +79,8 @@ describe("wecom onboarding", () => {
       secret: "bot-secret-456",
     });
     expect(bot?.webhook).toBeUndefined();
+    // 8.x gates our before_prompt_build guidance hooks behind this flag.
+    expect(result.cfg.plugins?.entries?.wecom?.hooks?.allowConversationAccess).toBe(true);
 
     const noteText = (prompter.note as ReturnType<typeof vi.fn>).mock.calls
       .map(([message]) => String(message))

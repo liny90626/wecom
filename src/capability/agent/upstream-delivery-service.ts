@@ -3,6 +3,9 @@ import { resolveScopedWecomTarget } from "../../target.js";
 import { deliverUpstreamAgentApiMedia, deliverUpstreamAgentApiText } from "../../transport/agent-api/upstream-delivery.js";
 import { canUseAgentApiDelivery } from "./fallback-policy.js";
 import { getWecomRuntime } from "../../runtime.js";
+import { chunkTextToByteLimit } from "../../shared/byte-chunking.js";
+import { createSendPacer } from "../../shared/send-pacing.js";
+import { MESSAGE_BYTE_LIMITS } from "../../types/constants.js";
 
 /**
  * 上下游企业消息发送服务
@@ -58,10 +61,17 @@ export class WecomUpstreamAgentDeliveryService {
     );
 
     const runtime = getWecomRuntime();
-    const chunks = runtime.channel.text.chunkText(params.text, 2048);
+    // 2048 是字节上限，理由见 delivery-service.ts。
+    const chunks = chunkTextToByteLimit(
+      params.text,
+      MESSAGE_BYTE_LIMITS.AGENT_MESSAGE,
+      (value, charLimit) => runtime.channel.text.chunkText(value, charLimit),
+    );
 
+    const pace = createSendPacer();
     for (const chunk of chunks) {
       if (!chunk.trim()) continue;
+      await pace();
       await deliverUpstreamAgentApiText({
         upstreamAgent: this.upstreamAgent,
         primaryAgent: this.primaryAgent,

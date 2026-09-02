@@ -661,8 +661,35 @@ async function runWecomSetupFlow(params: {
 
   next = await promptDmPolicy(next, params.prompter, configuredModes, params.accountId);
   next = setWecomEnabled(next, true);
+  next = allowWecomConversationHooks(next);
   await showSummary(next, params.prompter, params.accountId);
   return next;
+}
+
+/**
+ * OpenClaw 2026.8.x blocks a non-bundled plugin's `before_prompt_build` hooks
+ * unless the operator opts the plugin into conversation access — and those two
+ * hooks carry this plugin's media, template-card and wecom-cli guidance, so
+ * without the flag the model on 8.x simply never learns them. 2026.7.x knows
+ * the key too (it gates other hooks there), so the wizard sets it for every
+ * install and an upgrade to 8.x needs no extra step.
+ */
+function allowWecomConversationHooks(cfg: OpenClawConfig): OpenClawConfig {
+  const entries = cfg.plugins?.entries ?? {};
+  const wecomEntry = entries.wecom ?? {};
+  return {
+    ...cfg,
+    plugins: {
+      ...cfg.plugins,
+      entries: {
+        ...entries,
+        wecom: {
+          ...wecomEntry,
+          hooks: { ...wecomEntry.hooks, allowConversationAccess: true },
+        },
+      },
+    },
+  };
 }
 
 export const wecomSetupWizard: ChannelSetupWizard = {

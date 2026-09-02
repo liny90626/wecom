@@ -18,7 +18,9 @@ import {
 import { getPeerUpstreamCorpId } from "./context-store.js";
 import { resolveWecomSourceSnapshot } from "./runtime/source-registry.js";
 import { resolveOutboundMediaAsset } from "./shared/media-asset.js";
+import { chunkTextToByteLimit } from "./shared/byte-chunking.js";
 import { resolveScopedWecomTarget } from "./target.js";
+import { MESSAGE_BYTE_LIMITS } from "./types/constants.js";
 import { chunkWeComMarkdownV2 } from "./wecom_msg_adapter/markdown_adapter.js";
 import { parseUpstreamAgentSessionTarget, createUpstreamAgentConfig, resolveUpstreamCorpConfig } from "./upstream/index.js";
 
@@ -475,10 +477,18 @@ async function sendMediaViaBotWs(params: {
 export const wecomOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
   chunkerMode: "text",
-  textChunkLimit: 20480,
+  /**
+   * 这层是 core 的预分片，对所有传输共用，所以取最宽的那个上限
+   * （Bot WS 流式 20480 字节）；更窄的 Agent 2048 由各 delivery-service
+   * 自己再切一次。
+   */
+  textChunkLimit: MESSAGE_BYTE_LIMITS.BOT_WS_STREAM,
   chunker: (text: string, limit: number) => {
     try {
-      return getWecomRuntime().channel.text.chunkText(text, limit);
+      // limit 语义是字节，chunkText 按字符切，所以要过一遍字节收敛。
+      return chunkTextToByteLimit(text, limit, (value, charLimit) =>
+        getWecomRuntime().channel.text.chunkText(value, charLimit),
+      );
     } catch {
       return [text];
     }

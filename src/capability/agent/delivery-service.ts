@@ -3,6 +3,9 @@ import { resolveScopedWecomTarget } from "../../target.js";
 import { deliverAgentApiMedia, deliverAgentApiText } from "../../transport/agent-api/delivery.js";
 import { canUseAgentApiDelivery } from "./fallback-policy.js";
 import { getWecomRuntime } from "../../runtime.js";
+import { chunkTextToByteLimit } from "../../shared/byte-chunking.js";
+import { createSendPacer } from "../../shared/send-pacing.js";
+import { MESSAGE_BYTE_LIMITS } from "../../types/constants.js";
 
 export class WecomAgentDeliveryService {
   constructor(private readonly agent: ResolvedAgentAccount) { }
@@ -51,10 +54,19 @@ export class WecomAgentDeliveryService {
     );
 
     const runtime = getWecomRuntime();
-    const chunks = runtime.channel.text.chunkText(params.text, 2048);
+    // message/send 的上限是 2048 字节，不是字符：纯中文按字符切会超出 3 倍
+    // 并被企微静默截断。断点仍由 SDK 的 chunkText 选，字节由这里兜。
+    const chunks = chunkTextToByteLimit(
+      params.text,
+      MESSAGE_BYTE_LIMITS.AGENT_MESSAGE,
+      (value, charLimit) => runtime.channel.text.chunkText(value, charLimit),
+    );
 
+    // 隔开相邻两片：企微不保证同一收件人同秒多条消息的先后。
+    const pace = createSendPacer();
     for (const chunk of chunks) {
       if (!chunk.trim()) continue;
+      await pace();
       await deliverAgentApiText({
         agent: this.agent,
         target,

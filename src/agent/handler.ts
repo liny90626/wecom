@@ -19,6 +19,9 @@ import {
 import { setPeerContext } from "../context-store.js";
 import { getWecomRuntime } from "../runtime.js";
 import { registerWecomSourceSnapshot } from "../runtime/source-registry.js";
+import { chunkTextToByteLimit } from "../shared/byte-chunking.js";
+import { createSendPacer } from "../shared/send-pacing.js";
+import { MESSAGE_BYTE_LIMITS } from "../types/constants.js";
 import {
   buildWecomUnauthorizedCommandPrompt,
   resolveWecomCommandAuthorization,
@@ -883,6 +886,9 @@ async function processAgentMessage(params: {
   let hasResponseSent = false;
   // 进度提示与正式回复共享同一队列，避免已开始发送的提示晚于正文到达。
   let messageSendQueue = Promise.resolve();
+  // 会话级节流，跨 deliver 调用共享：否则相邻两个 Block 的首尾两片仍可能
+  // 落在同一秒，而企微对同秒多条消息的先后不作保证。
+  const paceSend = createSendPacer();
   const effectiveAgent = upstreamAgent ?? agent;
   const effectiveReplyTarget = upstreamReplyTarget ?? replyTarget;
   const processingTimer = setTimeout(() => {
@@ -972,12 +978,30 @@ async function processAgentMessage(params: {
           // 将本次发送任务加入队列
           // 即使 deliver 被并发调用，队列中的任务也会按入队顺序串行执行
           const currentTask = async () => {
+            // 600 字符远低于企微 2048 字节上限，是刻意的：分批发送让用户更早
+            // 看到内容。但 600 个 emoji 是 2400 字节，所以切完再过一遍字节上限。
             const MAX_CHUNK_SIZE = 600;
-            // 确保分片顺序发送
+            const replyChunks: string[] = [];
             for (let i = 0; i < outboundText.length; i += MAX_CHUNK_SIZE) {
-              const chunk = outboundText.slice(i, i + MAX_CHUNK_SIZE);
-
+              replyChunks.push(
+                ...chunkTextToByteLimit(
+                  outboundText.slice(i, i + MAX_CHUNK_SIZE),
+                  MESSAGE_BYTE_LIMITS.AGENT_MESSAGE,
+                  (value, charLimit) => {
+                    const parts: string[] = [];
+                    for (let j = 0; j < value.length; j += charLimit) {
+                      parts.push(value.slice(j, j + charLimit));
+                    }
+                    return parts;
+                  },
+                ),
+              );
+            }
+            // 确保分片顺序发送
+            for (const chunk of replyChunks) {
               try {
+                // 隔开相邻两片：企微不保证同一收件人同秒多条消息的先后。
+                await paceSend();
                 if (upstreamAgent) {
                   await sendUpstreamAgentApiText({
                     upstreamAgent,
@@ -992,11 +1016,6 @@ async function processAgentMessage(params: {
                 log?.(
                   `[wecom-agent] reply chunk delivered (${info.kind}) to ${isGroup ? `chat:${peerId}` : fromUser}, len=${chunk.length}, sessionKey=${ctxPayload.SessionKey ?? route.sessionKey}, sessionId=${sessionId ?? "N/A"}`,
                 );
-
-                // 强制延时：确保企业微信有足够时间处理顺序（优化：200ms → 50ms）
-                if (i + MAX_CHUNK_SIZE < outboundText.length) {
-                  await new Promise((resolve) => setTimeout(resolve, 50));
-                }
               } catch (err: unknown) {
                 const message =
                   err instanceof Error
@@ -1066,11 +1085,6 @@ async function processAgentMessage(params: {
                 }
               }
               deferredMediaUrls = [];
-            }
-
-            // 不同 Block 之间也增加一点间隔（优化：200ms → 50ms）
-            if (info.kind !== "final") {
-              await new Promise((resolve) => setTimeout(resolve, 50));
             }
           };
 

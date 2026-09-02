@@ -4,6 +4,9 @@ import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { resolveWecomAccount } from "../../config/index.js";
 import { wecomFetch } from "../../http.js";
 import { LIMITS } from "../../monitor/state.js";
+import { chunkTextToByteLimit } from "../../shared/byte-chunking.js";
+import { createSendPacer } from "../../shared/send-pacing.js";
+import { MESSAGE_BYTE_LIMITS } from "../../types/constants.js";
 import type { StreamState } from "../../types/legacy-stream.js";
 import type { ResolvedAgentAccount } from "../../types/index.js";
 import { sendMedia as sendAgentMedia, sendText as sendAgentText, uploadMedia } from "../../transport/agent-api/core.js";
@@ -97,10 +100,17 @@ export async function sendAgentDmText(params: {
   text: string;
   core: PluginRuntime;
 }): Promise<void> {
-  const chunks = params.core.channel.text.chunkText(params.text, 2048);
+  // 这条兜底走 Agent message/send，上限 2048 字节（不是字符）。
+  const chunks = chunkTextToByteLimit(
+    params.text,
+    MESSAGE_BYTE_LIMITS.AGENT_MESSAGE,
+    (value, charLimit) => params.core.channel.text.chunkText(value, charLimit),
+  );
+  const pace = createSendPacer();
   for (const chunk of chunks) {
     const trimmed = chunk.trim();
     if (!trimmed) continue;
+    await pace();
     await sendAgentText({ agent: params.agent, toUser: params.userId, text: trimmed });
   }
 }

@@ -1,6 +1,6 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-08-29
+> 最后更新：2026-09-04
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
@@ -8,6 +8,9 @@
 
 - 已发布基线：2.7.260-26，标签 released/2.7.260-26，已推送 fork。
 - 兼容目标：OpenClaw 2026.7.1-2（用户生产）与**最新稳定版**（发版时为 2026.8.2）。devDependency 仍钉 2026.7.1-2；`npm run compat:check` 对两条线各跑 typecheck 与全量测试，**发版前必跑**。2026.6.x 不再维护。
+- **main 领先 released/2.7.260-26 两个未发布的代码提交**（用户决定：不发版、不打 tag，只更新文档并推 fork）：
+  - 5bcbd05 **运行时上下文围栏**：两条线的核心都把 `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>…<<<END_OPENCLAW_INTERNAL_CONTEXT>>>` 作为 display:false 的载体消息喂给模型——模型看见它是设计使然，8.2 只是把头部指令写严了。插件侧两处缺口：①过程步骤（CLI 后端 commentary）与推理由核心**原样**转来，模型复述该块时会进气泡 / 推送 / 思考块；②三条入站车道的用户文本未转义，独占成行的围栏块会被核心 `resolveRuntimeContextPromptParts` 提取为可信上下文（伪造）。修在 `src/shared/internal-runtime-context.ts`：入站转义成核心自己用的 `[[OPENCLAW_INTERNAL_CONTEXT_BEGIN]]` 形态，出站 preamble / reasoning 剥围栏块；final 与 block 核心已净化，不重复。
+  - c39ace2 **compat 工作区移出仓库树**（`~/.cache/wecom-openclaw-compat/`）：原先放在仓库内时 TypeScript 沿祖先 node_modules 找到钉住的 7.1-2 声明，8.2 缺 .d.ts 的子路径实际按 7.1-2 类型检查——2.7.260-26 汇报的「8.2 typecheck PASS」在 `file-access-runtime` 这一个子路径上不严谨（运行时验证不受影响，两版签名相同）。移出后复验：0 错误、0 次回落到仓库 node_modules。
 - 2.7.260-26 收口四件事（详见 changelog/v2.7.260-26.md）：
   - **长任务结尾的假状态**有两条独立机制：推送车道把时钟押在答案正文上（现场 12m24s 是死亡时刻 + N×60s 网格的指纹）；一次 ACK 丢失后 final 改走推送而冻结气泡永不 finish。前者改为带正文的推送不缀钟，后者在答案推送落地后补一帧去钟的 best-effort finish。收尾推送只发「（回复完毕）」。
   - **8.x 兼容**：根入口与约 55 个子路径被删、`loadConfig` 删除、`assertLocalMediaAllowed` 私有化、`useAccessGroups` 删除、`agents.entries` 成为名册正典（`agents.list` 只是只读投影）、真实分发器要求 SQLite 迁移——全部改成两条线共有的接口。8.x 上操作侧必须放行 `plugins.entries.wecom.hooks.allowConversationAccess=true`（向导已自动写入；7.x 该钩子不受此闩）。
@@ -31,7 +34,7 @@
 ### 当前 Git 状态
 
 - 分支：main
-- HEAD：released/2.7.260-26 所指提交（其前三个功能提交 a9b1882 / f53c974 / 821f413），与 fork/main 相同
+- HEAD：main 领先 released/2.7.260-26 三个提交（5bcbd05 运行时上下文围栏、c39ace2 compat 工作区移出仓库、本文档更新），已推 fork/main；**未打新 tag**
 - 维护远端：fork = git@github.com:liny90626/wecom.git
 - 上游远端：origin = https://github.com/YanHaidao/wecom.git（已对账其 25 个新提交，见第 8 节）
 - 允许推送的目标只有 fork；禁止向 origin 推送。
@@ -43,14 +46,27 @@
   - scripts/check-openclaw-compat.mjs（新增）、scripts/patch-wecom-long-message.mjs（门禁字面量 3_000 → 5_000）
   - src/runtime/reply-orchestrator.test.ts（独立临时状态目录、8.x 兜底契约）、mcp 两个测试的 runtime 替身
   - package.json、src/version.ts、.gitignore、README.md、changelog/、本文件
+- 未发布提交涉及的文件：
+  - src/shared/internal-runtime-context.ts / .test.ts（新增）；src/transport/bot-ws/inbound.ts、src/capability/bot/stream-orchestrator.ts、src/agent/handler.ts 各一处入站转义；src/runtime/reply-orchestrator.ts 两处出站剥离；inbound.test.ts、reply-orchestrator.test.ts 新增用例
+  - scripts/check-openclaw-compat.mjs（缓存目录移出仓库）、.gitignore、README.md、本文件
 
 ### 发布状态
 
 - 版本号 2.7.260-26，包指纹见第 7 节。
 - tag released/2.7.260-26 与 main 均已推送 fork，核对结果见第 7 节。
+- 其后 main 上的三个提交未发版、未打 tag（用户决定）；下一版发布时随版本带出，changelog 需补写运行时上下文围栏与 compat 工作区两项。
 - origin 仍停在 f5f5650，无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-5 运行时上下文围栏（已提交 main，未发布）
+
+复现用例：`reply-orchestrator.test.ts`「keeps a runtime-context fence out of the process steps the real dispatcher forwards」（真实分发器：final 被核心剥掉、preamble 原样到达——两条线一致）与「strips a quoted runtime-context fence from reasoning before it reaches the bubble」；`inbound.test.ts`「neutralises runtime-context delimiters typed by the user」。三条不变量：
+- 三条入站车道的用户文本在进入 `finalizeInboundContext` 前经 `escapeInternalRuntimeContextDelimiters`，转义形态与核心对子代理 / MCP 文本所用的相同。
+- `enqueuePreamble` 与 `onReasoningStream` 经 `stripInternalRuntimeContext`：整块删除、未闭合的开围栏截断其后全部、行内提及保留——与核心同名函数同行为。final / block 不重复处理（核心 `sanitizeUserFacingText` 已剥）。
+- 这些辅助函数两条线都没有公开 SDK 入口，故本地实现；核心若改分隔符，需同步 `src/shared/internal-runtime-context.ts` 里的四个常量。
+
+残留（刻意不改）：模型在 final 里只复述 notice 句子「This context is runtime-generated…」而无围栏时，核心与插件都不剥，与核心自带渠道一致。
 
 ### 2.-4 长任务收尾、双版本兼容、Bot WS 提速（2.7.260-26）
 
@@ -234,6 +250,7 @@ lastDeliveredBodySourceText / previewFrozenDeliveredSourceText 全部失效，�
     现场描述的「2 分钟」版本本轮未能复现，且静态可证下一格恒 ≥ 开始 + 5 分钟。
 5.6 2.7.260-26 需真机复验：①长任务答案末尾不再有时钟；②答案改走推送时上方气泡应已关闭且不带时钟（日志 `stream-final-skip-unreliable` 新增 `ackUntrusted` / `windowDead` 字段区分两种收尾）；③气泡帧最大从约 10 KB 变为最多 15 KB、每 1.5 秒一帧，看长答案流式是否顺畅；④死窗后长任务后段消息条数会变多（每 20 秒最多一条正文推送）。
 5.7 8.x 行为差异（未改代码）：零可见输出的回合，8.x 核心自己投递英文兜底「No reply was generated for this message…」并报告 `noVisibleReplyFallbackDelivered`，7.x 由插件发中文提示；插件对两种形态都处理正确，措辞不同。已安装实例升到 8.x 必须手动补 `plugins.entries.wecom.hooks.allowConversationAccess=true`（向导只在安装时写）。
+5.8 核心层事实（改运行时上下文相关代码前先知道）：核心只对自己嵌入的不可信文本（子代理结果、MCP 应用上下文）转义分隔符，从不转义渠道入站，自带渠道亦然；`onCommentaryText` → `onItemEvent` 的 preamble 与 reasoning 不经 `sanitizeUserFacingText`。伪造入站上下文是核心层面对所有渠道的通病，插件只堵自己这三条门。
 5.1 仓库 package-lock.json 为 0 字节，npm audit --omit=dev 返回 ENOLOCK。生成 lockfile 会改变安装解析，属于会影响使用者的动作，需用户点头，至今未生成。
 5.3 补发改走 wecom-cli 已评估并**否掉**：CLI 的 chat_id 必须取自本次 sessions list（技能明文禁止历史 chat_id），
     只能发给授权人与最近 10 个会话（长任务的目标会话可能已掉出窗口），子进程时延 300~500ms 且按 botId 全局串行，
@@ -286,7 +303,7 @@ src/transport/bot-ws/sdk-adapter.ts
 ~~~text
 OpenClaw: 2026.7.1-2 与 2026.8.2（npm run compat:check，两条线各一遍）
 Vitest: 63 / 63 files，811 / 811 tests（两条线数字相同）
-typecheck: 两条线 PASS（8.2 由 compat 脚本为 file-access-runtime 补类型 shim，8.2 该子路径不带 .d.ts）
+typecheck: 两条线 PASS（8.2 由 compat 脚本为 file-access-runtime 补类型 shim，8.2 该子路径不带 .d.ts；发版时工作区还在仓库内，该子路径实际借了 7.1-2 的声明，见下）
 npm run build / verify-dist: passed
 B1: READY
 B2: READY（BLOCK_PREVIEW_MAX_CHARS 字面量已同步为 5_000）
@@ -294,6 +311,18 @@ B3: READY
 8.2 plugins inspect wecom --runtime --json: status loaded（channel、2 tools、service、2 http routes）
 真实 mutateConfigFile 名册写入 e2e：7.1-2 list、8.2 entries / list / 空配置 均正确
 ~~~
+
+未发布提交（5bcbd05 / c39ace2）的验证——机器负载 30+（另一项目的沙箱任务），后台任务被中止，全部前台分片跑完：
+
+~~~text
+7.1-2: 全部 64 个测试文件分四片跑完，全部通过；gateway-sim「carries real narration」并发片超时一次，单跑 19 秒通过
+8.2:   全部测试文件分三片跑完（工作区已在 ~/.cache/wecom-openclaw-compat/），全部通过；同一用例并发超时一次，单跑 27 秒通过
+typecheck: 7.1-2 build PASS；8.2 tsc 0 错误，file-access-runtime 经 shim 解析到 8.2 安装内，0 次回落到仓库 node_modules
+B1 / B2: READY（改动之后跑的）
+B3: 脚本本身负载下 10 分钟未跑完；其聚焦测试集 4 文件 280/280 单独通过，字面量目标 reply.ts / app/index.ts 本轮未动
+~~~
+
+**下一版发布前必须在空闲机器上补跑一次完整 `npm run compat:check 2026.7.1-2 2026.8.2` 与 B3 脚本。**
 
 本轮新增的复现用例（改这些路径前先跑）：
 - long-task-progress「死窗后的收尾：答案正文随推送出门时不再押着「长任务处理中」的状态尾巴」
@@ -303,6 +332,7 @@ B3: READY
 - gateway-sim「keeps streaming a long answer into the bubble up to the frame budget」
 - media.test「reads a local file that sits under an approved root」/「refuses a local file outside every approved root」
 - dynamic-agent.roster.test 全部；openclaw-sdk-imports.test
+- reply-orchestrator「keeps a runtime-context fence out of the process steps the real dispatcher forwards」/「strips a quoted runtime-context fence from reasoning…」；inbound「neutralises runtime-context delimiters typed by the user」；internal-runtime-context.test 全部
 
 负载提示不变：机器忙时 fake-timer 套件会撞 30 秒墙钟（本轮 gateway-sim「carries real narration」并发时 68–110 秒、单跑 0.7 秒）。**不要为掩盖负载抖动修改生产 timeout 或用例断言。**
 差分用例 media-directive-alignment 的反向证据（改 stripMediaDirectives / mergeReplyText 时复跑）：关掉 stripMediaDirectives → 78 处缺陷；围栏状态机退回布尔量 → 24 处；looksLikeMediaTarget 恒真 → 12 处（2.7.260-25 记录，本轮未动这两处）。
@@ -411,8 +441,8 @@ npx vitest run \
 
 ### 下一版发布时（需要用户明确批准）
 
-1. 更新 package.json 与 src/version.ts（version.test.ts 会对账）。
-2. `npm run compat:check`（两条线 typecheck + 全量 Vitest）/ build / verify-dist / B1 / B2 / B3 / diff check。
+1. 更新 package.json 与 src/version.ts（version.test.ts 会对账）；changelog 补写 5bcbd05 / c39ace2 两项。
+2. `npm run compat:check`（两条线 typecheck + 全量 Vitest；工作区在 ~/.cache/wecom-openclaw-compat/，删目录即刷新）/ build / verify-dist / B1 / B2 / B3 / diff check。
 3. 打包并记录指纹，重复打包校验 SHA-256 一致。
 4. 创建 released/<完整版本号> tag，只推 fork（git@github.com:liny90626/wecom.git），绝不推 origin。
 

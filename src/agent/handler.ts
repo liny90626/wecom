@@ -21,6 +21,7 @@ import { getWecomRuntime } from "../runtime.js";
 import { registerWecomSourceSnapshot } from "../runtime/source-registry.js";
 import { chunkTextToByteLimit } from "../shared/byte-chunking.js";
 import { createSendPacer } from "../shared/send-pacing.js";
+import { escapeInternalRuntimeContextDelimiters } from "../shared/internal-runtime-context.js";
 import { MESSAGE_BYTE_LIMITS } from "../types/constants.js";
 import {
   buildWecomUnauthorizedCommandPrompt,
@@ -767,6 +768,8 @@ async function processAgentMessage(params: {
     storePath,
     sessionKey: route.sessionKey,
   });
+  // Untrusted text (message plus any file preview): see shared/internal-runtime-context.
+  finalContent = escapeInternalRuntimeContextDelimiters(finalContent);
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "WeCom",
     from: fromLabel,

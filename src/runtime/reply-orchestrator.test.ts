@@ -76,6 +76,117 @@ describe("dispatchRuntimeReply", () => {
     );
   });
 
+  it("strips a quoted runtime-context fence from reasoning before it reaches the bubble", async () => {
+    // The core forwards reasoning raw, and the think block is shown to the user.
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+      await params.replyOptions.onReasoningStream({
+        text: "先看运行时上下文\n<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\nchat_id: wx-123\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>\n再决定怎么答",
+      });
+      await params.replyOptions.onReasoningEnd();
+      await params.dispatcherOptions.deliver({ text: "答案" }, { kind: "final" });
+      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchRuntimeReply({
+      core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+      cfg: {} as any,
+      session: { ctx: { SessionKey: "session-reasoning-fence" } } as any,
+      replyHandle: {
+        context: {
+          transport: "bot-ws",
+          accountId: "default",
+          raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+        },
+        deliver,
+      } as any,
+    });
+
+    const reasoningTexts = deliver.mock.calls
+      .filter(([payload]) => payload?.isReasoning === true && payload.text)
+      .map(([payload]) => String(payload.text));
+    expect(reasoningTexts).toEqual(["先看运行时上下文\n再决定怎么答"]);
+    expect(JSON.stringify(deliver.mock.calls)).not.toContain("OPENCLAW_INTERNAL_CONTEXT");
+  });
+
+  it("keeps a runtime-context fence out of the process steps the real dispatcher forwards", async () => {
+    // CLI-backend commentary is handed to onItemEvent unsanitised by the core
+    // (verified on 2026.7.1-2 and 2026.8.2); a model narrating its runtime
+    // context would otherwise put the fenced block into the bubble and the push.
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const previousTestFast = process.env.OPENCLAW_TEST_FAST;
+    const stateDir = freshStateDir("runtime-context-fence");
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    process.env.OPENCLAW_TEST_FAST = "1";
+    try {
+      const { dispatchReplyWithBufferedBlockDispatcher: realDispatch } = await import(
+        "openclaw/plugin-sdk/reply-runtime"
+      );
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation((params) =>
+        realDispatch({
+          ...params,
+          replyResolver: async (_ctx, options) => {
+            await options.onItemEvent?.({
+              itemId: "commentary-fence-1",
+              kind: "preamble",
+              progressText:
+                "先核对运行时上下文\n<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\nchat_id: wx-123\nmessage_id: m-1\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+            });
+            return { text: "核对完成，结论如下。" };
+          },
+        }),
+      );
+      const deliver = vi.fn().mockResolvedValue(undefined);
+
+      await dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: {
+          ctx: {
+            Body: "查一下",
+            RawBody: "查一下",
+            CommandBody: "查一下",
+            From: "user-fence",
+            To: "wecom-bot",
+            SessionKey: "agent:main:wecom:direct:user-fence",
+            Provider: "wecom",
+            Surface: "wecom",
+            ChatType: "direct",
+            AccountId: "default",
+            MessageSid: "msg-fence",
+          },
+        } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+        } as any,
+      });
+
+      const progressTexts = deliver.mock.calls
+        .filter(([payload]) => payload?.channelData?.openclawProgressKind === "preamble")
+        .map(([payload]) => String(payload.text ?? ""));
+      expect(progressTexts).toEqual(["先核对运行时上下文"]);
+      expect(deliver).toHaveBeenLastCalledWith({ text: "核对完成，结论如下。" }, { kind: "final" });
+      expect(JSON.stringify(deliver.mock.calls)).not.toContain("OPENCLAW_INTERNAL_CONTEXT");
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      if (previousTestFast === undefined) {
+        delete process.env.OPENCLAW_TEST_FAST;
+      } else {
+        process.env.OPENCLAW_TEST_FAST = previousTestFast;
+      }
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("forwards reasoning stream callbacks to bot-ws reply handles", async () => {
     let capturedReplyOptions: any;
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {

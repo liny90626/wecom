@@ -24,6 +24,7 @@ import { finalizeBotStream } from "./stream-finalizer.js";
 import { handleDirectLocalPathIntent } from "./local-path-delivery.js";
 import { stageWecomInboundMediaForSession } from "./sandbox-media.js";
 import { recordInboundSessionSettled } from "../../shared/inbound-session.js";
+import { escapeInternalRuntimeContextDelimiters } from "../../shared/internal-runtime-context.js";
 import { createBotReplyDispatcher } from "./stream-delivery.js";
 import type { BotRuntimeLogger, RecordBotOperationalEvent } from "./types.js";
 
@@ -341,7 +342,10 @@ export function createBotStreamOrchestrator(params: {
     const fromLabel = chatType === "group" ? `group:${chatId}` : `user:${userId}`;
     const storePath = core.channel.session.resolveStorePath(config.session?.store, { agentId: route.agentId });
     const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(config);
-    const effectiveRawBody = appendMediaFailures(rawBody, mediaFailures);
+    // Untrusted text: see shared/internal-runtime-context.
+    const effectiveRawBody = escapeInternalRuntimeContextDelimiters(
+      appendMediaFailures(rawBody, mediaFailures),
+    );
     const previousTimestamp = core.channel.session.readSessionUpdatedAt({
       storePath,
       sessionKey: route.sessionKey,

@@ -5,6 +5,7 @@ import {
   type TemplateCardEventPayload,
 } from "../../capability/card/manager.js";
 import { buildInboundBody } from "../bot-webhook/message-shape.js";
+import { escapeInternalRuntimeContextDelimiters } from "../../shared/internal-runtime-context.js";
 import type {
   ResolvedBotAccount,
   UnifiedInboundEvent,
@@ -154,7 +155,9 @@ export function mapBotWsFrameToInboundEvent(params: {
       senderId,
     },
     senderName: senderId,
-    text: resolveEventText(body, account),
+    // Untrusted text: a fenced runtime-context block typed by the user would
+    // otherwise reach the model as trusted context (see shared/internal-runtime-context).
+    text: escapeInternalRuntimeContextDelimiters(resolveEventText(body, account)),
     timestamp: typeof body.create_time === "number" ? body.create_time : Date.now(),
     raw: {
       transport: "bot-ws",

@@ -1,6 +1,7 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { resolveActiveEmbeddedRunSessionId } from "openclaw/plugin-sdk/agent-harness";
+import { stripInternalRuntimeContext } from "../shared/internal-runtime-context.js";
 import { hasVisibleReplyBody } from "../shared/reply-visibility.js";
 import type { ReplyHandle, ReplyPayload } from "../types/index.js";
 import type { PreparedSession } from "./session-manager.js";
@@ -223,7 +224,9 @@ export async function dispatchRuntimeReply(params: {
   }
 
   const enqueuePreamble = (payload: { itemId?: string; progressText?: string }): boolean => {
-    const text = payload.progressText?.trim() ?? "";
+    // CLI-backend commentary reaches us unsanitised; a model narrating its
+    // runtime context would otherwise put the fenced block in the bubble.
+    const text = stripInternalRuntimeContext(payload.progressText ?? "").trim();
     if (!progressAccepting || abortSignal?.aborted || !text) {
       return false;
     }
@@ -394,7 +397,12 @@ export async function dispatchRuntimeReply(params: {
         },
         onReasoningStream: (payload) => {
           runActivityObserved = true;
-          enqueueReasoning({ text: payload.text ?? "", isReasoning: true });
+          // Reasoning is forwarded raw by the core; the think block is shown to
+          // the user, so a quoted runtime-context fence must not ride along.
+          enqueueReasoning({
+            text: stripInternalRuntimeContext(payload.text ?? ""),
+            isReasoning: true,
+          });
         },
         onReasoningEnd: () => {
           runActivityObserved = true;

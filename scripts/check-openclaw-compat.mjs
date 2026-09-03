@@ -7,10 +7,15 @@
  *   node scripts/check-openclaw-compat.mjs 2026.7.1-2 2026.8.2
  *
  * For each version this installs `openclaw@<version>` under
- * `.openclaw-compat/<version>/` (cached; delete the directory to refresh),
- * builds a throwaway workspace whose `node_modules/openclaw` is that install
- * and whose other dependencies are links to the repo's, then runs `tsc` and
- * `vitest` there. The repo's own node_modules is never touched.
+ * `~/.cache/wecom-openclaw-compat/<version>/` (cached; delete the directory
+ * to refresh), builds a throwaway workspace whose `node_modules/openclaw` is
+ * that install and whose other dependencies are links to the repo's, then runs
+ * `tsc` and `vitest` there. The repo's own node_modules is never touched.
+ *
+ * The cache deliberately lives OUTSIDE the repo: TypeScript walks ancestor
+ * `node_modules` directories, so a workspace under the repo would silently
+ * borrow the repo's (pinned) openclaw declarations for every subpath the
+ * target version ships without a `.d.ts` — and typecheck the wrong version.
  *
  * OpenClaw 2026.8.x ships some `plugin-sdk` subpaths without declaration
  * files (their export map lacks `types`); for those the workspace gets a
@@ -24,7 +29,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const cacheRoot = path.join(repo, ".openclaw-compat");
+const cacheRoot = path.join(os.homedir(), ".cache", "wecom-openclaw-compat");
 const pkg = JSON.parse(fs.readFileSync(path.join(repo, "package.json"), "utf8"));
 
 /** Ambient declarations for subpaths whose 2026.8.x packages ship no .d.ts. */
@@ -115,7 +120,7 @@ function buildWorkspace(version, installDir) {
   const workspace = path.join(cacheRoot, version, "workspace");
   fs.rmSync(workspace, { recursive: true, force: true });
   fs.mkdirSync(workspace, { recursive: true });
-  const skip = new Set(["node_modules", "dist", ".git", ".openclaw-compat"]);
+  const skip = new Set(["node_modules", "dist", ".git"]);
   for (const entry of fs.readdirSync(repo)) {
     if (skip.has(entry)) {
       continue;

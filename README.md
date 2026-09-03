@@ -62,7 +62,7 @@ node scripts/patch-wecom-long-message.mjs --check
 node scripts/patch-wecom-b3-merge-thinking.mjs --check
 npm run build
 npx vitest run
-npm run compat:check   # 对 2026.7.1-2 与最新稳定版各跑一遍 typecheck + 全量测试（首次会下载两个 OpenClaw 到 .openclaw-compat/）
+npm run compat:check   # 对 2026.7.1-2 与最新稳定版各跑一遍 typecheck + 全量测试（首次会下载两个 OpenClaw 到 ~/.cache/wecom-openclaw-compat/）
 ```
 
 如只改 README 等文档文件，可使用 `git diff --check` 做格式自检。

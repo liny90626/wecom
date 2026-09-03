@@ -91,9 +91,6 @@ temp/
 # Output of 'npm pack'
 *.tgz
 
-# scripts/check-openclaw-compat.mjs installs the OpenClaw lines it checks against here
-.openclaw-compat/
-
 # Yarn
 .yarn-integrity
 .yarn/cache

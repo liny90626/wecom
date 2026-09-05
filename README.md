@@ -558,6 +558,16 @@ openclaw cron rm <JOB_ID>
 - `accounts.<id>.agent.agentSecret` → `accounts.<id>.agent.corpSecret`
 - 旧 Bot/Agent DM 子配置 → 当前账号级访问控制字段
 
+从 2.7.x fork（`2.7.260-*`）升级时，Doctor 同时处理该系列独有的键：
+
+- `mediaMaxMb`（顶层与账号级）→ `media.maxBytes`（字节）
+- `media.localRoots` → `mediaLocalRoots`
+- `mediaDownloadTimeoutMs`、`media.downloadTimeoutMs`、`network.mediaDownloadTimeoutMs`、`routing`、`streaming` → 删除，3.x 不再读取
+
+这些旧键留在配置里不会阻止网关启动：schema 只校验插件真正读取的键的类型，多余的键按默认值处理，
+`openclaw doctor` 会提示它们，`--fix` 时迁移或删除。另外，入站附件大小上限现在跟随 OpenClaw 自身的
+`agents.defaults.mediaMaxMb`（未设置时为 5 MB），不再有 2.7.x 的 80 MB 默认值；需要接收更大的文件时请设置该项。
+
 推荐流程：
 
 ```bash

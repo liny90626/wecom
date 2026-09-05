@@ -6,7 +6,7 @@
 
 ## 0. 先读结论
 
-- **已发布 3.0.0-v1**：tag `released/3.0.0-v1`，与 main 一起推送 fork（核对见第 6 节）。生产此前跑 2.7.260-26（tag `released/2.7.260-26`），升级与真机验收步骤见 `changelog/v3.0.0-v1.md` 第六节。
+- **3.0.0-v1 已发布但在现网装不起来**：tag `released/3.0.0-v1` 已推 fork；用户在 2026.7.1-2 上安装后 CLI 因 `channels.wecom` 多出 `mediaMaxMb`、`streaming` 两个 2.7.x 时代的键而拒绝启动（上游 v3 schema 对未知键零容忍）。修复在 main 上（见第 3 节 ⑦），**3.0.0-v2 待用户批准后打包 / 打 tag / 推送**。生产此前跑 2.7.260-26。
 - **main 已切换到上游 v3.0.0 基线**：YanHaidao/wecom `v3.0.0`（origin `133773f`）本身是以腾讯官方 `WecomTeam/wecom-openclaw-plugin` 2026.8.17（commit `3b1cbe3`）为主线的重建。2.7.260 的 Bot WS 车道（`src/transport`、`src/runtime`、`src/capability/bot`）、B1/B2/B3 门禁脚本、`openclaw-sdk-imports.test.ts` 守卫都不在这棵树里了，见第 2 节。
 - 3.0.0-v1 相对 `released/2.7.260-26` 的提交：
   - `7c167ca` sync：采纳 v3.0.0 + Codex 的 2026.7.1-2 兼容适配（devDependency 钉回 7.1-2、setup contract 可选、账号合并、字节切分/节奏移植等）。
@@ -87,6 +87,7 @@ src/monitor.ts monitorWeComProvider
 | ④ | `outbound.sendMedia`（message 工具）失败时只给用户发一条提示并**返回成功**，模型以为文件已发 | channel.test「fails the message tool when the upload fails…」「…rejects the file size」 | 三条失败路径（Bot WS、Agent HTTP 兜底、上下游）都先通知用户再抛错，工具拿到失败 |
 | ⑤ | 出站文件不在白名单内时提示「无法处理文件…请稍后再试」，重试无用 | monitor.media.test「points at mediaLocalRoots…」 | 识别本地回退实现的 `not under an allowed directory`，给 `mediaLocalRoots` 配置提示 |
 | ⑥ | `wecom diagnose --json` 在 9.1 上丢失 machineOutput 标记 | cli.test「marks `wecom diagnose --json` as machine output…」 | 非字面量描述符保留该字段 |
+| ⑦ | 2.7.x 现网配置里的旧键（`mediaMaxMb`、`streaming`、`media.localRoots`…）让整段 `channels.wecom` 校验失败，网关拒绝启动 | config-schema.test「does not refuse to start on keys the 2.7.x fork accepted」等 3 条；doctor-contract.test 2 条 | schema 只校验插件读取的键的类型，未知键放过；清单 schema 由运行时生成并用测试守住一致；doctor --fix 迁移 `mediaMaxMb`→`media.maxBytes`、`media.localRoots`→`mediaLocalRoots`，删除其余 2.7.x 独有键 |
 
 不变量（改 `src/monitor.ts` 前先跑 gateway-sim）：
 - 任何一帧 `stream.content` ≤ 15360 字节；气泡首帧不变时不重绘（`state.streamedText`）。
@@ -146,7 +147,7 @@ git diff --check
 
 ## 7. 发版步骤（3.0.0-v1 已按此执行；下一版复用，需用户明确批准）
 
-1. `npm version <版本> --no-git-tag-version`（`src/version.ts` 运行时读 package.json，不用改）。
+1. `npm version <版本> --no-git-tag-version`（`src/version.ts` 运行时读 package.json，不用改）。改过 `src/config-schema.ts` 时，先 `npm run build`，再把 `dist/src/config-schema.js` 导出的 `wecomChannelJsonSchema` 写回 `openclaw.plugin.json` 的 `channelConfigs.wecom.schema`（config-schema.test 的「ships the same schema…」会对账；冷启动校验用的是清单里那份）。
 2. 新增 `changelog/v<版本>.md`，更新 `changelog/README.md` 索引与 README「当前版本」行。
 3. 跑第 6 节全量命令；`npm pack` 到仓库根目录，记录 size / shasum / SHA-256，重复打包校验一致，把指纹写进 changelog 与本文档。
 4. `git commit -am "release: <版本>"`，`git tag -a released/<版本> -m "WeCom plugin <版本>"`，`git push fork main && git push fork released/<版本>`。**绝不推 origin，不打 `v*` 标签。**
@@ -159,4 +160,5 @@ git diff --check
 3. ACK 丢失时的 finish 兜底可能造成一次重复（气泡若已收尾，推送会再发一遍）；这是有意的取舍。
 4. 主动推送 15 KB 上限、`chunkMarkdownText` 在围栏边界的裁切行为只有 2.7.x 现网旁证，未在新基线真机验证。
 5. Windows 真机、真实企业微信网关 / 客户端、上下游企业链路、模板卡片交互均未在新基线验证；`OFFICIAL_CAPABILITY_ACCEPTANCE.md` 全部 NOT RUN。
-6. 官方基线同步：`UPSTREAM_BASELINE.json` 记录 `3b1cbe3` / 2026.8.17，与官方 HEAD 一致；以后对账用 `npm run upstream:check`（先按 `OFFICIAL_PLUGIN_MIGRATION.md` 配好只读 `official` 远端）。
+6. 配置校验原则：`channels.wecom` 及账号 / agent / media / network 对象**不因未知键失败**（2.7.x 现网配置的教训），只校验插件读取的键的类型；新增配置键时同时补 schema、清单、doctor 迁移与 README。
+7. 官方基线同步：`UPSTREAM_BASELINE.json` 记录 `3b1cbe3` / 2026.8.17，与官方 HEAD 一致；以后对账用 `npm run upstream:check`（先按 `OFFICIAL_PLUGIN_MIGRATION.md` 配好只读 `official` 远端）。

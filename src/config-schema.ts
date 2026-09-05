@@ -1,6 +1,14 @@
 import { buildJsonChannelConfigSchema } from "openclaw/plugin-sdk/channel-config-schema";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 
+/**
+ * 未知键不阻止启动。2.7.x fork 的配置里留着 `mediaMaxMb`、`streaming`、`media.localRoots`、
+ * `bot.ws` 这类新基线不再读取的键；把它们判成非法会让整段 channels.wecom 失效、网关起不来。
+ * 这里只校验插件真正读取的键的类型，多余的键一律放过，运行时按默认值工作，
+ * `openclaw doctor --fix` 负责迁移或删除已知的旧键（见 doctor-contract.ts）。
+ */
+const TOLERATE_UNKNOWN_KEYS = { additionalProperties: true } as const;
+
 const allowFromSchema = {
   type: "array",
   items: { anyOf: [{ type: "string" }, { type: "number" }] },
@@ -26,7 +34,7 @@ const groupSchema = {
 
 const agentSchema = {
   type: "object",
-  additionalProperties: false,
+  ...TOLERATE_UNKNOWN_KEYS,
   properties: {
     corpId: { type: "string" },
     corpSecret: { type: "string" },
@@ -53,7 +61,7 @@ const agentSchema = {
 
 const networkSchema = {
   type: "object",
-  additionalProperties: false,
+  ...TOLERATE_UNKNOWN_KEYS,
   properties: {
     timeoutMs: { type: "number", minimum: 0 },
     retries: { type: "number", minimum: 0 },
@@ -64,7 +72,7 @@ const networkSchema = {
 
 const mediaSchema = {
   type: "object",
-  additionalProperties: false,
+  ...TOLERATE_UNKNOWN_KEYS,
   properties: {
     tempDir: { type: "string" },
     retentionHours: { type: "number", minimum: 0 },
@@ -129,13 +137,13 @@ const accountProperties = {
 
 export const wecomAccountJsonSchema = {
   type: "object",
-  additionalProperties: false,
+  ...TOLERATE_UNKNOWN_KEYS,
   properties: accountProperties,
 } as const;
 
 export const wecomChannelJsonSchema = {
   type: "object",
-  additionalProperties: false,
+  ...TOLERATE_UNKNOWN_KEYS,
   properties: {
     ...accountProperties,
     defaultAccount: { type: "string" },

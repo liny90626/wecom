@@ -6,7 +6,8 @@
 
 ## 0. 先读结论
 
-- **已发布 3.0.0-5**（tag `released/3.0.0-5`，已推 fork）：这是回退版本——代码是 2.7.260-26 车道 + 两个此前未发布的修复 + 上游 v3.0.0 的治理层文件（`THIRD_PARTY_NOTICES.md`、`UPSTREAM_BASELINE.json`、`npm run upstream:check`）+ 生产配置形状回归测试。版本号规则改为 `3.0.0-<构建号>`，构建号从 5 起（用户 2026-09-05 指定）。
+- **已发布 3.0.0-6**（tag `released/3.0.0-6`，已推 fork）：在 3.0.0-5 之上修 `MEDIA:` 文件静默丢失（-26 起的 `readLocalFileFromRoots` 在 Windows 现网拒绝合法路径；本地重写 -25 的 realpath 白名单，见 changelog/v3.0.0-6.md）。**3.0.0-5 不要装。** 用户反馈的「说文件发了没到」由此闭环，等真机复验。
+- 3.0.0-5（tag `released/3.0.0-5`）：这是回退版本——代码是 2.7.260-26 车道 + 两个此前未发布的修复 + 上游 v3.0.0 的治理层文件（`THIRD_PARTY_NOTICES.md`、`UPSTREAM_BASELINE.json`、`npm run upstream:check`）+ 生产配置形状回归测试。版本号规则改为 `3.0.0-<构建号>`，构建号从 5 起（用户 2026-09-05 指定）。
 - **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。两个 tag 保留作记录，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
 - 上游 `YanHaidao/wecom` 与官方 `WecomTeam/wecom-openclaw-plugin` 的对账基线：官方 HEAD `3b1cbe3`（2026.8.17）此后无新提交；`npm run upstream:check` 可随时复核（只读 `official` 远端）。
 - 兼容目标：OpenClaw 2026.7.1-2（用户生产）与**最新稳定版**（3.0.0-5 发版时为 2026.9.1；两条线各 65 文件 / 824 用例全绿）。devDependency 仍钉 2026.7.1-2；`npm run compat:check` 对两条线各跑 typecheck 与全量测试，**发版前必跑**。2026.6.x 不再维护。
@@ -300,26 +301,38 @@ src/transport/bot-ws/sdk-adapter.ts
 
 ## 7. 当前验证证据
 
-### 已完成（3.0.0-5，2026-09-05）
+### 已完成（3.0.0-6，2026-09-05）
 
 ~~~text
 OpenClaw: 2026.7.1-2 与 2026.9.1（npm run compat:check，两条线各一遍）
-Vitest: 65 / 65 files，824 / 824 tests（两条线数字相同；单独运行同样全绿）
-typecheck: 两条线 PASS（9.1 由 compat 脚本为 file-access-runtime 补类型 shim，工作区在 ~/.cache/wecom-openclaw-compat/）
+Vitest: 65 / 65 files，827 / 827 tests（两条线数字相同）；单独运行时 monitor.integration「Inbound Image」偶发一次
+        「WeCom runtime not initialized」竞态（3.1 s 后 spy 未被调用），复跑 0.6 s 通过——高负载下的既有抖动，不动断言
+typecheck: 两条线 PASS（9.1 由 compat 脚本为 file-access-runtime 补类型 shim；本版起 media.ts 已不再 import 该子路径）
 npm run build / verify-dist: PASS
-B1 / B2 / B3: READY
+B1 / B2 / B3: READY（reply.ts 只加了两行日志）
 git diff --check: clean
 npm pack 两次: SHA-256 一致
-隔离安装（7.1-2，临时 OPENCLAW_STATE_DIR，生产形状配置）: PASS（临时状态目录先装包再换入生产形状配置：config valid；plugins inspect 报 3.0.0-5、无 diagnostics 错误；channels list / status 两账号 configured、enabled）
+隔离安装（7.1-2，真实 v1 包复现锁死 → 手动换目录到 3.0.0-6）: PASS（装 v1 → 放入生产形状配置，config validate 报 6 处 additional properties，与现场一致 → 保留 node_modules 换入 3.0.0-6 → Config valid；plugins inspect 报 3.0.0-6、diagnostics 为空；channels list 两账号 configured、enabled；网关启动，两账号 Bot WS 与 agent-callback 均 started，凭据为假故 853000 属预期）
 ~~~
 
-本版新增的复现用例：`src/config/production-shape.test.ts`（多账号嵌套 bot/agent + 顶层遗留键 → schema 放行、四账号解析、无冲突）。2.7.260-26 时代的用例清单与负载提示仍然有效：
+本版新增的复现用例：media.test「accepts a file addressed through a symlinked root」「refuses a symlink inside a root that points outside every root」「expands ~ the way the send-media skill shows it」。3.0.0-5 新增：`src/config/production-shape.test.ts`。2.7.260-26 时代的用例清单与负载提示仍然有效：
 
 - long-task-progress「死窗后的收尾…」、gateway-sim 五条收尾 / 推送用例、media.test 白名单两条、dynamic-agent.roster.test、openclaw-sdk-imports.test、reply-orchestrator 与 inbound 的运行时上下文围栏用例、internal-runtime-context.test。
 - 机器忙时 fake-timer 套件会撞 30 秒墙钟（gateway-sim「carries real narration」并发时 68–110 秒、单跑 0.7 秒）。**不要为掩盖负载抖动修改生产 timeout 或用例断言**；先单 worker 复跑。
 - 差分用例 media-directive-alignment 的反向证据：关掉 stripMediaDirectives → 78 处缺陷；围栏状态机退回布尔量 → 24 处；looksLikeMediaTarget 恒真 → 12 处。
 
 ### 包指纹
+
+~~~text
+yanhaidao-wecom-3.0.0-6.tgz（仓库根目录，.gitignore 忽略）
+size:        616,564 bytes
+unpacked:    2,331,363 bytes
+files:       257
+npm shasum:  aa85234d321c7e31e3a4334e27b906ad02be03a8
+SHA-256:     19067674616b127d9942026a30516b5c76d29b451f95395888ef64c19998f627
+~~~
+
+3.0.0-5（含 MEDIA 文件丢失缺陷，不要装）：
 
 ~~~text
 yanhaidao-wecom-3.0.0-5.tgz（仓库根目录，.gitignore 忽略）

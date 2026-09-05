@@ -31,7 +31,7 @@
 | Node.js | `>=22.22.3 <23`、`>=24.15.0 <25` 或 `>=25.9.0`；推荐 Node 24.15+ |
 | 插件包 | `@yanhaidao/wecom` |
 | 插件 ID | `wecom` |
-| 当前版本 | [`v3.0.0`](changelog/v3.0.0.md) |
+| 当前版本 | [`3.0.0-v1`](changelog/v3.0.0-v1.md)，基于上游 [`v3.0.0`](changelog/v3.0.0.md) |
 | 当前腾讯官方同步基线 | `WecomTeam/wecom-openclaw-plugin@2026.8.17` (`3b1cbe3e6643`) |
 
 如果你直接在 OpenClaw 源码仓库运行命令，请把本文的 `openclaw` 替换为：
@@ -711,58 +711,28 @@ npm run upstream:check
 
 同步时只把经过审查的官方变化迁移到本仓库，不向腾讯官方仓库提交或推送代码。
 
-## 发布到 npm
+## 发布（本 fork）
 
-仓库使用 GitHub Actions 和 npm Trusted Publishing。推送与 `package.json.version` 一致的版本标签后，
-工作流会依次校验发布元数据、安装锁定依赖、运行测试、构建、生成并检查 tarball，然后把同一个
-tarball 发布到 npm；成功后再创建对应的 GitHub Release。
+本 fork（`liny90626/wecom`）不发布到 npm，只以 `npm pack` 生成的 tarball 交付。版本号在上游版本后追加
+`-vN`，例如 `3.0.0-v1`；tag 为 `released/<版本>`，只推送到 fork，不推送到上游 `YanHaidao/wecom`。
+上游的 npm Trusted Publishing 工作流（`.github/workflows/release.yml`）由 `v*.*.*` 标签触发且只在上游
+仓库运行，本 fork 不要打 `v` 前缀的标签。
 
-### 一次性配置 npm Trusted Publisher
-
-在 npm 网站打开 `@yanhaidao/wecom` 的包设置，添加 GitHub Actions Trusted Publisher：
-
-- Organization or user：`YanHaidao`
-- Repository：`wecom`
-- Workflow filename：`release.yml`
-- Environment：`release`
-
-仓库的 `release` Environment 名称必须与 npm 设置完全一致。工作流使用 OIDC，不需要配置
-`NPM_TOKEN`；首次验证发布成功后，应删除仓库中遗留的 npm 发布令牌。
-
-### 发布一个新版本
-
-先手动修改 `package.json` 中的 `version`，例如从 `2.7.260` 改为 `2.7.261`。然后完成本地检查，
-提交版本修改并推送到 GitHub：
+发布步骤：
 
 ```bash
-npm ci --ignore-scripts --workspaces=false
-npm test
-npm run build
-git add package.json
-git commit -m "release: v2.7.261"
-git push origin main
+npm version <版本> --no-git-tag-version      # 例如 3.0.0-v1
+npm run compat:check 2026.7.1-2 2026.9.1     # 两条 OpenClaw 线各跑一遍 typecheck + 全量测试
+npm run build && npm run verify-dist
+npm pack                                     # 生成 yanhaidao-wecom-<版本>.tgz；记录 SHA-256，重复打包应逐字节一致
+git commit -am "release: <版本>"
+git tag -a released/<版本> -m "WeCom plugin <版本>"
+git push fork main && git push fork released/<版本>
 ```
 
-确认 GitHub 上的目标提交和版本号无误后，为该提交创建同版本标签 `v2.7.261`。可以在 GitHub
-Release 页面创建标签，也可以在本地执行：
-
-```bash
-git tag v2.7.261
-git push origin v2.7.261
-```
-
-标签必须严格等于 `v` 加 `package.json.version`。不要复用或移动已经发布过的版本标签，因为 npm
-的同一包版本不能覆盖发布。
-
-标签推送后，在 GitHub 的 Actions 页面查看 `Publish npm package`。发布完成后验证：
-
-```bash
-npm view @yanhaidao/wecom version
-npm view @yanhaidao/wecom dist-tags --json
-```
-
-当前 `2.7.260` 已经发布且已有 `v2.7.260` 标签，因此下一次发布必须先提升版本号，不能重新发布
-`2.7.260`。
+安装：把 tarball 复制到本地磁盘后执行 `openclaw plugins install "npm-pack:<本地路径>"`（映射盘或 NAS 上
+安装会触发 `archive changed during validation`）。回滚：重新安装上一版 tarball，例如
+`yanhaidao-wecom-2.7.260-26.tgz`。
 
 ## 项目协作者
 

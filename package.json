@@ -1,6 +1,6 @@
 {
   "name": "@yanhaidao/wecom",
-  "version": "3.0.0",
+  "version": "3.0.0-v1",
   "description": "OpenClaw 全功能企业微信插件，融合官方 Channel、wecom-cli、上下游企业隔离与高级业务 API",
   "type": "module",
   "main": "./dist/index.js",
@@ -33,7 +33,11 @@
     "prebuild": "npm run clean",
     "prepack": "npm run build && npm run verify-dist"
   },
-  "keywords": ["wecom", "openclaw", "wechat-work"],
+  "keywords": [
+    "wecom",
+    "openclaw",
+    "wechat-work"
+  ],
   "license": "ISC",
   "author": "YanHaidao",
   "repository": {
@@ -65,7 +69,9 @@
     }
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"],
+    "extensions": [
+      "./dist/index.js"
+    ],
     "setupEntry": "./dist/setup-entry.js",
     "channel": {
       "id": "wecom",
@@ -77,20 +83,85 @@
       "order": 80,
       "quickstartAllowFrom": true,
       "cliAddOptions": [
-        { "flags": "--connection-mode <mode>", "description": "WeCom Bot connection mode (websocket or webhook)" },
-        { "flags": "--bot-id <id>", "description": "WeCom Bot ID" },
-        { "flags": "--token <token>", "description": "WeCom webhook token" },
-        { "flags": "--encoding-aes-key <key>", "description": "WeCom webhook EncodingAESKey" },
-        { "flags": "--receive-id <id>", "description": "WeCom webhook receiver ID" }
+        {
+          "flags": "--connection-mode <mode>",
+          "description": "WeCom Bot connection mode (websocket or webhook)"
+        },
+        {
+          "flags": "--bot-id <id>",
+          "description": "WeCom Bot ID"
+        },
+        {
+          "flags": "--token <token>",
+          "description": "WeCom webhook token"
+        },
+        {
+          "flags": "--encoding-aes-key <key>",
+          "description": "WeCom webhook EncodingAESKey"
+        },
+        {
+          "flags": "--receive-id <id>",
+          "description": "WeCom webhook receiver ID"
+        }
       ],
       "setup": {
         "fields": [
-          { "key": "connectionMode", "kind": "choice", "choices": ["websocket", "webhook"], "cli": { "flags": "--connection-mode <mode>", "description": "WeCom Bot connection mode" } },
-          { "key": "botId", "kind": "string", "sensitive": true, "cli": { "flags": "--bot-id <id>", "description": "WeCom Bot ID" } },
-          { "key": "secret", "kind": "string", "sensitive": true, "cli": { "flags": "--secret <secret>", "description": "WeCom Bot secret" } },
-          { "key": "token", "kind": "string", "sensitive": true, "cli": { "flags": "--token <token>", "description": "WeCom webhook token" } },
-          { "key": "encodingAesKey", "kind": "string", "sensitive": true, "cli": { "flags": "--encoding-aes-key <key>", "description": "WeCom webhook EncodingAESKey" } },
-          { "key": "receiveId", "kind": "string", "cli": { "flags": "--receive-id <id>", "description": "WeCom webhook receiver ID" } }
+          {
+            "key": "connectionMode",
+            "kind": "choice",
+            "choices": [
+              "websocket",
+              "webhook"
+            ],
+            "cli": {
+              "flags": "--connection-mode <mode>",
+              "description": "WeCom Bot connection mode"
+            }
+          },
+          {
+            "key": "botId",
+            "kind": "string",
+            "sensitive": true,
+            "cli": {
+              "flags": "--bot-id <id>",
+              "description": "WeCom Bot ID"
+            }
+          },
+          {
+            "key": "secret",
+            "kind": "string",
+            "sensitive": true,
+            "cli": {
+              "flags": "--secret <secret>",
+              "description": "WeCom Bot secret"
+            }
+          },
+          {
+            "key": "token",
+            "kind": "string",
+            "sensitive": true,
+            "cli": {
+              "flags": "--token <token>",
+              "description": "WeCom webhook token"
+            }
+          },
+          {
+            "key": "encodingAesKey",
+            "kind": "string",
+            "sensitive": true,
+            "cli": {
+              "flags": "--encoding-aes-key <key>",
+              "description": "WeCom webhook EncodingAESKey"
+            }
+          },
+          {
+            "key": "receiveId",
+            "kind": "string",
+            "cli": {
+              "flags": "--receive-id <id>",
+              "description": "WeCom webhook receiver ID"
+            }
+          }
         ]
       }
     },

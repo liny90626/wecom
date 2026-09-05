@@ -227,13 +227,21 @@ async function runTurn(params: {
     },
   });
   const deadline = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error(`turn did not settle; logs:\n${logs.join("\n")}`)), 25_000),
+    setTimeout(() => reject(new Error(`turn did not settle; logs:\n${logs.join("\n")}`)), TURN_DEADLINE_MS),
   );
   await Promise.race([finished, deadline]);
   abort.abort();
   await monitor;
   return { client, logs };
 }
+
+/**
+ * Test-side budgets only. A saturated machine (three vitest runs at once) stretched a
+ * 4-second turn past 40 s once; the production timeouts these scenarios exercise are
+ * the SDK's 5 s ACK wait and REPLY_SEND_TIMEOUT_MS, neither of which is touched here.
+ */
+const TURN_DEADLINE_MS = 60_000;
+const SCENARIO_TIMEOUT_MS = 90_000;
 
 const utf8Bytes = (text: string) => Buffer.byteLength(text, "utf8");
 const ackTimeout = () =>
@@ -265,7 +273,7 @@ describe("Bot WS lane against the gateway simulator", () => {
     const delivered = finish[0]!.content + client.pushes.map((push) => push.content).join("");
     expect(delivered.replace(/\s+/g, "")).toBe(answer.replace(/\s+/g, ""));
     expect(client.pushes.length).toBeGreaterThan(0);
-  }, 30_000);
+  }, SCENARIO_TIMEOUT_MS);
 
   it("streams a short answer into one bubble without any push", async () => {
     const { client } = await runTurn({
@@ -280,7 +288,7 @@ describe("Bot WS lane against the gateway simulator", () => {
     expect(finish).toHaveLength(1);
     expect(finish[0]!.content).toBe("第一段。第二段。");
     expect(client.pushes).toEqual([]);
-  });
+  }, SCENARIO_TIMEOUT_MS);
 
   it("falls back to an active push when the finish frame loses its ACK", async () => {
     const { client } = await runTurn({
@@ -292,7 +300,7 @@ describe("Bot WS lane against the gateway simulator", () => {
     });
 
     expect(client.pushes.map((push) => push.content)).toContain("答案正文。");
-  });
+  }, SCENARIO_TIMEOUT_MS);
 
   it("treats 846605 (invalid req_id) like an expired window and pushes the answer", async () => {
     const { client } = await runTurn({
@@ -304,7 +312,7 @@ describe("Bot WS lane against the gateway simulator", () => {
     });
 
     expect(client.pushes.map((push) => push.content)).toContain("答案正文。");
-  });
+  }, SCENARIO_TIMEOUT_MS);
 
   it("pushes a long answer in gateway-sized chunks once the window has expired", async () => {
     const answer = `${"长文".repeat(6000)}`; // 36 000 bytes
@@ -325,7 +333,7 @@ describe("Bot WS lane against the gateway simulator", () => {
     expect(client.pushes.length).toBeGreaterThan(1);
     expect(client.pushes.every((push) => utf8Bytes(push.content) <= WECOM_STREAM_CONTENT_MAX_BYTES)).toBe(true);
     expect(client.pushes.map((push) => push.content).join("")).toBe(answer);
-  }, 30_000);
+  }, SCENARIO_TIMEOUT_MS);
 
   it("sends the attachment before closing the bubble with the text", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "wecom-sim-media-"));
@@ -340,5 +348,5 @@ describe("Bot WS lane against the gateway simulator", () => {
     const finish = client.frames.filter((frame) => frame.finish);
     expect(finish).toHaveLength(1);
     expect(finish[0]!.content).toBe("报告已生成。");
-  });
+  }, SCENARIO_TIMEOUT_MS);
 });

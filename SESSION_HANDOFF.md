@@ -6,17 +6,16 @@
 
 ## 0. 先读结论
 
-- **生产仍在跑 2.7.260-26**（tag `released/2.7.260-26`，已推 fork）。
+- **已发布 3.0.0-v1**：tag `released/3.0.0-v1`，与 main 一起推送 fork（核对见第 6 节）。生产此前跑 2.7.260-26（tag `released/2.7.260-26`），升级与真机验收步骤见 `changelog/v3.0.0-v1.md` 第六节。
 - **main 已切换到上游 v3.0.0 基线**：YanHaidao/wecom `v3.0.0`（origin `133773f`）本身是以腾讯官方 `WecomTeam/wecom-openclaw-plugin` 2026.8.17（commit `3b1cbe3`）为主线的重建。2.7.260 的 Bot WS 车道（`src/transport`、`src/runtime`、`src/capability/bot`）、B1/B2/B3 门禁脚本、`openclaw-sdk-imports.test.ts` 守卫都不在这棵树里了，见第 2 节。
-- main 领先 `released/2.7.260-26` 的未发布提交：
+- 3.0.0-v1 相对 `released/2.7.260-26` 的提交：
   - `7c167ca` sync：采纳 v3.0.0 + Codex 的 2026.7.1-2 兼容适配（devDependency 钉回 7.1-2、setup contract 可选、账号合并、字节切分/节奏移植等）。
   - `6e9c1e0` fix(bot-ws)：本轮复现并修复的 4 项稳定性缺陷 + 2 项小修，见第 3 节。
-  - 本文档更新。
-  - **未打 tag、未推 fork、未打包**——等用户批准。
+  - 交接文档重写、`release: 3.0.0-v1`（版本号、changelog、README 发版章节、包指纹）。
 - 兼容目标：OpenClaw `2026.7.1-2`（生产）与最新稳定版 `2026.9.1`（npm `latest`）。`npm run compat:check 2026.7.1-2 2026.9.1` 两条线 typecheck + 全量测试均 PASS（见第 6 节）。
 - 官方仓库 `WecomTeam/wecom-openclaw-plugin` 的 main HEAD 仍是 `3b1cbe3`（2026-08-17），与上游 v3.0.0 记录的基线相同——用户说的「官方有更新」已通过上游 v3.0.0 全量吸收，官方侧没有更新的提交可再借鉴。
 - 用户在 2.7.260-26 上反馈的「agent 说文件发了，实际没到，再要一次才发」：**离线未能复现出插件侧的必然机制**，需要现场日志定位，见第 4 节。新基线上已堵住两条会造成同一体验的路径（第 3 节 ④⑤）。
-- 下一版：用户要求版本号「基于上游 v3.0.0 迭代，从 v3.0.0-v1 开始」。包版本字串按字面理解为 `3.0.0-v1`（fork 旧约定是 `3.0.0-1` 形态），**打包前需用户确认**；tag 沿用 `released/<版本>`，只推 fork。
+- 版本约定（用户 2026-09-05 批准）：包版本在上游版本后追加 `-vN`，即 `3.0.0-v1`、`3.0.0-v2`…；tag `released/<版本>`，只推 fork。
 
 ## 1. Git 与发布边界
 
@@ -26,7 +25,7 @@
 - 提交作者邮箱用 `liny90626@users.noreply.github.com`（GH007）。真实 apikey / botId / secret 不得进仓库、日志与文档。
 - tag 命名 `released/<完整版本号>`。**不要**打 `v*.*.*` 形式的 tag：上游的 `.github/workflows/release.yml` 以它触发 npm 发布，虽有 `github.repository == 'YanHaidao/wecom'` 守卫，也没必要去碰。
 - 发版按批次：修复先提交 main，用户在真机积累反馈后一起发；每修完一个问题不必追问「要不要发版」。
-- 打包、打 tag、改版本号 / changelog / README 发版章节、推送远端：**都要用户明确批准**。
+- 打包、打 tag、改版本号 / changelog / README 发版章节、推送远端：**都要用户明确批准**。发版按批次：平时修复只提交 main，积累真机反馈后一起发。
 
 ## 2. v3.0.0 基线与 2.7.260 的差别（改代码前必读）
 
@@ -117,9 +116,21 @@ vitest: 29 / 29 files，94 / 94 tests（含 gateway-sim 6 条）
 npm run compat:check 2026.7.1-2 2026.9.1: 两条线 typecheck PASS、94/94 PASS（9.1 为 file-access-runtime 补类型 shim）
 npm run build / verify-dist: PASS
 git diff --check: clean
-npm pack --dry-run: 286 files / 565 KB，无测试文件、无 handoff、无凭据
 真实企业微信验收: 未做（OFFICIAL_CAPABILITY_ACCEPTANCE.md 全部 NOT RUN）
 ~~~
+
+### 包指纹（3.0.0-v1）
+
+~~~text
+yanhaidao-wecom-3.0.0-v1.tgz（仓库根目录，.gitignore 忽略）
+size:        564919 bytes
+unpacked:    2100003 bytes
+files:       286
+npm shasum:  b4215e04adcba5d087fdc948a8c9ddb1813ca78e
+SHA-256:     9870de680d836daa10d7c6d3d83d9ae513d5684c43f7c6a19d6e896a1b06778c
+~~~
+
+重复打包字节一致；包内无测试文件、无凭据、无本文档。推送核对：`git rev-parse fork/main` 与 HEAD 一致，`git ls-remote --tags fork` 含 `released/3.0.0-v1`。
 
 全量命令：
 
@@ -133,13 +144,13 @@ git diff --check
 
 注意：不要在 compat 工作区里用 `npx tsc`（无 `.bin`，会跑到过时的 `tsc` 包并假报 0 错误）。
 
-## 7. 发版步骤（需要用户明确批准）
+## 7. 发版步骤（3.0.0-v1 已按此执行；下一版复用，需用户明确批准）
 
-1. 确认版本字串：`3.0.0-v1`（用户原话）还是 fork 旧约定 `3.0.0-1`。改 `package.json` 与 `src/version.ts`。
-2. 新增 `changelog/v3.0.0-v1.md`（内容：采纳 v3.0.0 基线的影响与丢失行为清单、7.1-2 兼容适配、本轮 6 项修复、compat 结果）；更新 `changelog/README.md` 索引；README 的「发布」章节仍是上游 2.7.260 时代的文字，需改成 fork 流程（`released/` tag、只推 fork）。
-3. 空闲机器上跑第 6 节全量命令；打包 `npm pack`，记录 size / SHA-256，重复打包校验一致。
-4. `git tag released/<版本>`，`git push fork main --tags`。**绝不推 origin。**
-5. 真机安装：`openclaw plugins install "npm-pack:<本地 NTFS 路径>"`（映射盘 / NAS 会报 archive changed during validation）。安装后先做：发文件（`MEDIA:` 与 message 工具各一次）、长回答（> 6000 汉字）、6 分钟以上长任务、文件不在白名单目录。
+1. `npm version <版本> --no-git-tag-version`（`src/version.ts` 运行时读 package.json，不用改）。
+2. 新增 `changelog/v<版本>.md`，更新 `changelog/README.md` 索引与 README「当前版本」行。
+3. 跑第 6 节全量命令；`npm pack` 到仓库根目录，记录 size / shasum / SHA-256，重复打包校验一致，把指纹写进 changelog 与本文档。
+4. `git commit -am "release: <版本>"`，`git tag -a released/<版本> -m "WeCom plugin <版本>"`，`git push fork main && git push fork released/<版本>`。**绝不推 origin，不打 `v*` 标签。**
+5. 真机安装：把 tgz 复制到本地磁盘再 `openclaw plugins install "npm-pack:<本地路径>"`（映射盘 / NAS 会报 archive changed during validation）。3.0.0-v1 安装后先做：发文件（`MEDIA:` 与 message 工具各一次）、长回答（> 6000 汉字）、6 分钟以上长任务、文件不在白名单目录；结果决定长任务心跳是否需要单独立项移植。
 
 ## 8. 仍然开放的边界与风险
 

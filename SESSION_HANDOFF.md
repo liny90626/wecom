@@ -313,6 +313,7 @@ B1 / B2 / B3: READY（reply.ts 只加了两行日志）
 git diff --check: clean
 npm pack 两次: SHA-256 一致
 现网安装（Windows，OpenClaw 2026.7.1-2，手动换目录）: 用户确认工作正常（2026-09-05）
+现网 MEDIA: 发文件: 用户确认正常（2026-09-05）——2.7.260-26 起的「说文件发了没到」闭环
 隔离安装（7.1-2，真实 v1 包复现锁死 → 手动换目录到 3.0.0-6）: PASS（装 v1 → 放入生产形状配置，config validate 报 6 处 additional properties，与现场一致 → 保留 node_modules 换入 3.0.0-6 → Config valid；plugins inspect 报 3.0.0-6、diagnostics 为空；channels list 两账号 configured、enabled；网关启动，两账号 Bot WS 与 agent-callback 均 started，凭据为假故 853000 属预期）
 ~~~
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createWecomEnterpriseDiagnosticsReport } from "./cli.js";
 
 describe("full WeCom diagnostics report", () => {
@@ -36,5 +36,20 @@ describe("full WeCom diagnostics report", () => {
         "wecom.conflicting_official_plugin_enabled",
       ]),
     );
+  });
+});
+
+describe("wecom CLI registration", () => {
+  it("marks `wecom diagnose --json` as machine output for hosts that honour the flag", async () => {
+    const { registerWecomDiagnosticsCli } = await import("./cli.js");
+    const registerCli = vi.fn();
+    registerWecomDiagnosticsCli({ registerCli } as never);
+
+    const metadata = registerCli.mock.calls[0]?.[1] as {
+      descriptors: Array<{ name: string; machineOutput?: (params: { argv: string[] }) => boolean }>;
+    };
+    const wecom = metadata.descriptors.find((descriptor) => descriptor.name === "wecom");
+    expect(wecom?.machineOutput?.({ argv: ["wecom", "diagnose", "--json"] })).toBe(true);
+    expect(wecom?.machineOutput?.({ argv: ["wecom", "diagnose"] })).toBe(false);
   });
 });

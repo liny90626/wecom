@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { sendWeComReply, sendWeComReplyNonBlocking } from "./message-sender.js";
+import { StreamExpiredError, sendWeComReply, sendWeComReplyNonBlocking } from "./message-sender.js";
 
 describe("WeCom outbound diagnostics", () => {
   it("logs reply lifecycle and sizes without message text or transport ids", async () => {
@@ -64,5 +64,47 @@ describe("WeCom outbound diagnostics", () => {
     expect(output).not.toContain("private-request");
     expect(output).not.toContain("private-message");
     expect(output).not.toContain("private-stream");
+  });
+});
+
+describe("WeCom stream refusals", () => {
+  const frame = {
+    headers: { req_id: "req-1" },
+    body: { msgid: "msg-1", msgtype: "text", from: { userid: "alice" } },
+  } as never;
+  const runtime = { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
+
+  it.each([
+    [846608, "stream message update expired"],
+    [846605, "invalid req_id"],
+  ])("maps errcode %i to StreamExpiredError so the caller switches to an active push", async (errcode, errmsg) => {
+    const replyStream = vi.fn().mockRejectedValue(Object.assign(new Error(errmsg), { errcode, errmsg }));
+
+    await expect(
+      sendWeComReply({
+        wsClient: { isConnected: true, replyStream } as never,
+        frame,
+        text: "答案",
+        runtime,
+        finish: true,
+        streamId: "stream-1",
+      }),
+    ).rejects.toBeInstanceOf(StreamExpiredError);
+  });
+
+  it("lets other gateway errors through unchanged", async () => {
+    const failure = new Error("Reply ack timeout (5000ms) for reqId: req-1");
+    const replyStream = vi.fn().mockRejectedValue(failure);
+
+    await expect(
+      sendWeComReply({
+        wsClient: { isConnected: true, replyStream } as never,
+        frame,
+        text: "答案",
+        runtime,
+        finish: true,
+        streamId: "stream-1",
+      }),
+    ).rejects.toBe(failure);
   });
 });

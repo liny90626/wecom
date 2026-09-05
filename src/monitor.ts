@@ -38,7 +38,11 @@ import {
   EVENT_ENTER_CHECK_UPDATE,
   CMD_ENTER_EVENT_REPLY,
   SCENE_WECOM_OPENCLAW,
+  STREAM_FRAME_MAX_BYTES,
+  ACTIVE_PUSH_CHUNK_CHARS,
 } from "./const.js";
+import { chunkTextToByteLimit } from "./shared/byte-chunking.js";
+import { createSendPacer } from "./shared/send-pacing.js";
 import { checkDmPolicy } from "./dm-policy.js";
 import { processDynamicRouting } from "./dynamic-routing.js";
 import { checkGroupPolicy } from "./group-policy.js";
@@ -178,13 +182,60 @@ function buildMediaErrorSummary(
   mediaUrl: string,
   result: { rejectReason?: string; error?: string },
 ): string {
-  if (result.error?.includes("LocalMediaAccessError")) {
+  // 核心的 LocalMediaAccessError 与本地回退实现的同义报错都指向白名单：重试无济于事，
+  // 要提示改配置。
+  if (
+    result.error?.includes("LocalMediaAccessError") ||
+    result.error?.includes("not under an allowed directory")
+  ) {
     return `⚠️ 文件发送失败：没有权限访问路径 ${mediaUrl}\n请在 openclaw.json 的 mediaLocalRoots 中添加该路径的父目录后重启生效。`;
   }
   if (result.rejectReason) {
     return `⚠️ 文件发送失败：${result.rejectReason}`;
   }
   return `⚠️ 文件发送失败：无法处理文件 ${mediaUrl}，请稍后再试。`;
+}
+
+// ============================================================================
+// 帧预算：一帧装不下的正文改走主动推送
+// ============================================================================
+
+/** 断点由核心的 markdown 切分选（围栏不拆），再按字节收敛到一帧预算。 */
+function chunkToFrameBudget(text: string): string[] {
+  const { chunkMarkdownText } = getWeComRuntime().channel.text;
+  return chunkTextToByteLimit(text, STREAM_FRAME_MAX_BYTES, (value, limit) =>
+    chunkMarkdownText(value, limit),
+  );
+}
+
+/** 主动推送分片：3500 字符且不超过一帧字节预算（2.7.x 现网验证值）。 */
+function chunkForActivePush(text: string): string[] {
+  const { chunkMarkdownText } = getWeComRuntime().channel.text;
+  return chunkMarkdownText(text, ACTIVE_PUSH_CHUNK_CHARS).flatMap((piece) =>
+    chunkToFrameBudget(piece),
+  );
+}
+
+/** 气泡只装第一帧；余下正文按主动推送分片。 */
+function splitForStream(text: string): { head: string; rest: string[] } {
+  const [head = "", ...tail] = chunkToFrameBudget(text);
+  return { head, rest: tail.flatMap((chunk) => chunkForActivePush(chunk)) };
+}
+
+/** 逐条主动推送 markdown，条间留间隔以保住客户端里的先后顺序。 */
+async function pushMarkdownChunks(params: {
+  wsClient: WSClient;
+  chatId: string;
+  chunks: string[];
+}): Promise<void> {
+  const pace = createSendPacer();
+  for (const content of params.chunks) {
+    await pace();
+    await params.wsClient.sendMessage(params.chatId, {
+      msgtype: "markdown",
+      markdown: { content },
+    });
+  }
 }
 
 // ============================================================================
@@ -441,8 +492,11 @@ export async function sendMediaBatch(ctx: DeliverContext, mediaUrls: string[]): 
  * 4. 媒体发送失败 → 直接用错误摘要替换 thinking
  *
  * 降级策略：
- * - 当 streamExpired=true（errcode 846608）时，流式通道已不可用（>6分钟），
- *   改用 wsClient.sendMessage 主动发送完整文本。
+ * - 气泡只装一帧（STREAM_FRAME_MAX_BYTES），装不下的余量按分片主动推送；
+ * - 当 streamExpired=true（errcode 846605/846608）时，流式通道已不可用，
+ *   改用 wsClient.sendMessage 分片主动发送完整文本；
+ * - finish 帧因其他原因失败（如 ACK 丢失）时同样改走主动推送：帧可能已落地，
+ *   但没有回执就没有送达证明——宁可有限重复，也不让答案静默消失。
  *
  * 注意：模板卡片的检测和发送已在 finishThinkingStream 之前由
  *       processTemplateCardsIfNeeded 完成，此处只关心最后的消息发送。
@@ -474,49 +528,56 @@ async function finishThinkingStream(ctx: DeliverContext): Promise<void> {
   const { wsClient, frame, state, account, runtime } = ctx;
   const body = frame.body as MessageBody;
   const chatId = body.chatid || body.from.userid;
-  const finishText = resolveMediaAwareFinishText(state);
-
   // 兜底：本轮无任何可见产出（无文本/媒体/卡片，常见于"只发文件未带指令"
   // 的消息被 agent 当作上下文读取后不单独回复）。此时若已开启过 thinking 流，
   // 必须发送一个含可见字符的 finish 帧关闭它，否则该消息会一直 loading。
   // 注意：企微会忽略纯空格等不可见内容，必须用可见字符才能真正关闭。
-  if (finishText) {
-    // 尝试流式发送；若已知过期或发送时发现过期，统一降级为主动发送
-    let expired = state.streamExpired;
-    if (!expired) {
-      try {
-        await sendWeComReply({
-          wsClient,
-          frame,
-          text: finishText,
-          runtime,
-          finish: true,
-          streamId: state.streamId,
-          accountId: account.accountId,
-          traceId: state.traceId,
-        });
-      } catch (err) {
-        if (err instanceof StreamExpiredError) {
-          expired = true;
-        } else {
-          throw err;
-        }
+  const finishText = resolveMediaAwareFinishText(state);
+  if (!finishText) {
+    return;
+  }
+
+  // 气泡收尾只装一帧；装不下的余量、或气泡已写不动时的全文，改走主动推送。
+  const { head, rest } = splitForStream(finishText);
+  let pushAll = state.streamExpired === true;
+  let pushReason = "stream_expired";
+  if (!pushAll) {
+    try {
+      await sendWeComReply({
+        wsClient,
+        frame,
+        text: head,
+        runtime,
+        finish: true,
+        streamId: state.streamId,
+        accountId: account.accountId,
+        traceId: state.traceId,
+      });
+    } catch (err) {
+      pushAll = true;
+      if (!(err instanceof StreamExpiredError)) {
+        // 帧可能已落地，但没有回执就没有送达证明；答案改走推送，宁可有限重复。
+        pushReason = "finish_unacked";
+        runtime.error?.(
+          `[wecom][flow] trace=${state.traceId ?? "none"} stage=finish_frame_failed account=${account.accountId} fallback=active_send ${formatDiagnosticError(err)}`,
+        );
       }
     }
-    if (expired) {
-      const startedAt = Date.now();
-      runtime.log?.(
-        `[wecom][flow] trace=${state.traceId ?? "none"} stage=outbound_start account=${account.accountId} transport=active_send reason=stream_expired textBytes=${utf8Bytes(finishText)}`,
-      );
-      await wsClient.sendMessage(chatId, {
-        msgtype: "markdown",
-        markdown: { content: finishText },
-      });
-      runtime.log?.(
-        `[wecom][flow] trace=${state.traceId ?? "none"} stage=outbound_delivered account=${account.accountId} transport=active_send reason=stream_expired durationMs=${Date.now() - startedAt}`,
-      );
-    }
   }
+
+  const chunks = pushAll ? chunkForActivePush(finishText) : rest;
+  if (chunks.length === 0) {
+    return;
+  }
+  const reason = pushAll ? pushReason : "frame_budget";
+  const startedAt = Date.now();
+  runtime.log?.(
+    `[wecom][flow] trace=${state.traceId ?? "none"} stage=outbound_start account=${account.accountId} transport=active_send reason=${reason} chunks=${chunks.length} textBytes=${utf8Bytes(chunks.join(""))}`,
+  );
+  await pushMarkdownChunks({ wsClient, chatId, chunks });
+  runtime.log?.(
+    `[wecom][flow] trace=${state.traceId ?? "none"} stage=outbound_delivered account=${account.accountId} transport=active_send reason=${reason} chunks=${chunks.length} durationMs=${Date.now() - startedAt}`,
+  );
 }
 
 /**
@@ -672,19 +733,22 @@ async function routeAndDispatchMessage(params: {
               const displayText = maskTemplateCardBlocks(state.accumulatedText, (...args: any[]) =>
                 runtime.log?.(...args),
               );
-              // if (displayText !== state.accumulatedText) {
-              //   runtime.log?.(`[wecom][template-card] Mid-frame masked: original=${state.accumulatedText.length}chars, masked=${displayText.length}chars`);
-              // }
-              await sendWeComReply({
-                wsClient,
-                frame,
-                text: displayText,
-                runtime,
-                finish: false,
-                streamId: state.streamId,
-                accountId: account.accountId,
-                traceId,
-              });
+              // 一帧只装 STREAM_FRAME_MAX_BYTES：正文超出后气泡冻结在首帧，余下正文由
+              // finishThinkingStream 主动推送；首帧没变就不重绘。
+              const { head } = splitForStream(displayText);
+              if (head && head !== state.streamedText) {
+                await sendWeComReply({
+                  wsClient,
+                  frame,
+                  text: head,
+                  runtime,
+                  finish: false,
+                  streamId: state.streamId,
+                  accountId: account.accountId,
+                  traceId,
+                });
+                state.streamedText = head;
+              }
             } catch (err) {
               if (err instanceof StreamExpiredError) {
                 state.streamExpired = true;

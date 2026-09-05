@@ -56,6 +56,17 @@ function formatDiagnosticsReport(report: WecomEnterpriseDiagnosticsReport): stri
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * 2026.8+ 用 machineOutput 把 `--json` 标成机器可读输出（不混入横幅）；2026.7.1
+ * 的描述符类型没有这个字段，所以不写成字面量，让两条线都能通过类型检查。
+ */
+const wecomCommandDescriptor = {
+  name: "wecom",
+  description: "Inspect WeCom configuration and enterprise account drift",
+  hasSubcommands: true,
+  machineOutput: ({ argv }: { argv: string[] }) => argv.includes("--json"),
+};
+
 /** Provide deterministic drift checks even when OpenClaw runs a non-activating audit snapshot. */
 export function registerWecomDiagnosticsCli(api: OpenClawPluginApi): void {
   api.registerCli(
@@ -89,14 +100,6 @@ export function registerWecomDiagnosticsCli(api: OpenClawPluginApi): void {
           process.exitCode = report.ok ? 0 : 1;
         });
     },
-    {
-      descriptors: [
-        {
-          name: "wecom",
-          description: "Inspect WeCom configuration and enterprise account drift",
-          hasSubcommands: true,
-        },
-      ],
-    },
+    { descriptors: [wecomCommandDescriptor] },
   );
 }

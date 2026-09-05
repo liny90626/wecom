@@ -38,6 +38,8 @@ export interface MessageState {
   receivedAt?: number;
   /** 流式回复的 streamId，用于保持同一个流式回复使用相同的 streamId */
   streamId?: string;
+  /** 最近一次写进气泡的帧内容；正文超出一帧预算后气泡冻结在首帧，相同内容不重绘 */
+  streamedText?: string;
   // /** 是否有用户可见的文本内容（不包括 <think>...</think> 标签） */
   // hasText?: boolean;
   /** 是否已成功发送过媒体文件 */

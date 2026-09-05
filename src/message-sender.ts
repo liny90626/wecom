@@ -16,18 +16,40 @@ import { withTimeout } from "./timeout.js";
 
 /** 流式回复超时错误码（>6分钟未更新，服务端拒绝继续流式更新） */
 export const STREAM_EXPIRED_ERRCODE = 846608;
+/** 流式回复的 req_id 已失效（网关重连、回调过期后重放） */
+export const STREAM_INVALID_REQ_ID_ERRCODE = 846605;
+/**
+ * 网关明确拒绝再写这条流的两个错误码。对调用方含义相同：
+ * 这条流已不可写，答案必须改走主动发送。
+ */
+const STREAM_REFUSAL_ERRCODES: readonly number[] = [
+  STREAM_EXPIRED_ERRCODE,
+  STREAM_INVALID_REQ_ID_ERRCODE,
+];
 
 /**
  * 流式回复过期错误
- * 当服务端返回 errcode=846608 时抛出，表示流式消息已超过6分钟无法更新，
- * 调用方需降级为主动发送（sendMessage）方式回复。
+ * 当服务端返回 errcode=846608（流窗口 >6 分钟）或 846605（req_id 失效）时抛出，
+ * 表示这条流式消息已无法更新，调用方需降级为主动发送（sendMessage）方式回复。
  */
 export class StreamExpiredError extends Error {
-  readonly errcode = STREAM_EXPIRED_ERRCODE;
-  constructor(message?: string) {
-    super(message ?? `Stream message update expired (errcode=${STREAM_EXPIRED_ERRCODE})`);
+  readonly errcode: number;
+  constructor(message?: string, errcode: number = STREAM_EXPIRED_ERRCODE) {
+    super(message ?? `Stream message update expired (errcode=${errcode})`);
     this.name = "StreamExpiredError";
+    this.errcode = errcode;
   }
+}
+
+/** 把网关对这条流的拒绝识别为 StreamExpiredError；其他错误返回 undefined。 */
+function toStreamRefusal(err: unknown): StreamExpiredError | undefined {
+  const raw = err as { errcode?: unknown; errmsg?: unknown; message?: unknown } | undefined;
+  const errMsg = String(raw?.errmsg || raw?.message || err);
+  const errcode = Number(raw?.errcode);
+  const matched = STREAM_REFUSAL_ERRCODES.find(
+    (code) => code === errcode || errMsg.includes(String(code)),
+  );
+  return matched === undefined ? undefined : new StreamExpiredError(errMsg, matched);
 }
 
 // ============================================================================
@@ -134,14 +156,11 @@ export async function sendWeComReply(params: {
       REPLY_SEND_TIMEOUT_MS,
       `Reply send timed out (streamId=${streamId})`,
     );
-  } catch (err: any) {
-    // 服务端返回 846608：流式消息超过6分钟无法更新，需降级为主动发送
-    const errMsg = err?.errmsg || err?.message || String(err);
-    if (
-      err?.errcode === STREAM_EXPIRED_ERRCODE ||
-      errMsg.includes(String(STREAM_EXPIRED_ERRCODE))
-    ) {
-      throw new StreamExpiredError(errMsg);
+  } catch (err) {
+    // 网关拒绝再写这条流（846608 窗口过期 / 846605 req_id 失效），需降级为主动发送
+    const refusal = toStreamRefusal(err);
+    if (refusal) {
+      throw refusal;
     }
     runtime.error?.(
       `[wecom][flow] trace=${traceId} stage=outbound_failed account=${accountId} transport=reply_stream durationMs=${Date.now() - startedAt} ${formatDiagnosticError(err)}`,
@@ -216,14 +235,11 @@ export async function sendWeComReplyNonBlocking(params: {
       `[wecom][flow] trace=${traceId} stage=outbound_delivered account=${accountId} transport=reply_stream_nonblocking finish=${finish} durationMs=${Date.now() - startedAt}`,
     );
     return streamId;
-  } catch (err: any) {
-    // 服务端返回 846608：流式消息超过6分钟无法更新，需降级为主动发送
-    const errMsg = err?.errmsg || err?.message || String(err);
-    if (
-      err?.errcode === STREAM_EXPIRED_ERRCODE ||
-      errMsg.includes(String(STREAM_EXPIRED_ERRCODE))
-    ) {
-      throw new StreamExpiredError(errMsg);
+  } catch (err) {
+    // 网关拒绝再写这条流（846608 窗口过期 / 846605 req_id 失效），需降级为主动发送
+    const refusal = toStreamRefusal(err);
+    if (refusal) {
+      throw refusal;
     }
     runtime.error?.(
       `[wecom][flow] trace=${traceId} stage=outbound_failed account=${accountId} transport=reply_stream_nonblocking durationMs=${Date.now() - startedAt} ${formatDiagnosticError(err)}`,

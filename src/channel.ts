@@ -417,15 +417,16 @@ export const wecomPlugin: ChannelPlugin<ResolvedWeComAccount> = {
           };
         } catch (error) {
           console.warn(
-            `[wecom-outbound] upstream media upload failed, falling back to text: ${error instanceof Error ? error.name : "unknown error"}`,
+            `[wecom-outbound] upstream media upload failed, notifying the user: ${error instanceof Error ? error.name : "unknown error"}`,
           );
-          const fallbackContent = buildMediaFailureFallbackText(text);
-          return sendWeComMessage({
+          // 用户先看到提示，message 工具再拿到失败——不把「已发送」当结论。
+          await sendWeComMessage({
             to,
-            content: fallbackContent,
+            content: buildMediaFailureFallbackText(text),
             accountId: resolvedAccountId,
             cfg,
           });
+          throw error;
         }
       }
 
@@ -447,13 +448,16 @@ export const wecomPlugin: ChannelPlugin<ResolvedWeComAccount> = {
           mediaLocalRoots,
         });
 
-        if (result.rejected) {
-          return sendWeComMessage({to, content: `⚠️ ${result.rejectReason}`, accountId: resolvedAccountId, cfg});
-        }
-
         if (!result.ok) {
-          const fallbackContent = buildMediaFailureFallbackText(text);
-          return sendWeComMessage({to, content: fallbackContent, accountId: resolvedAccountId, cfg});
+          // 先告知用户，再让 message 工具拿到失败：模型不能把「已发送」当结论。
+          const reason = result.rejectReason ?? result.error ?? "unknown error";
+          await sendWeComMessage({
+            to,
+            content: result.rejected ? `⚠️ ${result.rejectReason}` : buildMediaFailureFallbackText(text),
+            accountId: resolvedAccountId,
+            cfg,
+          });
+          throw new Error(`WeCom Bot WS media delivery failed: ${reason}`);
         }
 
         if (text) {
@@ -496,6 +500,7 @@ export const wecomPlugin: ChannelPlugin<ResolvedWeComAccount> = {
       );
 
       // 尝试下载并上传媒体到企微
+      let failure: unknown;
       try {
         const media = await resolveAgentOutboundMedia(mediaUrl, mediaLocalRoots);
         const mediaId = await uploadAgentMedia({
@@ -547,15 +552,15 @@ export const wecomPlugin: ChannelPlugin<ResolvedWeComAccount> = {
         );
         return { channel: CHANNEL_ID, messageId: `agent-media-${Date.now()}`, chatId };
       } catch (err) {
+        failure = err;
         console.warn(
           `[wecom][outbound] account=${resolvedAccountId} stage=fallback_failed transport=agent_http kind=media target=${targetId} durationMs=${Date.now() - startedAt} ${formatDiagnosticError(err)}`,
         );
       }
 
-      // 媒体上传失败，降级为不含本地路径的文本提示
-      const fallbackContent = buildMediaFailureFallbackText(text);
+      // 媒体上传失败：先给用户不含本地路径的提示，再把失败交回 message 工具
       await sendAgentTextChunks({
-        text: fallbackContent,
+        text: buildMediaFailureFallbackText(text),
         send: (chunk) => sendAgentText({
           agent,
           toUser: target.touser,
@@ -568,7 +573,7 @@ export const wecomPlugin: ChannelPlugin<ResolvedWeComAccount> = {
       console.log(
         `[wecom][outbound] account=${resolvedAccountId} stage=fallback_delivered transport=agent_http kind=text_after_media_failure target=${targetId} durationMs=${Date.now() - startedAt}`,
       );
-      return { channel: CHANNEL_ID, messageId: `agent-${Date.now()}`, chatId };
+      throw failure instanceof Error ? failure : new Error(String(failure));
     },
   },
   status: {

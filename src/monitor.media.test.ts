@@ -50,3 +50,24 @@ describe("sendMediaBatch", () => {
     expect(context.state.mediaErrorSummary).toBeUndefined();
   });
 });
+
+describe("sendMediaBatch failure copy", () => {
+  it("points at mediaLocalRoots when the file sits outside the allowlist", async () => {
+    uploadAndSendMediaMock.mockResolvedValue({
+      ok: false,
+      error: "Error: Local media path is not under an allowed directory: /srv/out/report.pdf",
+    });
+    const context = {
+      wsClient: {} as never,
+      frame: { body: { from: { userid: "alice" } } } as never,
+      state: { accumulatedText: "" },
+      account: { accountId: "default", config: {} } as never,
+      runtime: { log: vi.fn(), error: vi.fn() } as never,
+    };
+
+    await sendMediaBatch(context, ["/srv/out/report.pdf"]);
+
+    expect(context.state.mediaErrorSummary).toContain("mediaLocalRoots");
+    expect(context.state.mediaErrorSummary).not.toContain("请稍后再试");
+  });
+});

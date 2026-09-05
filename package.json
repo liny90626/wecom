@@ -1,6 +1,6 @@
 {
   "name": "@yanhaidao/wecom",
-  "version": "2.7.260-26",
+  "version": "3.0.0-5",
   "description": "OpenClaw 企业微信（WeCom）插件，默认 Bot WebSocket，支持加密媒体解密、Agent 主动发消息与多账号接入",
   "main": "./dist/index.js",
   "files": [
@@ -9,13 +9,16 @@
     "index.ts",
     "openclaw.plugin.json",
     "README.md",
+    "THIRD_PARTY_NOTICES.md",
+    "UPSTREAM_BASELINE.json",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "verify-dist": "node -e \"const fs=require('fs');const f='./dist/index.js';if(!fs.existsSync(f)){console.error('Missing compiled runtime output:',f);process.exit(1)}\"",
     "compat:check": "node scripts/check-openclaw-compat.mjs",
-    "prepack": "node -e \"require('fs').rmSync('./dist',{recursive:true,force:true})\" && npm run build && npm run verify-dist"
+    "prepack": "node -e \"require('fs').rmSync('./dist',{recursive:true,force:true})\" && npm run build && npm run verify-dist",
+    "upstream:check": "node scripts/check-official-updates.mjs --fetch"
   },
   "license": "ISC",
   "author": "YanHaidao (VX: YanHaidao)",

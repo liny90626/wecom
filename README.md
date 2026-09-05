@@ -23,11 +23,11 @@ Fork 维护与修复贡献：**LinKy**
 
 本 fork 在原仓库基础上做了少量面向 OpenClaw/企业微信实际使用场景的修复，由 **LinKy** 参与实测、反馈、验证与维护整理。维护原则是尽量保持最小改动、行为兼容和可回归验证。当前维护版本以 `package.json` 中的版本号为准。
 
-当前维护版本为 `v2.7.260-26`，发布标签 `released/2.7.260-26`。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线保持 `2.7.260`。`2.7.260-3` 的 tag 与包已经撤回，历史提交保留。
+当前维护版本为 `3.0.0-5`，发布标签 `released/3.0.0-5`。**版本号说明**：规则仍是 `<上游基线>-<构建号>`；上游基线自本版起记为 `3.0.0`，构建号从 5 起。代码仍是本 fork 的 2.7.260 Bot WS 车道：上游 `v3.0.0` 是以腾讯官方插件为主线的整体重建，本 fork 只从中移植经过评估的部分（见 [`changelog/v3.0.0-5.md`](./changelog/v3.0.0-5.md)）。`2.7.260-3`、`3.0.0-v1`、`3.0.0-v2` 已撤回，历史提交保留。
 
 本轮收口 `wecom_mcp` 的 `851003 no authority`。根因是**结构性**的：`aibot_get_mcp_config` 签发的是 `/mcp/robot-doc`（「企微机器人文档 MCP」，**只有机器人自身作用域**），而后台「查看使用方式」的 apikey 签发的是 `/mcp/v2/bot/<biz_type>`（「动态文档 MCP」，**内嵌授权真人用户**）——不是授权没生效，是产品定位不同。因此新增 **`bot.mcpServers`** 配置项：按 `biz_type` 直接配后台地址，八个能力全部可用。同时严格对齐官方 MCP 实现（身份头、官方 UA、官方错误码分工、文档授权引导卡片），`tools/list` 按实测体积限幅，并与官方插件仓库同步了事件白名单、`enter_check_update` 版本握手与 `auth_change_event` 清缓存。完整说明见 [`changelog/v2.7.260-17.md`](./changelog/v2.7.260-17.md)。
 
-兼容目标是 OpenClaw `2026.7.1-2` 与**最新稳定版**（`2.7.260-26` 发版时为 `2026.8.2`），一份构建同时运行在两条线上，不探测版本、不分叉；`devDependencies` 仍钉 `2026.7.1-2`，`npm run compat:check` 会对两条线各跑一遍 typecheck 与全量测试。2026.6.x 不再维护，`peerDependencies` 的 `^2026.6.11` 只表示安装兼容声明。
+兼容目标是 OpenClaw `2026.7.1-2` 与**最新稳定版**（`3.0.0-5` 发版时为 `2026.9.1`），一份构建同时运行在两条线上，不探测版本、不分叉；`devDependencies` 仍钉 `2026.7.1-2`，`npm run compat:check` 会对两条线各跑一遍 typecheck 与全量测试。2026.6.x 不再维护，`peerDependencies` 的 `^2026.6.11` 只表示安装兼容声明。
 
 **在 OpenClaw 2026.8.x 上运行必须放行会话钩子**：8.x 会拦截非内置插件的 `before_prompt_build` 钩子，而本插件的媒体、模板卡片与 `wecom-cli` 使用指引正是通过它注入的。安装向导已自动写入该配置；已安装的实例升级到 8.x 时请在 `openclaw.json` 补上：
 
@@ -316,6 +316,15 @@ npm run compat:check   # 对 2026.7.1-2 与最新稳定版各跑一遍 typecheck
 ## 📋 本 fork 近期更新
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
+
+#### 📌 3.0.0-5（2026-09-05，LinKy fork）
+
+**回退版本**。`3.0.0-v1` / `3.0.0-v2` 把整棵树替换为上游 `v3.0.0`（腾讯官方插件的重建），结果在 OpenClaw 2026.7.1-2 的现网配置上被 schema 拒绝启动（配置里留着 2.7.x 时代的 `mediaMaxMb`、`streaming` 与嵌套 `bot`/`agent`），长任务心跳、思考窗口、新消息接管等本 fork 车道也随之消失。两版均已撤回。
+
+- **[回退]** 代码回到 `2.7.260-26` 车道，并带上此前未发布的两个修复：运行时上下文围栏（`<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>` 入站转义、过程/思考剥离）与 compat 工作区移出仓库。
+- **[移植] 上游 v3.0.0 的治理层**：`THIRD_PARTY_NOTICES.md`（官方代码 MIT 归属）、`UPSTREAM_BASELINE.json`（官方对账基线 `3b1cbe3` / 2026.8.17）、`npm run upstream:check`（只读 `official` 远端，push 已禁用）。官方车道、schema 严格化、setup contract、`wecom diagnose` 等未合并，原因见 changelog。
+- **[自检] 生产配置形状回归**：新增用例把多账号嵌套 `bot`/`agent` 加顶层遗留键的配置跑一遍账号解析与 schema，保证未知键永远不会阻止启动。
+- **[验证]**：`npm run compat:check 2026.7.1-2 2026.9.1`：两条线各 **64 文件 / 822 用例全绿**、typecheck 全过。详见 `changelog/v3.0.0-5.md`。
 
 #### 📌 v2.7.260-26（2026-09-02，LinKy fork）
 

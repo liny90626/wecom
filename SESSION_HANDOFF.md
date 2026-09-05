@@ -1,14 +1,16 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-09-04
+> 最后更新：2026-09-05
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
-- 已发布基线：2.7.260-26，标签 released/2.7.260-26，已推送 fork。
-- 兼容目标：OpenClaw 2026.7.1-2（用户生产）与**最新稳定版**（发版时为 2026.8.2）。devDependency 仍钉 2026.7.1-2；`npm run compat:check` 对两条线各跑 typecheck 与全量测试，**发版前必跑**。2026.6.x 不再维护。
-- **main 领先 released/2.7.260-26 两个未发布的代码提交**（用户决定：不发版、不打 tag，只更新文档并推 fork）：
+- **已发布 3.0.0-5**（tag `released/3.0.0-5`，已推 fork）：这是回退版本——代码是 2.7.260-26 车道 + 两个此前未发布的修复 + 上游 v3.0.0 的治理层文件（`THIRD_PARTY_NOTICES.md`、`UPSTREAM_BASELINE.json`、`npm run upstream:check`）+ 生产配置形状回归测试。版本号规则改为 `3.0.0-<构建号>`，构建号从 5 起（用户 2026-09-05 指定）。
+- **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。两个 tag 保留作记录，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
+- 上游 `YanHaidao/wecom` 与官方 `WecomTeam/wecom-openclaw-plugin` 的对账基线：官方 HEAD `3b1cbe3`（2026.8.17）此后无新提交；`npm run upstream:check` 可随时复核（只读 `official` 远端）。
+- 兼容目标：OpenClaw 2026.7.1-2（用户生产）与**最新稳定版**（3.0.0-5 发版时为 2026.9.1；两条线各 65 文件 / 824 用例全绿）。devDependency 仍钉 2026.7.1-2；`npm run compat:check` 对两条线各跑 typecheck 与全量测试，**发版前必跑**。2026.6.x 不再维护。
+- 2.7.260-26 之后、随 3.0.0-5 一起发布的两个修复：
   - 5bcbd05 **运行时上下文围栏**：两条线的核心都把 `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>…<<<END_OPENCLAW_INTERNAL_CONTEXT>>>` 作为 display:false 的载体消息喂给模型——模型看见它是设计使然，8.2 只是把头部指令写严了。插件侧两处缺口：①过程步骤（CLI 后端 commentary）与推理由核心**原样**转来，模型复述该块时会进气泡 / 推送 / 思考块；②三条入站车道的用户文本未转义，独占成行的围栏块会被核心 `resolveRuntimeContextPromptParts` 提取为可信上下文（伪造）。修在 `src/shared/internal-runtime-context.ts`：入站转义成核心自己用的 `[[OPENCLAW_INTERNAL_CONTEXT_BEGIN]]` 形态，出站 preamble / reasoning 剥围栏块；final 与 block 核心已净化，不重复。
   - c39ace2 **compat 工作区移出仓库树**（`~/.cache/wecom-openclaw-compat/`）：原先放在仓库内时 TypeScript 沿祖先 node_modules 找到钉住的 7.1-2 声明，8.2 缺 .d.ts 的子路径实际按 7.1-2 类型检查——2.7.260-26 汇报的「8.2 typecheck PASS」在 `file-access-runtime` 这一个子路径上不严谨（运行时验证不受影响，两版签名相同）。移出后复验：0 错误、0 次回落到仓库 node_modules。
 - 2.7.260-26 收口四件事（详见 changelog/v2.7.260-26.md）：
@@ -34,9 +36,9 @@
 ### 当前 Git 状态
 
 - 分支：main
-- HEAD：main 领先 released/2.7.260-26 三个提交（5bcbd05 运行时上下文围栏、c39ace2 compat 工作区移出仓库、本文档更新），已推 fork/main；**未打新 tag**
+- HEAD：`released/3.0.0-5` 所在提交；其上没有未发布改动。历史上 main 经过 v3.0.0 整树替换（7c167ca…b5bcddd）再回退，`git log` 里能看到这段往返
 - 维护远端：fork = git@github.com:liny90626/wecom.git
-- 上游远端：origin = https://github.com/YanHaidao/wecom.git（已对账其 25 个新提交，见第 8 节）
+- 上游远端：origin = https://github.com/YanHaidao/wecom.git（v3.0.0 = 官方插件重建，见第 8 节）；官方远端：official = https://github.com/WecomTeam/wecom-openclaw-plugin.git，push URL 为 DISABLED，只供 `npm run upstream:check`
 - 允许推送的目标只有 fork；禁止向 origin 推送。
 - 2.7.260-26 涉及的文件：
   - src/transport/bot-ws/reply.ts / reply.test.ts / gateway-sim.test.ts / long-task-progress.test.ts / media.ts / media.test.ts
@@ -52,9 +54,9 @@
 
 ### 发布状态
 
-- 版本号 2.7.260-26，包指纹见第 7 节。
-- tag released/2.7.260-26 与 main 均已推送 fork，核对结果见第 7 节。
-- 其后 main 上的三个提交未发版、未打 tag（用户决定）；下一版发布时随版本带出，changelog 需补写运行时上下文围栏与 compat 工作区两项。
+- 版本号 3.0.0-5，包指纹见第 7 节。
+- tag released/3.0.0-5 与 main 均已推送 fork。released/3.0.0-v1、released/3.0.0-v2 是已撤回的候选，保留在 fork 上作记录。
+- 版本规则：`3.0.0-<构建号>`，构建号递增；tag `released/<版本>`；只推 fork。
 - origin 仍停在 f5f5650，无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
@@ -298,58 +300,37 @@ src/transport/bot-ws/sdk-adapter.ts
 
 ## 7. 当前验证证据
 
-### 已完成
+### 已完成（3.0.0-5，2026-09-05）
 
 ~~~text
-OpenClaw: 2026.7.1-2 与 2026.8.2（npm run compat:check，两条线各一遍）
-Vitest: 63 / 63 files，811 / 811 tests（两条线数字相同）
-typecheck: 两条线 PASS（8.2 由 compat 脚本为 file-access-runtime 补类型 shim，8.2 该子路径不带 .d.ts；发版时工作区还在仓库内，该子路径实际借了 7.1-2 的声明，见下）
-npm run build / verify-dist: passed
-B1: READY
-B2: READY（BLOCK_PREVIEW_MAX_CHARS 字面量已同步为 5_000）
-B3: READY
-8.2 plugins inspect wecom --runtime --json: status loaded（channel、2 tools、service、2 http routes）
-真实 mutateConfigFile 名册写入 e2e：7.1-2 list、8.2 entries / list / 空配置 均正确
+OpenClaw: 2026.7.1-2 与 2026.9.1（npm run compat:check，两条线各一遍）
+Vitest: 65 / 65 files，824 / 824 tests（两条线数字相同；单独运行同样全绿）
+typecheck: 两条线 PASS（9.1 由 compat 脚本为 file-access-runtime 补类型 shim，工作区在 ~/.cache/wecom-openclaw-compat/）
+npm run build / verify-dist: PASS
+B1 / B2 / B3: READY
+git diff --check: clean
+npm pack 两次: SHA-256 一致
+隔离安装（7.1-2，临时 OPENCLAW_STATE_DIR，生产形状配置）: PASS（临时状态目录先装包再换入生产形状配置：config valid；plugins inspect 报 3.0.0-5、无 diagnostics 错误；channels list / status 两账号 configured、enabled）
 ~~~
 
-未发布提交（5bcbd05 / c39ace2）的验证——机器负载 30+（另一项目的沙箱任务），后台任务被中止，全部前台分片跑完：
+本版新增的复现用例：`src/config/production-shape.test.ts`（多账号嵌套 bot/agent + 顶层遗留键 → schema 放行、四账号解析、无冲突）。2.7.260-26 时代的用例清单与负载提示仍然有效：
 
-~~~text
-7.1-2: 全部 64 个测试文件分四片跑完，全部通过；gateway-sim「carries real narration」并发片超时一次，单跑 19 秒通过
-8.2:   全部测试文件分三片跑完（工作区已在 ~/.cache/wecom-openclaw-compat/），全部通过；同一用例并发超时一次，单跑 27 秒通过
-typecheck: 7.1-2 build PASS；8.2 tsc 0 错误，file-access-runtime 经 shim 解析到 8.2 安装内，0 次回落到仓库 node_modules
-B1 / B2: READY（改动之后跑的）
-B3: 脚本本身负载下 10 分钟未跑完；其聚焦测试集 4 文件 280/280 单独通过，字面量目标 reply.ts / app/index.ts 本轮未动
-~~~
-
-**下一版发布前必须在空闲机器上补跑一次完整 `npm run compat:check 2026.7.1-2 2026.8.2` 与 B3 脚本。**
-
-本轮新增的复现用例（改这些路径前先跑）：
-- long-task-progress「死窗后的收尾：答案正文随推送出门时不再押着「长任务处理中」的状态尾巴」
-- gateway-sim「closes an ACK-untrusted bubble without its clock once the answer went out as a push」
-- gateway-sim「finishes an externally answered bubble without the clock」
-- gateway-sim「pushes new body text every 20 seconds once the window is dead while steps keep the minute grid」
-- gateway-sim「keeps streaming a long answer into the bubble up to the frame budget」
-- media.test「reads a local file that sits under an approved root」/「refuses a local file outside every approved root」
-- dynamic-agent.roster.test 全部；openclaw-sdk-imports.test
-- reply-orchestrator「keeps a runtime-context fence out of the process steps the real dispatcher forwards」/「strips a quoted runtime-context fence from reasoning…」；inbound「neutralises runtime-context delimiters typed by the user」；internal-runtime-context.test 全部
-
-负载提示不变：机器忙时 fake-timer 套件会撞 30 秒墙钟（本轮 gateway-sim「carries real narration」并发时 68–110 秒、单跑 0.7 秒）。**不要为掩盖负载抖动修改生产 timeout 或用例断言。**
-差分用例 media-directive-alignment 的反向证据（改 stripMediaDirectives / mergeReplyText 时复跑）：关掉 stripMediaDirectives → 78 处缺陷；围栏状态机退回布尔量 → 24 处；looksLikeMediaTarget 恒真 → 12 处（2.7.260-25 记录，本轮未动这两处）。
+- long-task-progress「死窗后的收尾…」、gateway-sim 五条收尾 / 推送用例、media.test 白名单两条、dynamic-agent.roster.test、openclaw-sdk-imports.test、reply-orchestrator 与 inbound 的运行时上下文围栏用例、internal-runtime-context.test。
+- 机器忙时 fake-timer 套件会撞 30 秒墙钟（gateway-sim「carries real narration」并发时 68–110 秒、单跑 0.7 秒）。**不要为掩盖负载抖动修改生产 timeout 或用例断言**；先单 worker 复跑。
+- 差分用例 media-directive-alignment 的反向证据：关掉 stripMediaDirectives → 78 处缺陷；围栏状态机退回布尔量 → 24 处；looksLikeMediaTarget 恒真 → 12 处。
 
 ### 包指纹
 
 ~~~text
-yanhaidao-wecom-2.7.260-26.tgz
-size:        611,374 bytes
-unpacked:    2,320,890 bytes
-files:       254
-npm shasum:  ae5463b86bdf6d8c7fd84af5d20806ed768e2bbf
-SHA-256:     b302822b28a51fb2285df1863363a9f6a4d233ba85cdb7c7c80cec4bdf78bb74
+yanhaidao-wecom-3.0.0-5.tgz（仓库根目录，.gitignore 忽略）
+size:        615,778 bytes
+unpacked:    2,329,171 bytes
+files:       257
+npm shasum:  92baa5e046a54b7760222b57caaf76ba48362842
+SHA-256:     ed2b491c8b893934f64926b2198b6b4e57f94a3432de5888e9710e1fbcb6a4de
 ~~~
 
-重复打包字节一致；包内无测试文件、无 node_modules、无凭据文件；含 dist/src/shared/byte-chunking.js 与 send-pacing.js。
-（隔离 npm install --omit=dev 后 @wecom/cli-linux-x64 可解析、二进制返回 wecom-cli 1.2.0，为 2.7.260-25 时的验证，本轮依赖未变、未重做。）
+重复打包字节一致；包内无测试文件、无 node_modules、无凭据文件；新增 THIRD_PARTY_NOTICES.md 与 UPSTREAM_BASELINE.json 随包发布。已撤回的 3.0.0-v1（9870de68…）/ 3.0.0-v2（b51570cd…）包不要安装。
 
 全量命令：
 
@@ -406,6 +387,7 @@ npx vitest run \
 - openclaw-compat.ts：官方用于跨 SDK 版本探测导出。本 fork 的做法不同：只用两条线都存在的子路径，静态守卫加 compat 矩阵，不做运行时探测。
 - 上游同步度：官方 git HEAD 之后没有我们未同步的功能提交。
 - 2026-09-02 对账 YanHaidao/wecom（origin）自分叉点 b4e297a 起的 25 个提交：Bot WS 车道没有必须补的修复；已移植 0d85ccb（Agent 车道字节切分）与 b28611d（1100ms 分片节流）；markdown.format 系列是 Agent 车道新功能、Bot WS 不需要；上游对 2026.8.x 零适配。
+- 2026-09-05 对账上游 `v3.0.0`（133773f）：它是以官方 2026.8.17 为主线的整体重建，不是增量。取了治理层三件（THIRD_PARTY_NOTICES、UPSTREAM_BASELINE、upstream:check）；未取的及原因见 changelog/v3.0.0-5.md 第三节（官方车道、schema 严格化、setup contract、wecom diagnose、结构化日志）。要再取时逐项评估、单独立项，不整树替换。
 
 ## 9. 模板卡片真机测试步骤
 
@@ -441,9 +423,9 @@ npx vitest run \
 
 ### 下一版发布时（需要用户明确批准）
 
-1. 更新 package.json 与 src/version.ts（version.test.ts 会对账）；changelog 补写 5bcbd05 / c39ace2 两项。
+1. 更新 package.json 与 src/version.ts（version.test.ts 会对账）；版本 `3.0.0-<构建号>`。
 2. `npm run compat:check`（两条线 typecheck + 全量 Vitest；工作区在 ~/.cache/wecom-openclaw-compat/，删目录即刷新）/ build / verify-dist / B1 / B2 / B3 / diff check。
-3. 打包并记录指纹，重复打包校验 SHA-256 一致。
+3. 打包并记录指纹，重复打包校验 SHA-256 一致；用临时 OPENCLAW_STATE_DIR + 生产形状配置做一次隔离安装（`plugins install npm-pack:<tgz>` → `config validate` → `plugins inspect wecom --runtime --json`）。
 4. 创建 released/<完整版本号> tag，只推 fork（git@github.com:liny90626/wecom.git），绝不推 origin。
 
 ### 改 reply.ts 时必看

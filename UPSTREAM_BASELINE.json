@@ -1,0 +1,20 @@
+{
+  "repository": "https://github.com/WecomTeam/wecom-openclaw-plugin.git",
+  "remote": "official",
+  "commit": "3b1cbe3e664352821758d99ae5907f5620fce26e",
+  "packageVersion": "2026.8.17",
+  "openclawCompatibility": {
+    "productionBaseline": "2026.7.1-2",
+    "latestVerified": "2026.9.1"
+  },
+  "synchronizedAt": "2026-09-05",
+  "trackedSurfaces": [
+    "index.ts",
+    "openclaw.plugin.json",
+    "package.json",
+    "skills",
+    "src",
+    "tsconfig.json"
+  ],
+  "note": "本 fork（liny90626/wecom）保留自己的 2.7.260 Bot WS 车道，只按需移植官方实现；对账记录见 SESSION_HANDOFF.md 第 8 节。"
+}

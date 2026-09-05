@@ -1,8 +1,8 @@
-import { realpath } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { WeComMediaType, WsFrameHeaders, WSClient } from "@wecom/aibot-node-sdk";
-import { readLocalFileFromRoots } from "openclaw/plugin-sdk/file-access-runtime";
 import { detectMime, fetchRemoteMedia, getMediaDir } from "openclaw/plugin-sdk/media-runtime";
 
 import { getWecomDefaultMediaLocalRoots } from "../../config/media.js";
@@ -100,7 +100,48 @@ function resolveLocalMediaPath(mediaUrl: string): string {
   if (mediaUrl.startsWith("file://")) {
     return fileURLToPath(mediaUrl);
   }
+  // The send-media skill tells the model `~/.openclaw/workspace/...` is fine.
+  if (mediaUrl === "~" || mediaUrl.startsWith("~/") || mediaUrl.startsWith("~\\")) {
+    return path.join(os.homedir(), mediaUrl.slice(1));
+  }
   return mediaUrl;
+}
+
+function isPathInside(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return (
+    relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+/**
+ * Local-root allowlist with the semantics 2.7.260-25 got from the SDK's
+ * `assertLocalMediaAllowed` before 2026.8.x made it private: the file and every
+ * root are compared by realpath, so a symlink is followed and refused once its
+ * target leaves the roots; a root that does not exist is skipped; the
+ * filesystem root never counts. `path.relative` is case-insensitive on Windows.
+ *
+ * 2.7.260-26 replaced this with fs-safe's `readLocalFileFromRoots`, which on
+ * the Windows production host refused legitimate paths (the OpenClaw outbound
+ * media store among them): `MEDIA:` attachments were silently dropped from
+ * 2026-09-02 until the field analysis of 2026-09-05. Do not route local media
+ * through that reader again.
+ */
+async function readAllowedLocalMedia(mediaPath: string, roots: readonly string[]): Promise<Buffer> {
+  const resolved = await realpath(mediaPath).catch(() => path.resolve(mediaPath));
+  for (const root of roots) {
+    const resolvedRoot = await realpath(root).catch(() => undefined);
+    if (!resolvedRoot || resolvedRoot === path.parse(resolvedRoot).root) {
+      continue;
+    }
+    if (isPathInside(resolvedRoot, resolved)) {
+      return readFile(resolved);
+    }
+  }
+  throw new Error(`Local media path is not under an allowed directory: ${mediaPath}`);
 }
 
 async function loadOutboundMediaFile(params: {
@@ -121,29 +162,11 @@ async function loadOutboundMediaFile(params: {
   }
 
   const mediaPath = resolveLocalMediaPath(params.mediaUrl);
-  // 2026.8.x made assertLocalMediaAllowed private. The public root-scoped
-  // reader (in 2026.7.1-2 too) enforces the same policy: the file must sit
-  // under an approved root, following a symlink only while its target stays
-  // inside one. OpenClaw's own media store counts as approved — that was the
-  // old helper's implicit inbound-media allowance — and a caller naming no
-  // roots gets the plugin's defaults, as the old helper fell back to the SDK's.
+  // OpenClaw's own media store counts as approved — the SDK helper's implicit
+  // inbound-media allowance — and a caller naming no roots gets the plugin's
+  // defaults, as that helper fell back to the SDK's.
   const roots = [...(params.mediaLocalRoots ?? getWecomDefaultMediaLocalRoots()), getMediaDir()];
-  // The old helper compared realpaths on both sides; 2026.7.x's reader matches
-  // a root as written (2026.8.x also tries its realpath). Offering each root in
-  // both spellings keeps a symlinked root (macOS /var, a linked Desktop)
-  // accepting the real path a model hands back.
-  const realRoots = await Promise.all(roots.map((root) => realpath(root).catch(() => root)));
-  const read = await readLocalFileFromRoots({
-    filePath: mediaPath,
-    roots: [...new Set([...roots, ...realRoots])],
-    symlinks: "follow-within-root",
-    hardlinks: "allow",
-    label: "wecom media roots",
-  });
-  if (!read) {
-    throw new Error(`Local media path is not under an allowed directory: ${mediaPath}`);
-  }
-  const buffer = read.buffer;
+  const buffer = await readAllowedLocalMedia(mediaPath, roots);
   if (buffer.length > params.maxBytes) {
     throw new Error(
       `Media size ${(buffer.length / (1024 * 1024)).toFixed(2)}MB exceeds max ${(

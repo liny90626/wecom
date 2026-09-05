@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { WSClient } from "@wecom/aibot-node-sdk";
@@ -86,5 +86,67 @@ describe("uploadAndSendBotWsMedia", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("not under an allowed directory");
     expect(wsClient.uploadMedia).not.toHaveBeenCalled();
+  });
+
+  // 2.7.260-26 routed local media through fs-safe's readLocalFileFromRoots and the
+  // Windows production host lost every MEDIA: attachment for three days. These pin the
+  // 2.7.260-25 semantics the local allowlist restores: realpath on both sides.
+  it("accepts a file addressed through a symlinked root", async () => {
+    const real = await mkdtemp(path.join(os.tmpdir(), "wecom-media-real-"));
+    const linkParent = await mkdtemp(path.join(os.tmpdir(), "wecom-media-link-"));
+    const linked = path.join(linkParent, "root-link");
+    await symlink(real, linked, "dir");
+    await writeFile(path.join(real, "chart.txt"), "chart body");
+    const wsClient = buildWsClient();
+
+    const result = await uploadAndSendBotWsMedia({
+      wsClient,
+      chatId: "hidao",
+      mediaUrl: path.join(linked, "chart.txt"),
+      mediaLocalRoots: [linked],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(wsClient.uploadMedia).toHaveBeenCalledWith(Buffer.from("chart body"), expect.anything());
+  });
+
+  it("refuses a symlink inside a root that points outside every root", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "wecom-media-root-"));
+    const elsewhere = await mkdtemp(path.join(os.tmpdir(), "wecom-media-elsewhere-"));
+    await writeFile(path.join(elsewhere, "secret.txt"), "nope");
+    await symlink(path.join(elsewhere, "secret.txt"), path.join(root, "innocent.txt"), "file");
+    const wsClient = buildWsClient();
+
+    const result = await uploadAndSendBotWsMedia({
+      wsClient,
+      chatId: "hidao",
+      mediaUrl: path.join(root, "innocent.txt"),
+      mediaLocalRoots: [root],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("not under an allowed directory");
+  });
+
+  it("expands ~ the way the send-media skill shows it", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "wecom-media-home-"));
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      await writeFile(path.join(home, "report.txt"), "home body");
+      const wsClient = buildWsClient();
+
+      const result = await uploadAndSendBotWsMedia({
+        wsClient,
+        chatId: "hidao",
+        mediaUrl: "~/report.txt",
+        mediaLocalRoots: [home],
+      });
+
+      expect(result.ok).toBe(true);
+      expect(wsClient.uploadMedia).toHaveBeenCalledWith(Buffer.from("home body"), expect.anything());
+    } finally {
+      process.env.HOME = previousHome;
+    }
   });
 });

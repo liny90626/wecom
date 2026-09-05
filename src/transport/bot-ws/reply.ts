@@ -4146,6 +4146,9 @@ export function createBotWsReplyHandle(params: {
             mediaSent += 1;
             finalMediaDelivered = true;
             visibleReplyStarted = true;
+            console.info(
+              `[wecom-media] sent account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} media=${mediaUrl} type=${result.finalType ?? "unknown"}`,
+            );
             if (result.downgradeNote) {
               mediaNotes.push(result.downgradeNote);
             }
@@ -4156,6 +4159,12 @@ export function createBotWsReplyHandle(params: {
             }
             continue;
           }
+          // The field found a whole lane failing for three days with nothing in
+          // the log: the failure text rides on the final, but the log must say
+          // it too, or nobody looks.
+          console.warn(
+            `[wecom-media] send-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} media=${mediaUrl} reason=${result.rejectReason ?? result.error ?? "unknown"}`,
+          );
           mediaFailures.push(formatMediaFailure(mediaUrl, result.error, result.rejectReason));
         }
 

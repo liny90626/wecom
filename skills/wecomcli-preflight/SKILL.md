@@ -48,8 +48,8 @@ openclaw config get tools.alsoAllow
 
 根据返回结果分流：
 
-- **返回内容包含 `wecom`**（如 `["wecom"]` 或 `["wecom", "other_tool"]`）→ ✅ 插件已放行，检查通过，继续执行用户原始请求
-- **返回内容不包含 `wecom`**（如空数组 `[]`、`undefined`、或列表中只有旧条目 `wecom_mcp`）→ 进入步骤 2（自动修复）
+- **返回内容包含 `wecom-openclaw-plugin`**（如 `["wecom-openclaw-plugin"]` 或 `["wecom-openclaw-plugin", "other_tool"]`）→ ✅ 插件已放行，检查通过，继续执行用户原始请求
+- **返回内容不包含 `wecom-openclaw-plugin`**（如空数组 `[]`、`undefined`、或列表中只有旧条目 `wecom_mcp`）→ 进入步骤 2（自动修复）
 - **命令执行失败** → 进入步骤 3（环境异常）
 
 ---
@@ -59,14 +59,14 @@ openclaw config get tools.alsoAllow
 在终端执行以下命令，将企业微信插件加入工具白名单：
 
 ```bash
-openclaw config set tools.alsoAllow '["wecom"]'
+openclaw config set tools.alsoAllow '["wecom-openclaw-plugin"]'
 ```
 
 > **权限边界**：按插件 ID 放行会允许该插件当前及未来注册的全部工具；这是本插件约定的推荐配置。
 >
 > **注意**：如果步骤 1b 返回的列表中已有其他工具（如 `["other_tool"]`），需要合并后再写入，例如：
 > ```bash
-> openclaw config set tools.alsoAllow '["other_tool", "wecom"]'
+> openclaw config set tools.alsoAllow '["other_tool", "wecom-openclaw-plugin"]'
 > ```
 > 旧的 `wecom_mcp` 条目已无效，可以保留或自行删除；不要为清理旧条目覆盖其他配置。
 
@@ -77,7 +77,7 @@ openclaw config set tools.alsoAllow '["wecom"]'
 向用户回复（**不要自动执行重启**）：
 
 ```
-✅ 已自动将企业微信插件（wecom）加入工具执行权限白名单（tools.alsoAllow）。
+✅ 已自动将企业微信插件（wecom-openclaw-plugin）加入工具执行权限白名单（tools.alsoAllow）。
 ⚠️ 配置变更需要重启 Gateway 后才能生效，请在终端执行以下命令：
 
 openclaw gateway restart
@@ -95,7 +95,7 @@ openclaw gateway restart
 ```
 ❌ 自动配置失败，请在终端手动执行以下命令：
 
-openclaw config set tools.alsoAllow '["wecom"]'
+openclaw config set tools.alsoAllow '["wecom-openclaw-plugin"]'
 openclaw gateway restart
 
 完成后请重新发送您的请求。
@@ -125,9 +125,9 @@ openclaw gateway restart
 
 1. **全程使用 shell 命令**：本技能的所有探测和修复操作均通过 `openclaw` CLI 在终端中执行，**不调用 `wecom-cli` 工具**。这样可以避免"tool 未白名单 → tool 不可见 → 无法探测"的死锁问题
 2. **profile 优先判断**：`tools.profile` 为 `full` 时所有工具无限制，无需检查 `alsoAllow`，可快速跳过
-3. **幂等性**：如果 `tools.alsoAllow` 中已包含 `wecom`，无需重复写入
-4. **按插件 ID 放行**：`wecom` 会展开为该插件当前及未来注册的全部工具
-5. **保留已有配置**：修改 `tools.alsoAllow` 时需保留已有条目，仅追加 `wecom`；旧的 `wecom_mcp` 可以保留或自行删除
+3. **幂等性**：如果 `tools.alsoAllow` 中已包含 `wecom-openclaw-plugin`，无需重复写入
+4. **按插件 ID 放行**：`wecom-openclaw-plugin` 会展开为该插件当前及未来注册的全部工具
+5. **保留已有配置**：修改 `tools.alsoAllow` 时需保留已有条目，仅追加 `wecom-openclaw-plugin`；旧的 `wecom_mcp` 可以保留或自行删除
 6. **不自动重启**：自动配置成功后仅提示用户重启并附上命令，由用户手动执行，避免会话中断导致信息丢失
 7. **会话缓存**：同一会话中一旦检查通过（profile 为 full 或 alsoAllow 包含插件 ID），后续调用无需重复检查
 8. **禁止旁路与降级**：`wecom-cli` 专用 tool 内部启动二进制是正常实现；禁止的是 Agent 使用 `exec` / `bash` / `shell` / `npx` 运行全局 CLI。专用 tool 失败、不可见或提示授权时，必须报告权限或配置问题，不得手动执行 `auth init`
@@ -140,7 +140,7 @@ openclaw gateway restart
 |------|---------|
 | 首次调用 wecom-cli 前 | 执行 `openclaw config get tools.profile` 检查 |
 | `tools.profile` 为 `full` | ✅ 跳过，直接执行原始请求 |
-| profile 非 full + alsoAllow 已包含 `wecom` | ✅ 跳过，继续执行 |
+| profile 非 full + alsoAllow 已包含 `wecom-openclaw-plugin` | ✅ 跳过，继续执行 |
 | profile 非 full + alsoAllow 只有旧 `wecom_mcp` 或不含插件 ID → 自动写入成功 | 追加插件 ID，提示已配置 + 附 `openclaw gateway restart` 命令让用户重启 |
 | profile 非 full + alsoAllow 不含插件 ID → 自动写入失败 | 给出手动修复指引 |
 | openclaw CLI 不可用 | 告知用户检查 OpenClaw 安装 |

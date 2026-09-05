@@ -1,64 +1,106 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import fs from "node:fs";
-import path from "node:path";
+import { readFileSync } from "node:fs";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { describe, expect, it, vi } from "vitest";
 import plugin from "./index.js";
 
-describe("wecom plugin register", () => {
-  it("registers both recommended and legacy webhook route prefixes", () => {
-    const registerChannel = vi.fn();
-    const registerHttpRoute = vi.fn();
-    const registerTool = vi.fn();
-    const registerService = vi.fn();
-    const on = vi.fn();
-    const api = {
-      runtime: {},
-      registerChannel,
-      registerHttpRoute,
-      registerTool,
-      registerService,
-      logger: { info: vi.fn(), warn: vi.fn() },
-      on,
-    } as unknown as OpenClawPluginApi;
+function createApi(registrationMode: "full" | "tool-discovery" = "full") {
+  const toolFactories: Array<(context: unknown) => { name: string } | null> = [];
+  const api = {
+    runtime: {},
+    registrationMode,
+    config: { tools: {} },
+    logger: { warn: vi.fn() },
+    registerChannel: vi.fn(),
+    registerCli: vi.fn(),
+    registerHttpRoute: vi.fn(),
+    registerSecurityAuditCollector: vi.fn(),
+    registerTool: vi.fn((factory) => toolFactories.push(factory)),
+    on: vi.fn(),
+  } as unknown as OpenClawPluginApi;
+  return { api, toolFactories };
+}
+
+describe("YanHaidao full WeCom plugin boundary", () => {
+  it("publishes cold-path channel metadata for current OpenClaw discovery", () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL("./openclaw.plugin.json", import.meta.url), "utf8"),
+    ) as {
+      id: string;
+      channels: string[];
+      channelConfigs?: Record<string, {
+        preferOver?: string[];
+        schema?: { type?: string };
+        cliAddOptions?: Array<{ flags: string; description: string }>;
+      }>;
+    };
+
+    expect(manifest.id).toBe("wecom");
+    expect(manifest.channels).toEqual(["wecom"]);
+    expect(manifest.channelConfigs?.wecom?.schema?.type).toBe("object");
+    expect(manifest.channelConfigs?.wecom?.preferOver).toContain("wecom-openclaw-plugin");
+    expect(manifest.channelConfigs?.wecom?.cliAddOptions?.map((option) => option.flags)).toEqual(
+      expect.arrayContaining(["--connection-mode <mode>", "--bot-id <id>", "--encoding-aes-key <key>"]),
+    );
+
+    const packageManifest = JSON.parse(
+      readFileSync(new URL("./package.json", import.meta.url), "utf8"),
+    ) as { openclaw?: { channel?: { cliAddOptions?: Array<{ flags: string }> } } };
+    expect(packageManifest.openclaw?.channel?.cliAddOptions?.map((option) => option.flags)).toEqual(
+      expect.arrayContaining(["--connection-mode <mode>", "--bot-id <id>", "--encoding-aes-key <key>"]),
+    );
+  });
+
+  it("owns the complete Channel while registering official and enhanced capabilities once", () => {
+    const { api } = createApi();
 
     plugin.register(api);
 
-    expect(registerChannel).toHaveBeenCalledTimes(1);
-    expect(registerHttpRoute).toHaveBeenCalledTimes(2);
-    expect(registerService).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "wecom-cli-credentials" }),
-    );
-    expect(registerHttpRoute).toHaveBeenCalledWith(
-      expect.objectContaining({
-        path: "/plugins/wecom",
-        auth: "plugin",
-        match: "prefix",
+    expect(plugin.id).toBe("wecom");
+    expect(api.registerChannel).toHaveBeenCalledTimes(1);
+    expect(api.registerCli).toHaveBeenCalledTimes(1);
+    expect(api.registerHttpRoute).toHaveBeenCalledTimes(5);
+    expect(api.registerSecurityAuditCollector).toHaveBeenCalledTimes(1);
+    expect(api.registerTool).toHaveBeenCalledTimes(3);
+    expect(api.on).not.toHaveBeenCalled();
+    expect(api.registerChannel).toHaveBeenCalledWith({
+      plugin: expect.objectContaining({
+        agentPrompt: expect.objectContaining({ messageToolHints: expect.any(Function) }),
       }),
-    );
-    expect(registerHttpRoute).toHaveBeenCalledWith(
-      expect.objectContaining({
-        path: "/wecom",
-        auth: "plugin",
-        match: "prefix",
-      }),
+    });
+
+    const registeredChannel = vi.mocked(api.registerChannel).mock.calls[0]?.[0].plugin;
+    expect(registeredChannel.setup?.applyAccountConfig).toEqual(expect.any(Function));
+    if (registeredChannel.setupContract) {
+      expect(registeredChannel.setupContract).toMatchObject({
+        kind: "channel-owned",
+        applyAccountConfig: expect.any(Function),
+      });
+    }
+    expect(registeredChannel.agentPrompt?.messageToolHints?.({} as never)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("wecom-cli"),
+        expect.stringContaining("wecom_doc"),
+        expect.stringContaining("MEDIA:"),
+        expect.stringContaining("card_type"),
+      ]),
     );
   });
 
-  it("declares registered tools in the plugin manifest contracts", () => {
-    const manifestPath = path.resolve(process.cwd(), "openclaw.plugin.json");
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  it("always exposes wecom-cli but scopes enhanced tools to WeCom sessions", () => {
+    const { api, toolFactories } = createApi("tool-discovery");
+    plugin.register(api);
 
-    expect(manifest.contracts?.tools).toEqual([
-      "wecom_doc",
-      "wecom_calendar",
-      "wecom_mcp",
+    expect(api.registerChannel).not.toHaveBeenCalled();
+
+    expect(toolFactories.map((factory) => factory({ messageChannel: "telegram" })?.name)).toEqual([
       "wecom-cli",
+      undefined,
+      undefined,
     ]);
-    expect(manifest.skills).toEqual(["./skills"]);
-    const pkg = JSON.parse(
-      fs.readFileSync(path.resolve(process.cwd(), "package.json"), "utf8"),
-    ) as { dependencies?: Record<string, string> };
-    expect(pkg.dependencies?.["@wecom/cli"]).toBe("1.2.0");
+    expect(
+      toolFactories.map(
+        (factory) => factory({ messageChannel: "wecom", agentAccountId: "main" })?.name,
+      ),
+    ).toEqual(["wecom-cli", "wecom_doc", "wecom_calendar"]);
   });
-
 });

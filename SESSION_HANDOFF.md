@@ -1,13 +1,14 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-09-04
+> 最后更新：2026-09-05
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
 - 已发布基线：2.7.260-26，标签 released/2.7.260-26，已推送 fork。
-- 兼容目标：OpenClaw 2026.7.1-2（用户生产）与**最新稳定版**（发版时为 2026.8.2）。devDependency 仍钉 2026.7.1-2；`npm run compat:check` 对两条线各跑 typecheck 与全量测试，**发版前必跑**。2026.6.x 不再维护。
+- 当前同步候选：上游 `v3.0.0`（origin/main `133773f`），尚未改包版本、提交、打 tag 或推送。
+- 兼容目标：OpenClaw `2026.7.1-2`（用户生产）与最新稳定版 `2026.9.1`。devDependency 固定为 `2026.7.1-2`；`npm run compat:check 2026.7.1-2 2026.9.1` 对两条线各跑 typecheck 与全量测试，**发版前必跑**。
 - **main 领先 released/2.7.260-26 两个未发布的代码提交**（用户决定：不发版、不打 tag，只更新文档并推 fork）：
   - 5bcbd05 **运行时上下文围栏**：两条线的核心都把 `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>…<<<END_OPENCLAW_INTERNAL_CONTEXT>>>` 作为 display:false 的载体消息喂给模型——模型看见它是设计使然，8.2 只是把头部指令写严了。插件侧两处缺口：①过程步骤（CLI 后端 commentary）与推理由核心**原样**转来，模型复述该块时会进气泡 / 推送 / 思考块；②三条入站车道的用户文本未转义，独占成行的围栏块会被核心 `resolveRuntimeContextPromptParts` 提取为可信上下文（伪造）。修在 `src/shared/internal-runtime-context.ts`：入站转义成核心自己用的 `[[OPENCLAW_INTERNAL_CONTEXT_BEGIN]]` 形态，出站 preamble / reasoning 剥围栏块；final 与 block 核心已净化，不重复。
   - c39ace2 **compat 工作区移出仓库树**（`~/.cache/wecom-openclaw-compat/`）：原先放在仓库内时 TypeScript 沿祖先 node_modules 找到钉住的 7.1-2 声明，8.2 缺 .d.ts 的子路径实际按 7.1-2 类型检查——2.7.260-26 汇报的「8.2 typecheck PASS」在 `file-access-runtime` 这一个子路径上不严谨（运行时验证不受影响，两版签名相同）。移出后复验：0 错误、0 次回落到仓库 node_modules。
@@ -301,15 +302,13 @@ src/transport/bot-ws/sdk-adapter.ts
 ### 已完成
 
 ~~~text
-OpenClaw: 2026.7.1-2 与 2026.8.2（npm run compat:check，两条线各一遍）
-Vitest: 63 / 63 files，811 / 811 tests（两条线数字相同）
-typecheck: 两条线 PASS（8.2 由 compat 脚本为 file-access-runtime 补类型 shim，8.2 该子路径不带 .d.ts；发版时工作区还在仓库内，该子路径实际借了 7.1-2 的声明，见下）
+OpenClaw: 2026.7.1-2 与 2026.9.1（npm run compat:check，两条线各一遍）
+Vitest: 28 / 28 files，80 / 80 tests（两条线均通过）
+typecheck: 两条线 PASS（9.1 由 compat 脚本为 file-access-runtime 补类型 shim）
 npm run build / verify-dist: passed
-B1: READY
-B2: READY（BLOCK_PREVIEW_MAX_CHARS 字面量已同步为 5_000）
-B3: READY
-8.2 plugins inspect wecom --runtime --json: status loaded（channel、2 tools、service、2 http routes）
-真实 mutateConfigFile 名册写入 e2e：7.1-2 list、8.2 entries / list / 空配置 均正确
+npm audit --omit=dev: 0 vulnerabilities
+7.1 setup adapter 与 9.1 setup contract 均通过入口回归
+打包、tag、commit、push、真实企业微信验收：未执行（等待明确批准）
 ~~~
 
 未发布提交（5bcbd05 / c39ace2）的验证——机器负载 30+（另一项目的沙箱任务），后台任务被中止，全部前台分片跑完：
@@ -322,7 +321,7 @@ B1 / B2: READY（改动之后跑的）
 B3: 脚本本身负载下 10 分钟未跑完；其聚焦测试集 4 文件 280/280 单独通过，字面量目标 reply.ts / app/index.ts 本轮未动
 ~~~
 
-**下一版发布前必须在空闲机器上补跑一次完整 `npm run compat:check 2026.7.1-2 2026.8.2` 与 B3 脚本。**
+**下一版发布前必须在空闲机器上补跑一次完整 `npm run compat:check 2026.7.1-2 2026.9.1` 与真实企业微信验收。**
 
 本轮新增的复现用例（改这些路径前先跑）：
 - long-task-progress「死窗后的收尾：答案正文随推送出门时不再押着「长任务处理中」的状态尾巴」

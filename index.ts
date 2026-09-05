@@ -1,128 +1,82 @@
 /**
- * Author: YanHaidao
+ * YanHaidao full-featured WeCom plugin.
+ *
+ * The channel/runtime baseline tracks WecomTeam/wecom-openclaw-plugin while
+ * tenant isolation, diagnostics, and advanced business APIs remain owned here.
  */
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk/core";
-import { registerWecomCalendarTools } from "./src/capability/calendar/tool.js";
+import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
+import type {
+  OpenClawPluginDefinition,
+  OpenClawPluginApi,
+  OpenClawPluginToolContext,
+} from "openclaw/plugin-sdk/core";
+import { registerWecomDiagnosticsCli } from "./src/addon/cli.js";
+import { collectWecomAuditFindings } from "./src/addon/security-audit.js";
+import { createWeComCliTool, CLI_TOOL_NAME } from "./src/cli/index.js";
 import {
-  CLI_TOOL_NAME,
-  createWeComCliToolFactory,
-  prewarmWecomCliCredentials,
-} from "./src/capability/cli/index.js";
-import { registerWecomDocTools } from "./src/capability/doc/tool.js";
-import { createWeComMcpToolFactory } from "./src/capability/mcp/index.js";
+  LEGACY_TOOL_WARNING,
+  shouldWarnLegacyToolAllow,
+} from "./src/cli/legacy-tool-warning.js";
+import { WEBHOOK_PATHS } from "./src/const.js";
+import { registerWecomCalendarTool } from "./src/capability/calendar/tool.js";
+import { registerWecomDocTool } from "./src/capability/doc/tool.js";
+import { createWecomAgentWebhookHandler } from "./src/agent/webhook.js";
 import { wecomPlugin } from "./src/channel.js";
-import { handleWecomWebhookRequest } from "./src/monitor.js";
-import { setWecomRuntime } from "./src/runtime.js";
-import { isWecomBotWsSource } from "./src/runtime/source-registry.js";
+import { setWeComRuntime } from "./src/runtime.js";
+import { handleWecomWebhookRequest } from "./src/webhook/index.js";
 
-const WECOM_BOT_WS_MEDIA_GUIDANCE = [
-  "【WeCom Bot WS 媒体发送】",
-  "当前会话支持企业微信 Bot WS 媒体发送。",
-  "当你需要发送图片、文件、视频或语音时，必须在回复中单独一行使用 MEDIA: 指令，后面跟本地文件路径。",
-  "格式：MEDIA: /文件的绝对路径",
-  "示例：",
-  "  MEDIA: ~/.openclaw/output.png",
-  "  MEDIA: ~/.openclaw/report.pdf",
-  "注意事项：",
-  "- MEDIA: 必须单独成行并以 MEDIA: 开头",
-  "- 建议优先使用本地可访问路径，而不是远程 URL",
-  "- 图片和视频超过 10MB、语音超过 2MB、文件超过 20MB 时可能会降级或发送失败",
-  "- 语音消息仅原生支持 AMR；其他音频格式会按文件发送",
-].join("\n");
+function registerFull(api: OpenClawPluginApi) {
+    const registerSecurityAuditCollector = (api as OpenClawPluginApi & {
+      registerSecurityAuditCollector?: (collector: typeof collectWecomAuditFindings) => void;
+    }).registerSecurityAuditCollector;
+    registerSecurityAuditCollector?.(collectWecomAuditFindings);
+    if (shouldWarnLegacyToolAllow(api.config.tools)) {
+      api.logger.warn(LEGACY_TOOL_WARNING);
+    }
 
-const WECOM_TEMPLATE_CARD_GUIDANCE = [
-  "【WeCom 模板卡片】",
-  "需要给用户发通知、投票、按钮选择等结构化卡片时，直接在最终回复里输出 ```json 代码块，",
-  "其中 card_type 字段标明卡片类型（text_notice / news_notice / button_interaction /",
-  "vote_interaction / multiple_interaction）。插件会自动提取该代码块、作为企业微信卡片消息发送，",
-  "并把它从正文中移除；代码块之外的文字照常作为普通回复发送。详见 wecom-send-template-card 技能。",
-  "不要调用 wecom-cli 或其他工具发送卡片。",
-].join("\n");
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => createWeComCliTool({ accountId: ctx.agentAccountId }),
+      { name: CLI_TOOL_NAME },
+    );
+    registerWecomDocTool(api);
+    registerWecomCalendarTool(api);
+    const agentWebhookHandler = createWecomAgentWebhookHandler(api.runtime);
+    api.registerHttpRoute({
+      path: WEBHOOK_PATHS.AGENT_PLUGIN,
+      handler: agentWebhookHandler,
+      auth: "plugin",
+      match: "prefix",
+    });
+    api.registerHttpRoute({
+      path: WEBHOOK_PATHS.AGENT,
+      handler: agentWebhookHandler,
+      auth: "plugin",
+      match: "prefix",
+    });
 
-const WECOM_CLI_GUIDANCE = [
-  "企业微信通讯录、文档、会议、日程、待办、智能表格等能力必须通过专用 `wecom-cli` tool 调用。",
-  "禁止通过 exec、bash、shell、npx 或 PATH 上的全局命令运行 wecom-cli；专用 tool 会按当前会话账号注入隔离凭据。",
-  "调用时 args 只传 wecom-cli 后面的参数，不传命令前缀、WECOM_CLI_* 环境变量、--config-dir 或 --home。",
-  "工具失败时不要降级到 exec，也不要手动执行 auth init；应报告工具权限或 channels.wecom 配置问题。",
-].join("\n");
-
-const plugin = {
-  id: "wecom",
-  name: "WeCom (企业微信)",
-  description: "企业微信官方推荐三方插件，默认 Bot WS，支持主动发消息与统一运行时能力",
-  configSchema: emptyPluginConfigSchema(),
-  /**
-   * **register (注册插件)**
-   *
-   * OpenClaw 插件入口点。
-   * 1. 注入统一 runtime compatibility layer。
-   * 2. 注册 capability-first WeCom 渠道插件。
-   * 3. 注册统一 HTTP 入口（所有 webhook 请求都走共享路由器）。
-   */
-  register(api: OpenClawPluginApi) {
-    setWecomRuntime(api.runtime);
-    api.registerChannel({ plugin: wecomPlugin });
-    const routes = ["/plugins/wecom", "/wecom"];
-    for (const path of routes) {
+    for (const routePath of [
+      WEBHOOK_PATHS.BOT_PLUGIN,
+      WEBHOOK_PATHS.BOT_ALT,
+      WEBHOOK_PATHS.BOT,
+    ]) {
       api.registerHttpRoute({
-        path,
+        path: routePath,
         handler: handleWecomWebhookRequest,
         auth: "plugin",
         match: "prefix",
       });
     }
+}
 
-    // Register WeCom Doc Tools
-    registerWecomDocTools(api);
-    registerWecomCalendarTools(api);
-    api.registerTool(createWeComMcpToolFactory(), { name: "wecom_mcp" });
-    api.registerTool(createWeComCliToolFactory(), { name: CLI_TOOL_NAME });
-
-    // Authorization is warmed independently from the first business call. A
-    // failed warmup is logged and left for the tool to report on demand.
-    if (typeof api.registerService === "function") {
-      let prewarmPromise: Promise<void> | undefined;
-      api.registerService({
-        id: "wecom-cli-credentials",
-        start: (ctx) => {
-          prewarmPromise = prewarmWecomCliCredentials(ctx.config, {
-            info: (message) => ctx.logger.info(message),
-            warn: (message) => ctx.logger.warn(message),
-          }).catch((error) => {
-            ctx.logger.warn(
-              `[wecom-cli] 启动预热未完成（不影响现有渠道）：${error instanceof Error ? error.message : String(error)}`,
-            );
-          });
-        },
-        stop: async () => {
-          await prewarmPromise;
-        },
-      });
-    }
-
-    api.on("before_prompt_build", (_event, ctx) => {
-      if (ctx.channelId !== "wecom") {
-        return;
-      }
-      if (
-        !isWecomBotWsSource({
-          sessionKey: ctx.sessionKey,
-          sessionId: ctx.sessionId,
-        })
-      ) {
-        return;
-      }
-      return {
-        appendSystemContext: [WECOM_BOT_WS_MEDIA_GUIDANCE, WECOM_TEMPLATE_CARD_GUIDANCE].join("\n\n"),
-      };
-    });
-
-    api.on("before_prompt_build", (_event, ctx) => {
-      if (ctx.channelId !== "wecom") return;
-      return { appendSystemContext: WECOM_CLI_GUIDANCE };
-    });
-  },
-};
+const plugin: OpenClawPluginDefinition = defineChannelPluginEntry({
+  id: "wecom",
+  name: "企业微信（YanHaidao 全功能版）",
+  description: "融合腾讯官方 Channel、wecom-cli 与企业增强能力的完整企业微信插件",
+  plugin: wecomPlugin,
+  configSchema: () => wecomPlugin.configSchema!,
+  setRuntime: setWeComRuntime,
+  registerCliMetadata: registerWecomDiagnosticsCli,
+  registerFull,
+});
 
 export default plugin;

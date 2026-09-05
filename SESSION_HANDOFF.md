@@ -417,6 +417,7 @@ npx vitest run \
 
 ### 现在不要做
 
+- 现网 CLI 被坏插件锁死时（2026-09-05 的 3.0.0-v1）：不要跑 `openclaw doctor --fix`（会把配置改成 v3 扁平形状，本车道读不到凭据），不要先停网关，不要把插件备份留在 `extensions\` 里（duplicate plugin id）。按 changelog/v3.0.0-5.md 第五节手动换 `extensions\wecom` 目录内容，网关不停机先 `config validate` / `plugins inspect` / `channels list` 自检再重启。该流程已在 7.1-2 隔离目录用真实 v1 包演练通过。
 - 不要重置或覆盖当前工作区改动。
 - 不要把 devDependency 从 2026.7.1-2 挪走；新版 OpenClaw 用 `npm run compat:check <版本>` 验证，不换基线。
 - 未获授权不要打 tag 或推送远端。

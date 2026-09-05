@@ -1,0 +1,41 @@
+import type { ResolvedAgentAccount } from "../../types/index.js";
+import type { WecomTarget } from "../../target.js";
+import { sendAgentApiMediaReply, sendAgentApiTextReply } from "./reply.js";
+import { uploadAgentApiMedia } from "./media-upload.js";
+
+export async function deliverAgentApiText(params: {
+  agent: ResolvedAgentAccount;
+  target: WecomTarget;
+  text: string;
+}): Promise<void> {
+  await sendAgentApiTextReply(params);
+}
+
+export async function deliverAgentApiMedia(params: {
+  agent: ResolvedAgentAccount;
+  target: WecomTarget;
+  buffer: Buffer;
+  filename: string;
+  contentType: string;
+  text?: string;
+}): Promise<void> {
+  let mediaType: "image" | "voice" | "video" | "file" = "file";
+  if (params.contentType.startsWith("image/")) mediaType = "image";
+  else if (params.contentType.startsWith("audio/")) mediaType = "voice";
+  else if (params.contentType.startsWith("video/")) mediaType = "video";
+
+  const mediaId = await uploadAgentApiMedia({
+    agent: params.agent,
+    type: mediaType,
+    buffer: params.buffer,
+    filename: params.filename,
+  });
+  await sendAgentApiMediaReply({
+    agent: params.agent,
+    target: params.target,
+    mediaId,
+    mediaType,
+    title: mediaType === "video" ? params.text?.trim().slice(0, 64) : undefined,
+    description: mediaType === "video" ? params.text?.trim().slice(0, 512) : undefined,
+  });
+}

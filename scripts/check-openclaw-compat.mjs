@@ -4,7 +4,7 @@
  * every OpenClaw line it claims to support?
  *
  *   node scripts/check-openclaw-compat.mjs                 # devDependency + latest
- *   node scripts/check-openclaw-compat.mjs 2026.7.1-2 2026.9.1
+ *   node scripts/check-openclaw-compat.mjs 2026.7.1-2 2026.8.2
  *
  * For each version this installs `openclaw@<version>` under
  * `~/.cache/wecom-openclaw-compat/<version>/` (cached; delete the directory
@@ -17,7 +17,7 @@
  * borrow the repo's (pinned) openclaw declarations for every subpath the
  * target version ships without a `.d.ts` — and typecheck the wrong version.
  *
- * Some OpenClaw releases ship `plugin-sdk` subpaths without declaration
+ * OpenClaw 2026.8.x ships some `plugin-sdk` subpaths without declaration
  * files (their export map lacks `types`); for those the workspace gets a
  * minimal ambient declaration so the typecheck exercises OUR code rather than
  * failing on their packaging. Each shim is reported.
@@ -32,7 +32,7 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cacheRoot = path.join(os.homedir(), ".cache", "wecom-openclaw-compat");
 const pkg = JSON.parse(fs.readFileSync(path.join(repo, "package.json"), "utf8"));
 
-/** Ambient declarations for subpaths whose package ships no .d.ts. */
+/** Ambient declarations for subpaths whose 2026.8.x packages ship no .d.ts. */
 const TYPE_SHIMS = {
   "openclaw/plugin-sdk/file-access-runtime": `
 declare module "openclaw/plugin-sdk/file-access-runtime" {

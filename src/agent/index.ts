@@ -9,4 +9,4 @@ export {
     uploadMedia,
     sendMedia,
     downloadMedia,
-} from "./api-client.js";
+} from "../transport/agent-api/core.js";

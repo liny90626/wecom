@@ -1,119 +1,154 @@
-/**
- * WeCom 子模块配置类型定义
- *
- * 注意：顶层配置类型 WeComConfig 定义在 src/utils.ts 中，以平铺结构为准。
- * 本文件仅定义 Agent/Bot/DM/Network/Media 等子模块的配置类型。
- */
+export type WecomDmPolicy = "open" | "pairing" | "allowlist" | "disabled";
+export type WecomBotPrimaryTransport = "ws" | "webhook";
 
-/** 媒体处理配置 */
+export type WecomDmConfig = {
+  policy?: WecomDmPolicy;
+  allowFrom?: Array<string | number>;
+};
+
 export type WecomMediaConfig = {
-    tempDir?: string;
-    retentionHours?: number;
-    cleanupOnStart?: boolean;
-    maxBytes?: number;
+  tempDir?: string;
+  retentionHours?: number;
+  cleanupOnStart?: boolean;
+  maxBytes?: number;
+  downloadTimeoutMs?: number;
+  localRoots?: string[];
 };
 
-/** 网络配置 */
 export type WecomNetworkConfig = {
-    timeoutMs?: number;
-    retries?: number;
-    retryDelayMs?: number;
-    /**
-     * 出口代理（用于企业可信 IP 固定出口场景）。
-     * 示例: "http://proxy.company.local:3128"
-     */
-    egressProxyUrl?: string;
+  egressProxyUrl?: string;
+  timeoutMs?: number;
+  mediaDownloadTimeoutMs?: number;
 };
 
-/**
- * Bot 模式配置 (智能体)
- * 用于接收 JSON 格式回调 + 流式回复
- */
+export type WecomRoutingConfig = {
+  failClosedOnDefaultRoute?: boolean;
+};
+
+export type WecomCliEnv = Partial<
+  Record<
+    "WECOM_CLI_BASE_URL" | "WECOM_CLI_AUTH_ENDPOINT" | "WECOM_CLI_ADDITIONAL_HEADERS",
+    string
+  >
+>;
+
+export type WecomCliConfig = {
+  /** 联调或受控运维场景下显式指定 CLI 二进制；默认只从插件私有依赖寻址。 */
+  binPath?: string;
+  /** 仅允许官方白名单中的 CLI 环境变量。 */
+  env?: WecomCliEnv;
+};
+
+export type WecomBotWsConfig = {
+  botId: string;
+  secret: string;
+};
+
+export type WecomBotWebhookConfig = {
+  token: string;
+  encodingAESKey: string;
+  receiveId?: string;
+};
+
 export type WecomBotConfig = {
-    /** 智能机器人 ID（用于 Matrix 模式二次身份确认，webhook 模式） */
-    aibotid?: string;
-    /** 回调 Token (企微后台生成，webhook 模式必填) */
-    token?: string;
-    /** 回调加密密钥 (企微后台生成，webhook 模式必填) */
-    encodingAESKey?: string;
-    /**
-     * BotId 列表（可选，用于审计与告警）。
-     * - 回调路由优先由 URL + 签名决定；botIds 不参与强制拦截。
-     * - 当解密后的 aibotid 不在 botIds 中时，仅记录告警日志。
-     */
-    botIds?: string[];
-    /** 接收者 ID (可选，用于解密校验) */
-    receiveId?: string;
-    /** 流式消息占位符 */
-    streamPlaceholderContent?: string;
-    /** 欢迎语 */
-    welcomeText?: string;
-    /** DM 策略: 'open' 允许所有人, 'pairing' 需要配对, 'allowlist' 仅允许列表, 'disabled' 禁用 */
-    dmPolicy?: 'open' | 'pairing' | 'allowlist' | 'disabled';
-    /** 允许的用户列表，为空表示允许所有人 */
-    allowFrom?: Array<string | number>;
-
-    // --- 长链接模式 (WebSocket) ---
-
-    /** 连接模式：webhook（默认）或 websocket */
-    connectionMode?: 'webhook' | 'websocket';
-    /** 机器人 BotID（websocket 模式必填，企微后台获取） */
-    botId?: string;
-    /** 机器人 Secret（websocket 模式必填，企微后台获取） */
-    secret?: string;
-};
-
-/** One downstream enterprise authorized through WeCom upstream/downstream mode. */
-export type WecomUpstreamCorpConfig = {
-    /** Downstream enterprise CorpID. */
-    corpId: string;
-    /** Agent ID installed in the downstream enterprise. */
-    agentId: number | string;
+  primaryTransport?: WecomBotPrimaryTransport;
+  streamPlaceholderContent?: string;
+  welcomeText?: string;
+  dm?: WecomDmConfig;
+  /**
+   * Deprecated compatibility fields kept only while old webhook helpers are
+   * being extracted into transport adapters.
+   */
+  aibotid?: string;
+  botIds?: string[];
+  token?: string;
+  encodingAESKey?: string;
+  receiveId?: string;
+  ws?: WecomBotWsConfig;
+  webhook?: WecomBotWebhookConfig;
+  /**
+   * 按 `biz_type` 直接指定 MCP Server 的 streamableHTTP URL。
+   *
+   * 取值来自机器人管理后台「可使用权限 → 查看使用方式」里复制的地址，形如
+   * `https://qyapi.weixin.qq.com/mcp/v2/bot/doc?apikey=…`。**这个 `apikey` 是成员
+   * 完成授权之后才签发的**，成员对文档的权限随它一起共享给 MCP 使用者；而
+   * `aibot_get_mcp_config` 走的是机器人长连接、另行签发，两者不必然等价。
+   *
+   * 配置了就直接用它，不再调 `aibot_get_mcp_config`；没配置则行为不变。
+   *
+   * **这是推荐配置，不是临时兜底。** 现网实测（2026-08-26）证明两条签发路径
+   * 指向的是**两台不同的 MCP Server**：
+   *   - 后台地址 `/mcp/v2/bot/<biz_type>?apikey=…` → 「动态* MCP」v1.0.5，
+   *     `doc` 有 62 个新一代工具（`doc_create` / `sheet_get` / `smartsheet_records_*`），
+   *     且服务端返回里自报「授权真人用户身份」——**授权是内嵌在 apikey 里的**；
+   *   - `aibot_get_mcp_config` 签发的地址 → 旧一代、19 个工具、**没有绑定真人
+   *     用户**，因此对成员拥有的文档一律 `851003 no authority`。
+   *
+   * 使用者已验证：取消授权再重新授权，apikey **不变**，可安全写入配置。
+   */
+  mcpServers?: Record<string, string>;
 };
 
 /**
- * Agent 模式配置 (自建应用)
- * 用于接收 XML 格式回调 + API 主动发送
+ * 上下游企业配置
+ * 根据企业微信文档，只需要配置下游企业的 CorpID 和 AgentID
+ * 不需要下游企业的 agentSecret，使用主企业的 corpSecret 获取下游企业的 access_token
  */
-export type WecomAgentConfig = {
-    /** 企业 ID */
-    corpId: string;
-    /** 应用 Secret */
-    corpSecret: string;
-    /** 本次扁平化改版前使用的字段名，仅用于读取已有配置。 */
-    agentSecret?: string;
-    /** 应用 ID（可选；不填时可接收回调，但主动发送需具备该字段） */
-    agentId?: number | string;
-    /** 回调 Token (企微后台「设置API接收」) */
-    token: string;
-    /** 回调加密密钥 (企微后台「设置API接收」) */
-    encodingAESKey: string;
-    /** 欢迎语 */
-    welcomeText?: string;
-    /** DM 策略: 'open' 允许所有人, 'pairing' 需要配对, 'allowlist' 仅允许列表, 'disabled' 禁用 */
-    dmPolicy?: 'open' | 'pairing' | 'allowlist' | 'disabled';
-    /** 允许的用户列表，为空表示允许所有人 */
-    allowFrom?: Array<string | number>;
-    /** 本次扁平化改版前的 Agent 私聊策略结构。 */
-    dm?: {
-        policy?: 'open' | 'pairing' | 'allowlist' | 'disabled';
-        allowFrom?: Array<string | number>;
-    };
-    /**
-     * Downstream enterprises reachable with this primary enterprise's credentials.
-     * Keys are operator labels; identity matching always uses each value's corpId.
-     */
-    upstreamCorps?: Record<string, WecomUpstreamCorpConfig>;
+export type WecomUpstreamCorpConfig = {
+  corpId: string;
+  agentId: number;
 };
 
-/** 动态 Agent 配置 */
+export type WecomAgentConfig = {
+  corpId: string;
+  agentSecret?: string;
+  /**
+   * Deprecated compatibility alias for old configs.
+   * New configs should use `agentSecret`.
+   */
+  corpSecret?: string;
+  agentId?: number | string;
+  token: string;
+  encodingAESKey: string;
+  welcomeText?: string;
+  dm?: WecomDmConfig;
+  /**
+   * 上下游企业配置映射
+   * key: 配置名称（可自定义）
+   * value: 下游企业的 CorpID 和 AgentID
+   * 
+   * 注意：不需要配置 agentSecret，使用主企业的 corpSecret 获取下游企业的 access_token
+   */
+  upstreamCorps?: Record<string, WecomUpstreamCorpConfig>;
+};
+
 export type WecomDynamicAgentsConfig = {
-    /** 是否启用动态 Agent */
-    enabled?: boolean;
-    /** 私聊：是否为每个用户创建独立 Agent */
-    dmCreateAgent?: boolean;
-    /** 群聊：是否启用动态 Agent */
-    groupEnabled?: boolean;
-    /** 管理员列表（绕过动态路由，使用主 Agent） */
-    adminUsers?: string[];
+  enabled?: boolean;
+  dmCreateAgent?: boolean;
+  groupEnabled?: boolean;
+  adminUsers?: string[];
+};
+
+export type WecomAccountConfig = {
+  enabled?: boolean;
+  name?: string;
+  mediaMaxMb?: number;
+  cli?: WecomCliConfig;
+  bot?: WecomBotConfig;
+  agent?: WecomAgentConfig;
+};
+
+export type WecomConfig = {
+  enabled?: boolean;
+  mediaMaxMb?: number;
+  mediaDownloadTimeoutMs?: number;
+  bot?: WecomBotConfig;
+  agent?: WecomAgentConfig;
+  accounts?: Record<string, WecomAccountConfig>;
+  defaultAccount?: string;
+  cli?: WecomCliConfig;
+  media?: WecomMediaConfig;
+  network?: WecomNetworkConfig;
+  routing?: WecomRoutingConfig;
+  dynamicAgents?: WecomDynamicAgentsConfig;
 };

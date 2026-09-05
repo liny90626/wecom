@@ -2702,13 +2702,17 @@ export function createBotWsReplyHandle(params: {
       return;
     }
     try {
+      // WeCom treats an empty terminal frame as an empty bubble. Deferred or
+      // tool-only turns can reach this path without ever painting a preview,
+      // so retain the acknowledgement text instead of blanking the stream.
+      const closeText = stripElapsedStatusLine(content) || placeholderText.trimEnd();
       // The last painted frame may have been a status frame; the turn is over,
       // so the bubble closes on that frame's content without its clock.
       await withHandleSendTimeout(
         params.client.replyStream(
           params.frame,
           finalStreamId,
-          stripElapsedStatusLine(content),
+          closeText,
           true,
         ),
         "source stream final",

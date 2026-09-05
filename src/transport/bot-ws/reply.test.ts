@@ -200,7 +200,7 @@ describe("createBotWsReplyHandle", () => {
     expect(otherClient.replyStream).toHaveBeenCalledTimes(1);
   });
 
-  it("finishes an opened placeholder stream when the final reply is intentionally empty", async () => {
+  it("finishes an opened placeholder stream without sending an empty terminal frame", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -220,7 +220,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream.mock.calls[1]).toEqual([
       expect.objectContaining({ headers: { req_id: "req-empty-final-close" } }),
       placeholderCall?.[1],
-      "",
+      "正在思考...",
       true,
     ]);
   });

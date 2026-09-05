@@ -6,7 +6,7 @@
 
 ## 0. 先读结论
 
-- **已发布 3.0.0-6**（tag `released/3.0.0-6`，已推 fork）：在 3.0.0-5 之上修 `MEDIA:` 文件静默丢失（-26 起的 `readLocalFileFromRoots` 在 Windows 现网拒绝合法路径；本地重写 -25 的 realpath 白名单，见 changelog/v3.0.0-6.md）。**3.0.0-5 不要装。** 用户反馈的「说文件发了没到」由此闭环，等真机复验。
+- **生产已升级到 3.0.0-6**（2026-09-05 用户按 changelog/v3.0.0-5 第五节手动换目录安装，确认工作正常）。tag `released/3.0.0-6`，已推 fork。在 3.0.0-5 之上修 `MEDIA:` 文件静默丢失（-26 起的 `readLocalFileFromRoots` 在 Windows 现网拒绝合法路径；本地重写 -25 的 realpath 白名单，见 changelog/v3.0.0-6.md）。**3.0.0-5 不要装。** 用户反馈的「说文件发了没到」由此闭环，等真机复验。
 - 3.0.0-5（tag `released/3.0.0-5`）：这是回退版本——代码是 2.7.260-26 车道 + 两个此前未发布的修复 + 上游 v3.0.0 的治理层文件（`THIRD_PARTY_NOTICES.md`、`UPSTREAM_BASELINE.json`、`npm run upstream:check`）+ 生产配置形状回归测试。版本号规则改为 `3.0.0-<构建号>`，构建号从 5 起（用户 2026-09-05 指定）。
 - **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。两个 tag 保留作记录，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
 - 上游 `YanHaidao/wecom` 与官方 `WecomTeam/wecom-openclaw-plugin` 的对账基线：官方 HEAD `3b1cbe3`（2026.8.17）此后无新提交；`npm run upstream:check` 可随时复核（只读 `official` 远端）。
@@ -312,6 +312,7 @@ npm run build / verify-dist: PASS
 B1 / B2 / B3: READY（reply.ts 只加了两行日志）
 git diff --check: clean
 npm pack 两次: SHA-256 一致
+现网安装（Windows，OpenClaw 2026.7.1-2，手动换目录）: 用户确认工作正常（2026-09-05）
 隔离安装（7.1-2，真实 v1 包复现锁死 → 手动换目录到 3.0.0-6）: PASS（装 v1 → 放入生产形状配置，config validate 报 6 处 additional properties，与现场一致 → 保留 node_modules 换入 3.0.0-6 → Config valid；plugins inspect 报 3.0.0-6、diagnostics 为空；channels list 两账号 configured、enabled；网关启动，两账号 Bot WS 与 agent-callback 均 started，凭据为假故 853000 属预期）
 ~~~
 

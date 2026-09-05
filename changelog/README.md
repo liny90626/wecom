@@ -4,7 +4,7 @@
 
 ## 本 fork 维护版本
 
-- [`3.0.0-v2`](./v3.0.0-v2.md)（发布 tag `released/3.0.0-v2`）：修 3.0.0-v1 装到 2.7.x 现网配置上起不来——上游 v3 的 schema 对未知键零容忍，配置里留着的 `mediaMaxMb`、`streaming` 让整段 `channels.wecom` 失效。现在插件不读的键不再阻止启动，清单与运行时 schema 由测试守住一致，`openclaw doctor --fix` 迁移或删除 2.7.x fork 独有的键。
+- [`3.0.0-v2`](./v3.0.0-v2.md)（发布 tag `released/3.0.0-v2`，已推送 `fork`）：修 3.0.0-v1 装到 2.7.x 现网配置上起不来——上游 v3 的 schema 对未知键零容忍，配置里留着的 `mediaMaxMb`、`streaming` 让整段 `channels.wecom` 失效。现在插件不读的键不再阻止启动，清单与运行时 schema 由测试守住一致，`openclaw doctor --fix` 迁移或删除 2.7.x fork 独有的键。
 
 - [`3.0.0-v1`](./v3.0.0-v1.md)（发布 tag `released/3.0.0-v1`，已推送 `fork`）：fork 切到上游 [`v3.0.0`](./v3.0.0.md) 基线（腾讯官方插件 2026.8.17 的重建）后的第一个版本。2.7.260 的 Bot WS 车道、B1/B2/B3 门禁随之退役，长任务心跳、思考窗口、新消息接管等行为不再存在，出站文件白名单缩窄为 SDK 默认根 + `mediaLocalRoots`。同时运行在 OpenClaw 2026.7.1-2 与 2026.9.1（`npm run compat:check` 两条线各跑一遍）。新增网关模拟器复现并修复 4 项稳定性缺陷：长回答按全文写帧超过 20480 字节上限、finish 帧 ACK 丢失后答案静默丢失、846605 未识别为流失效、`message` 工具发文件失败却返回成功；另修白名单提示与 `wecom diagnose --json` 的机器输出标记。
 

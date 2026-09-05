@@ -6,12 +6,13 @@
 
 ## 0. 先读结论
 
-- **3.0.0-v1 已发布但在现网装不起来**：tag `released/3.0.0-v1` 已推 fork；用户在 2026.7.1-2 上安装后 CLI 因 `channels.wecom` 多出 `mediaMaxMb`、`streaming` 两个 2.7.x 时代的键而拒绝启动（上游 v3 schema 对未知键零容忍）。修复在 main 上（见第 3 节 ⑦），**3.0.0-v2 待用户批准后打包 / 打 tag / 推送**。生产此前跑 2.7.260-26。
+- **已发布 3.0.0-v2**（tag `released/3.0.0-v2`，与 main 一起推 fork，核对见第 6 节）。3.0.0-v1 在现网装不起来：用户在 2026.7.1-2 上安装后 CLI 因 `channels.wecom` 多出 `mediaMaxMb`、`streaming` 两个 2.7.x 时代的键而拒绝启动（上游 v3 schema 对未知键零容忍），v2 修此一事（第 3 节 ⑦）。生产此前跑 2.7.260-26；真机验收仍待做，步骤见 `changelog/v3.0.0-v1.md` 第六节。
 - **main 已切换到上游 v3.0.0 基线**：YanHaidao/wecom `v3.0.0`（origin `133773f`）本身是以腾讯官方 `WecomTeam/wecom-openclaw-plugin` 2026.8.17（commit `3b1cbe3`）为主线的重建。2.7.260 的 Bot WS 车道（`src/transport`、`src/runtime`、`src/capability/bot`）、B1/B2/B3 门禁脚本、`openclaw-sdk-imports.test.ts` 守卫都不在这棵树里了，见第 2 节。
 - 3.0.0-v1 相对 `released/2.7.260-26` 的提交：
   - `7c167ca` sync：采纳 v3.0.0 + Codex 的 2026.7.1-2 兼容适配（devDependency 钉回 7.1-2、setup contract 可选、账号合并、字节切分/节奏移植等）。
   - `6e9c1e0` fix(bot-ws)：本轮复现并修复的 4 项稳定性缺陷 + 2 项小修，见第 3 节。
   - 交接文档重写、`release: 3.0.0-v1`（版本号、changelog、README 发版章节、包指纹）。
+  - `07fbb98` fix(config)：未知配置键不再阻止启动 + doctor 迁移 2.7.x 独有键；`release: 3.0.0-v2`。
 - 兼容目标：OpenClaw `2026.7.1-2`（生产）与最新稳定版 `2026.9.1`（npm `latest`）。`npm run compat:check 2026.7.1-2 2026.9.1` 两条线 typecheck + 全量测试均 PASS（见第 6 节）。
 - 官方仓库 `WecomTeam/wecom-openclaw-plugin` 的 main HEAD 仍是 `3b1cbe3`（2026-08-17），与上游 v3.0.0 记录的基线相同——用户说的「官方有更新」已通过上游 v3.0.0 全量吸收，官方侧没有更新的提交可再借鉴。
 - 用户在 2.7.260-26 上反馈的「agent 说文件发了，实际没到，再要一次才发」：**离线未能复现出插件侧的必然机制**，需要现场日志定位，见第 4 节。新基线上已堵住两条会造成同一体验的路径（第 3 节 ④⑤）。
@@ -113,14 +114,27 @@ src/monitor.ts monitorWeComProvider
 
 ~~~text
 typecheck（仓库 node_modules，7.1-2）: 0 错误
-vitest: 29 / 29 files，94 / 94 tests（含 gateway-sim 6 条）
-npm run compat:check 2026.7.1-2 2026.9.1: 两条线 typecheck PASS、94/94 PASS（9.1 为 file-access-runtime 补类型 shim）
+vitest: 29 / 29 files，99 / 99 tests（含 gateway-sim 6 条、配置兼容 5 条）
+npm run compat:check 2026.7.1-2 2026.9.1: 两条线 typecheck PASS、99/99 PASS（9.1 为 file-access-runtime 补类型 shim）
 npm run build / verify-dist: PASS
 git diff --check: clean
 真实企业微信验收: 未做（OFFICIAL_CAPABILITY_ACCEPTANCE.md 全部 NOT RUN）
 ~~~
 
-### 包指纹（3.0.0-v1）
+### 包指纹（3.0.0-v2）
+
+~~~text
+yanhaidao-wecom-3.0.0-v2.tgz（仓库根目录，.gitignore 忽略）
+size:        567408 bytes
+unpacked:    2114277 bytes
+files:       286
+npm shasum:  c685dcb1838d8bde9bb33982af638ea04a36aba5
+SHA-256:     b51570cd93afc3f330e15ad7e3f2c0236bb41b4dbcf7331f9030c40709bbe0c0
+~~~
+
+重复打包字节一致。推送核对：`git rev-parse fork/main` 与 HEAD 一致，`git ls-remote --tags fork` 含 `released/3.0.0-v2`。
+
+### 包指纹（3.0.0-v1，现网装不起来，已被 v2 取代）
 
 ~~~text
 yanhaidao-wecom-3.0.0-v1.tgz（仓库根目录，.gitignore 忽略）

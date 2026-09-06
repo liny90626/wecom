@@ -6,11 +6,11 @@
 
 ## 0. 先读结论
 
-- **生产已升级到 3.0.0-6**（2026-09-05 用户按 changelog/v3.0.0-5 第五节手动换目录安装，确认工作正常）。tag `released/3.0.0-6`，已推 fork。在 3.0.0-5 之上修 `MEDIA:` 文件静默丢失（-26 起的 `readLocalFileFromRoots` 在 Windows 现网拒绝合法路径；本地重写 -25 的 realpath 白名单，见 changelog/v3.0.0-6.md）。**3.0.0-5 不要装。** 用户反馈的「说文件发了没到」由此闭环，等真机复验。
-- 3.0.0-5（tag `released/3.0.0-5`）：这是回退版本——代码是 2.7.260-26 车道 + 两个此前未发布的修复 + 上游 v3.0.0 的治理层文件（`THIRD_PARTY_NOTICES.md`、`UPSTREAM_BASELINE.json`、`npm run upstream:check`）+ 生产配置形状回归测试。版本号规则改为 `3.0.0-<构建号>`，构建号从 5 起（用户 2026-09-05 指定）。
-- **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。两个 tag 保留作记录，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
+- **生产仍运行 3.0.0-6**（2026-09-05 用户确认工作正常）；`released/3.0.0-6` 是生产发布节点。当前本地候选为 `3.0.0-7`，修复 Bot WS 合并/延迟回合的空白气泡，尚未部署生产。
+- 3.0.0-5、3.0.0-v1、3.0.0-v2 均已取代或撤回，相关 tag 已删除，不要安装；历史说明保留在 changelog 文件中。
+- **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。三个候选 tag 已删除，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
 - 上游 `YanHaidao/wecom` 与官方 `WecomTeam/wecom-openclaw-plugin` 的对账基线：官方 HEAD `3b1cbe3`（2026.8.17）此后无新提交；`npm run upstream:check` 可随时复核（只读 `official` 远端）。
-- 兼容目标：OpenClaw 2026.7.1-2（用户生产）与**最新稳定版**（3.0.0-5 发版时为 2026.9.1；两条线各 65 文件 / 824 用例全绿）。devDependency 仍钉 2026.7.1-2；`npm run compat:check` 对两条线各跑 typecheck 与全量测试，**发版前必跑**。2026.6.x 不再维护。
+- 兼容目标：OpenClaw 2026.7.1-2（用户生产）与**最新稳定版**（当前兼容缓存为 2026.9.1；两条线各跑 typecheck 与全量测试）。devDependency 仍钉 2026.7.1-2；`npm run compat:check` 对两条线各跑 typecheck 与全量测试，**发版前必跑**。2026.6.x 不再维护。
 - 2.7.260-26 之后、随 3.0.0-5 一起发布的两个修复：
   - 5bcbd05 **运行时上下文围栏**：两条线的核心都把 `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>…<<<END_OPENCLAW_INTERNAL_CONTEXT>>>` 作为 display:false 的载体消息喂给模型——模型看见它是设计使然，8.2 只是把头部指令写严了。插件侧两处缺口：①过程步骤（CLI 后端 commentary）与推理由核心**原样**转来，模型复述该块时会进气泡 / 推送 / 思考块；②三条入站车道的用户文本未转义，独占成行的围栏块会被核心 `resolveRuntimeContextPromptParts` 提取为可信上下文（伪造）。修在 `src/shared/internal-runtime-context.ts`：入站转义成核心自己用的 `[[OPENCLAW_INTERNAL_CONTEXT_BEGIN]]` 形态，出站 preamble / reasoning 剥围栏块；final 与 block 核心已净化，不重复。
   - c39ace2 **compat 工作区移出仓库树**（`~/.cache/wecom-openclaw-compat/`）：原先放在仓库内时 TypeScript 沿祖先 node_modules 找到钉住的 7.1-2 声明，8.2 缺 .d.ts 的子路径实际按 7.1-2 类型检查——2.7.260-26 汇报的「8.2 typecheck PASS」在 `file-access-runtime` 这一个子路径上不严谨（运行时验证不受影响，两版签名相同）。移出后复验：0 错误、0 次回落到仓库 node_modules。
@@ -37,7 +37,7 @@
 ### 当前 Git 状态
 
 - 分支：main
-- HEAD：`released/3.0.0-5` 所在提交；其上没有未发布改动。历史上 main 经过 v3.0.0 整树替换（7c167ca…b5bcddd）再回退，`git log` 里能看到这段往返
+- HEAD：`8e8f2c2`，版本元数据为 `3.0.0-7`；相对 `fork/main` 有本地未推送提交。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返
 - 维护远端：fork = git@github.com:liny90626/wecom.git
 - 上游远端：origin = https://github.com/YanHaidao/wecom.git（v3.0.0 = 官方插件重建，见第 8 节）；官方远端：official = https://github.com/WecomTeam/wecom-openclaw-plugin.git，push URL 为 DISABLED，只供 `npm run upstream:check`
 - 允许推送的目标只有 fork；禁止向 origin 推送。
@@ -55,12 +55,19 @@
 
 ### 发布状态
 
-- 版本号 3.0.0-5，包指纹见第 7 节。
-- tag released/3.0.0-5 与 main 均已推送 fork。released/3.0.0-v1、released/3.0.0-v2 是已撤回的候选，保留在 fork 上作记录。
+- 当前候选版本号 `3.0.0-7`，包文件为 `yanhaidao-wecom-3.0.0-7.tgz`；生产仍为 `3.0.0-6`。
+- `released/3.0.0-6` 已推送 fork；`released/3.0.0-7` 尚未创建。
+- `released/3.0.0-5`、`released/3.0.0-v1`、`released/3.0.0-v2` 已从本地与 fork 删除。
 - 版本规则：`3.0.0-<构建号>`，构建号递增；tag `released/<版本>`；只推 fork。
 - origin 仍停在 f5f5650，无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-6 空白 Bot WS 气泡（3.0.0-7）
+
+复现：连续发送两条消息，第二条被 OpenClaw 接管到仍在运行的回合；核心返回 `noVisibleReplyFallbackEligible`，插件关闭没有正文或预览的流。旧逻辑发送空终止帧，企微客户端显示空白气泡。
+
+修复：`closeOpenedStreamSilently` 在收尾正文为空时复用已发送的 placeholder；已有正文仍使用原内容，流窗口失效和 supersede 分支不改变。回归覆盖见 `src/transport/bot-ws/reply.test.ts`，详见 `changelog/v3.0.0-7.md`。
 
 ### 2.-5 运行时上下文围栏（已提交 main，未发布）
 

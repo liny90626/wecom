@@ -297,7 +297,7 @@ function removeFootnotes(text: string): string {
 function removeUnfriendlyExtensions(text: string): string {
   text = text.replace(/~~(.*?)~~/g, "$1");
   text = text.replace(/==(.*?)==/g, "$1");
-  text = text.replace(/(?<!~)~([^~\n]+)~(?!~)/g, "$1");
+  // A single ~ commonly denotes a date/number range, not strikethrough.
   text = text.replace(/\^([^^\n]+)\^/g, "$1");
 
   text = text.replace(

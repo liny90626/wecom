@@ -7,6 +7,11 @@ import {
 } from "./markdown_adapter.js";
 
 describe("toWeComMarkdownV2", () => {
+  it("preserves range tildes in prose and table cells while degrading strikethrough", () => {
+    const text = "区间 1/1 ~ 9/7 与 1/1 ~ 8/31\n| 日期 | 区间 |\n|---|---|\n| 9/7 | 1/1 ~ 9/7，1/1 ~ 8/31 |\n~~已废弃~~";
+    expect(toWeComMarkdownV2(text, null)).toBe(text.replace("~~已废弃~~", "已废弃"));
+  });
+
   it("keeps markdown table grammar intact", () => {
     const input = [
       "| 项目 | 状态 | 备注 |",

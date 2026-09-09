@@ -140,6 +140,42 @@ describe("长任务过程可见性（真实 orchestrator + 网关模拟）", () 
   ];
   const ANSWER = "结论：超时来自网关代理，已给出修复建议。";
 
+  it.each([false, true])("恢复过程表格并保留日期区间（流窗过期=%s）", async (expired) => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60, rejectAfterMs: expired ? 360_000 : 480_000 });
+    const handle = startTurn(sim);
+    await tick(expired ? 370_000 : 100);
+    const table = "| 日期 | 期望区间 | 实际抓到 |\n|---|---|---|\n| 9/7 | 1/1 ~ 9/7 | 到 9/4 ✅ |\n| 9/8 | 1/1 ~ 8/31 ❌ | 到 8/31 |\n| 9/9 | 1/1 ~ 8/31 ❌ | 到 8/31 |";
+    const step = `根因找到了，不是数据真空。\n\n${table}\n\n我先验证，不提交入库。`;
+    await runTurn(handle, async ({ onItemEvent, deliverFinal }) => {
+      // Both supported cores have commentary paths that collapse whitespace.
+      await onItemEvent({ itemId: "table", kind: "preamble", progressText: step.replace(/\s+/g, " ") });
+      await tick(3_000);
+      await onItemEvent({ itemId: "table", kind: "preamble", progressText: step.replace(/\s+/g, " ") });
+      await tick(3_000);
+      await deliverFinal({ text: ANSWER });
+    });
+    const texts = expired ? pushContents(sim) : bubbleRevisions(sim);
+    expect(texts.some((text) => text.includes(table)), JSON.stringify(sim.chat)).toBe(true);
+    expect(texts.some((text) => text.includes("1）根因找到了，不是数据真空。\n\n| 日期"))).toBe(true);
+    expect(texts.every((text) => !text.includes("2）根因"))).toBe(true);
+    expect(texts.some((text) => text.includes("我先验证，不提交入库。"))).toBe(true);
+  });
+
+  it.each(["| A | B |\n|---|---|\n| 1 | 2 |", "# 核查结果", "> 引用", "- 检查日期", "1. 检查日期"])("步骤编号不破坏块级 Markdown：%s", async (step) => {
+    const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
+    const handle = startTurn(sim);
+    await tick(100);
+    await runTurn(handle, async ({ onItemEvent, deliverFinal }) => {
+      await onItemEvent({ itemId: "block", kind: "preamble", progressText: step });
+      await tick(2_000);
+      await onItemEvent({ itemId: "next", kind: "preamble", progressText: "继续核查" });
+      await tick(2_000);
+      await deliverFinal({ text: ANSWER });
+    });
+    expect(bubbleRevisions(sim).some((text) => text.includes(`1）\n\n${step}`))).toBe(true);
+    expect(bubbleRevisions(sim).some((text) => text.includes(`${step}\n\n2）继续核查`))).toBe(true);
+  });
+
   it("4 分钟 4 步骤（流窗健康）：气泡步骤追加、final 只留答案、不追加记录推送", async () => {
     const sim = new WecomGatewaySim({ ackLatencyMs: 60 });
     const handle = startTurn(sim);

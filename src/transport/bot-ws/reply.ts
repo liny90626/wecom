@@ -16,6 +16,7 @@ import {
   chunkFormattedWeComMarkdownV2,
   toWeComMarkdownV2,
 } from "../../wecom_msg_adapter/markdown_adapter.js";
+import { restoreFlattenedProgressTables } from "../../wecom_msg_adapter/progress_adapter.js";
 import {
   containsTemplateCardBlock,
   extractTemplateCards,
@@ -1389,8 +1390,15 @@ export function createBotWsReplyHandle(params: {
 
   // Full-width paren on purpose: "1）" is not markdown list syntax, so WeCom
   // cannot renumber a tail that starts mid-log the way "1." lists are.
-  const formatProcessLogStep = (absoluteIndex: number, text: string): string =>
-    `${absoluteIndex + 1}）${text}`;
+  const formatProcessLogStep = (absoluteIndex: number, text: string): string => {
+    const markdown = restoreFlattenedProgressTables(text);
+    // Block syntax must begin on its own line, not after our step number.
+    const separator = /^(?:\||#{1,6}\s|>|[-*+]\s|\d+[.)]\s|`{3}|~{3})/.test(markdown) ? "\n\n" : "";
+    // A blank line also ends the block, or a following step becomes a table
+    // row / lazy list continuation. Plain one-line progress keeps its layout.
+    const end = separator || markdown.includes("\n") ? "\n" : "";
+    return `${absoluteIndex + 1}）${separator}${markdown}${end}`;
+  };
 
   const clampProcessLogBookmark = (
     bookmark: { count: number; lastText: string },

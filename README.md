@@ -21,13 +21,13 @@ Fork 维护与修复贡献：**LinKy**
 
 ## Fork 修改说明
 
-本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前候选版本为 `3.0.0-7`，生产基线为 OpenClaw `2026.7.1-2`；版本规则为 `3.0.0-<构建号>`。
+本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-8`，生产基线为 OpenClaw `2026.7.1-2`；版本规则为 `3.0.0-<构建号>`。
 
 维护重点：Bot WS 长任务可靠投递（合并接管、ACK/流窗口兜底、分片与去重）、Bot/Agent 双通道、多账号隔离、企业微信协作能力，以及媒体白名单、运行时上下文围栏和生产配置回归。上游官方仓库是独立架构重建，本 fork 只移植经过验证的改动，不整树替换。版本详情见 [`changelog/`](./changelog/)。
 
 本轮收口 `wecom_mcp` 的 `851003 no authority`。根因是**结构性**的：`aibot_get_mcp_config` 签发的是 `/mcp/robot-doc`（「企微机器人文档 MCP」，**只有机器人自身作用域**），而后台「查看使用方式」的 apikey 签发的是 `/mcp/v2/bot/<biz_type>`（「动态文档 MCP」，**内嵌授权真人用户**）——不是授权没生效，是产品定位不同。因此新增 **`bot.mcpServers`** 配置项：按 `biz_type` 直接配后台地址，八个能力全部可用。同时严格对齐官方 MCP 实现（身份头、官方 UA、官方错误码分工、文档授权引导卡片），`tools/list` 按实测体积限幅，并与官方插件仓库同步了事件白名单、`enter_check_update` 版本握手与 `auth_change_event` 清缓存。完整说明见 [`changelog/v2.7.260-17.md`](./changelog/v2.7.260-17.md)。
 
-兼容目标是 OpenClaw `2026.7.1-2` 与**最新稳定版**（`3.0.0-6` 发版时为 `2026.9.1`），一份构建同时运行在两条线上，不探测版本、不分叉；`devDependencies` 仍钉 `2026.7.1-2`，`npm run compat:check` 会对两条线各跑一遍 typecheck 与全量测试。2026.6.x 不再维护，`peerDependencies` 的 `^2026.6.11` 只表示安装兼容声明。
+兼容目标是 OpenClaw `2026.7.1-2` 与**最新稳定版**（本次验证 `2026.9.3`），一份构建同时运行在两条线上，不探测版本、不分叉；`devDependencies` 仍钉 `2026.7.1-2`，`npm run compat:check` 会对两条线各跑一遍 typecheck 与全量测试。`3.0.0-8` 两版各通过 862 个测试；`2026.9.3` 的类型检查沿用缺失声明补丁，真实企微客户端仍需部署后验收。2026.6.x 不再维护，`peerDependencies` 的 `^2026.6.11` 只表示安装兼容声明。
 
 **在 OpenClaw 2026.8.x 上运行必须放行会话钩子**：8.x 会拦截非内置插件的 `before_prompt_build` 钩子，而本插件的媒体、模板卡片与 `wecom-cli` 使用指引正是通过它注入的。安装向导已自动写入该配置；已安装的实例升级到 8.x 时请在 `openclaw.json` 补上：
 
@@ -317,7 +317,11 @@ npm run compat:check   # 对 2026.7.1-2 与最新稳定版各跑一遍 typecheck
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
-#### 📌 3.0.0-7（2026-09-06，LinKy fork，本地候选）
+#### 📌 3.0.0-8（2026-09-09，LinKy fork）
+
+修复长任务过程气泡的 Markdown 显示：恢复 OpenClaw 压平且结构明确的表格，保留日期区间中的 `~`，避免步骤编号破坏表格、标题、引用和列表，以及下一步骤被并入表格。仅调整显示，不改变 ACK、消息接管、发送节奏与去重状态。详见 [`changelog/v3.0.0-8.md`](./changelog/v3.0.0-8.md)。
+
+#### 📌 3.0.0-7（2026-09-06，LinKy fork）
 
 修复 Bot WS 合并/延迟回合的空白气泡：OpenClaw 返回无可见 final 时，关闭流不再发送空终止帧，而是保留已发送的思考占位内容。这样第二条消息被合并处理时不会出现空白气泡。详见 [`changelog/v3.0.0-7.md`](./changelog/v3.0.0-7.md)。
 

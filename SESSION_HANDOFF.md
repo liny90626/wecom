@@ -1,16 +1,16 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-09-11
+> 最后更新：2026-09-12
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
-- 当前发布版本 **3.0.0-9**，修复思考块累计快照的阶梯式重复文本，包含 3.0.0-8 表格显示和 3.0.0-7 空白气泡修复。2026-09-11 用户授权打包与发布；生产 OpenClaw 为 `2026.7.1-2`，本次不部署生产。上次明确确认的生产插件版本为 3.0.0-6（2026-09-05），不要将其视为本次实时核验结果。
+- 当前发布版本 **3.0.0-10**，修复 deferred 收尾暂存媒体丢件和 Bot webhook 多媒体循环提前退出，包含 3.0.0-9 思考块与此前显示修复。2026-09-11 用户授权打包与发布；生产 OpenClaw 为 `2026.7.1-2`，本次不部署生产。用户本轮反馈 3.0.0-9 媒体丢件，3.0.0-10 尚待生产验收。
 - 3.0.0-5、3.0.0-v1、3.0.0-v2 均已取代或撤回，相关 tag 已删除，不要安装；历史说明保留在 changelog 文件中。
 - **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。三个候选 tag 已删除，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
 - 上游 `YanHaidao/wecom` 与官方 `WecomTeam/wecom-openclaw-plugin` 的对账基线：官方 HEAD `3b1cbe3`（2026.8.17）此后无新提交；`npm run upstream:check` 可随时复核（只读 `official` 远端）。
-- 兼容目标：OpenClaw 2026.7.1-2（用户生产）与最新稳定版（本次验证 2026.9.3）；两条线各通过 typecheck、66 个文件/862 个测试。devDependency 仍钉 2026.7.1-2；最新版沿用 file-access-runtime 缺失声明补丁。高负载时使用单 worker，完整命令与边界见 changelog/v3.0.0-8.md。
+- 兼容目标：OpenClaw 2026.7.1-2（用户生产）与新版 2026.9.3。devDependency 仍钉 2026.7.1-2；新版类型检查沿用 file-access-runtime 缺失声明补丁。发布验证记录见 changelog/v3.0.0-10.md；高负载时使用单 worker。
 - 2.7.260-26 之后、随 3.0.0-5 一起发布的两个修复：
   - 5bcbd05 **运行时上下文围栏**：两条线的核心都把 `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>…<<<END_OPENCLAW_INTERNAL_CONTEXT>>>` 作为 display:false 的载体消息喂给模型——模型看见它是设计使然，8.2 只是把头部指令写严了。插件侧两处缺口：①过程步骤（CLI 后端 commentary）与推理由核心**原样**转来，模型复述该块时会进气泡 / 推送 / 思考块；②三条入站车道的用户文本未转义，独占成行的围栏块会被核心 `resolveRuntimeContextPromptParts` 提取为可信上下文（伪造）。修在 `src/shared/internal-runtime-context.ts`：入站转义成核心自己用的 `[[OPENCLAW_INTERNAL_CONTEXT_BEGIN]]` 形态，出站 preamble / reasoning 剥围栏块；final 与 block 核心已净化，不重复。
   - c39ace2 **compat 工作区移出仓库树**（`~/.cache/wecom-openclaw-compat/`）：原先放在仓库内时 TypeScript 沿祖先 node_modules 找到钉住的 7.1-2 声明，8.2 缺 .d.ts 的子路径实际按 7.1-2 类型检查——2.7.260-26 汇报的「8.2 typecheck PASS」在 `file-access-runtime` 这一个子路径上不严谨（运行时验证不受影响，两版签名相同）。移出后复验：0 错误、0 次回落到仓库 node_modules。
@@ -29,15 +29,15 @@
 - 2.7.260-21 有两块内容：
   - **对抗式评审**：上一轮候选声称修好两个问题，逐条复现后两个都没修好，第二个还引入内容丢失；三项均已修复（详见第 2.0 节）。
   - **官方功能对齐**：补齐模板卡片出站能力、deferred 回合不再宣称完成、入站附件超限给出可操作提示。
-- 当前验证结果：生产/最新两版各 66 个文件、862/862 测试通过；定向/高风险 356 个测试通过；typecheck、build、dist、B1、B2、B3、diff check 全部通过。初次并行验证出现两项耗时失败，原阈值不变的单 worker 完整复验通过。
+- 当前媒体修复验证：全量 66 个文件、865/865 测试通过；媒体/回复高风险 303 个测试通过；typecheck、build、dist、B1、B2、B3、diff check 全部通过。发布门禁结果见第 7 节；3.0.0-8 的双版本 862 个用例属于历史验证。
 - goal.md 已删除：待办清单全部完成，仍然开放的缺口与明确不做的两项都并入本文件第 5 节，官方对账结论并入第 8 节。
 
 ## 1. Git 与发布边界
 
 ### 当前 Git 状态
 
-- 发布分支：main；修复分支：fix/progress-markdown。
-- 发布节点以 `released/3.0.0-9` 为准；上一个已发布节点为 `released/3.0.0-8`（`7f5cd92`）。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返。
+- 发布分支：main；媒体修复提交：`80d4159`。
+- 发布节点以 `released/3.0.0-10` 为准；上一个已发布节点为 `released/3.0.0-9`（`1285f23`）。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返。
 - 维护远端：fork = git@github.com:liny90626/wecom.git
 - 上游远端：origin = https://github.com/YanHaidao/wecom.git（v3.0.0 = 官方插件重建，见第 8 节）；官方远端：official = https://github.com/WecomTeam/wecom-openclaw-plugin.git，push URL 为 DISABLED，只供 `npm run upstream:check`
 - 允许推送的目标只有 fork；禁止向 origin 推送。
@@ -55,13 +55,17 @@
 
 ### 发布状态
 
-- 当前版本号 `3.0.0-9`，包文件为 `yanhaidao-wecom-3.0.0-9.tgz`；本次发布不代表部署生产。
-- `released/3.0.0-6`、`released/3.0.0-7`、`released/3.0.0-8` 已推送 fork；本次发布 tag 为 `released/3.0.0-9`。
+- 当前版本号 `3.0.0-10`，包文件为 `yanhaidao-wecom-3.0.0-10.tgz`；本次发布不代表部署生产。
+- `released/3.0.0-6` 至 `released/3.0.0-9` 已推送 fork；本次发布 tag 为 `released/3.0.0-10`。
 - `released/3.0.0-5`、`released/3.0.0-v1`、`released/3.0.0-v2` 已从本地与 fork 删除。
 - 版本规则：`3.0.0-<构建号>`，构建号递增；tag `released/<版本>`；只推 fork。
 - origin 仍停在 f5f5650，无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-9 deferred 媒体收尾（3.0.0-10）
+
+`block` 暂存媒体后，正文已显示的 deferred 回合原先直接关闭流，附件未进入 final 的上传分支。现在关流前处理暂存媒体，记录发送结果，失败时尝试主动提示并返回 false；不增加自动重试。Bot webhook 的非图片与异常分支继续处理剩余媒体，不再退出整个循环。修复提交 `80d4159`，详见 changelog/v3.0.0-10.md。
 
 ### 2.-8 思考块累计快照（3.0.0-9）
 
@@ -317,6 +321,13 @@ src/transport/bot-ws/sdk-adapter.ts
 - 不在渲染层做模糊语义去重；判断重复前先区分同一 item 快照、跨 item flush、真实模型重复和重复投递。
 
 ## 7. 当前验证证据
+
+### 3.0.0-10 发布验证（2026-09-12）
+
+- 媒体/回复定向测试 303 个通过；完整 Vitest 66 个文件、865/865 测试通过（单 worker）。
+- 发布前重新执行两版兼容性：2026.7.1-2 和 2026.9.3 均 typecheck 通过，各 66 个文件、865 个测试通过。并行运行时 9.3 曾出现万条步骤快照耗时 1.078 秒的既有性能断言，保留原阈值后在隔离工作区单文件复跑为 320ms；未调整断言或超时阈值。
+- 新增 deferred 双附件成功和失败提示回归；完整测试不等同于真实企微附件送达验收。
+- 本轮 source 定向测试 250 个通过；Git diff check 通过。包 SHA-256：`c04dc248744733c12d854588e3be64ef778cc4fa3e539387e9180b322ba6fad3`；两次 pack integrity 一致，258 个文件、618,789 bytes。临时状态目录的 7.1-2 隔离安装 config validate、runtime inspect 和双账号 channels list 均通过；tgz CLI 解包曾受 120 秒环境超时影响，已用显式解包等价校验。
 
 ### 已完成（3.0.0-8，2026-09-09）
 

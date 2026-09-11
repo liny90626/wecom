@@ -21,7 +21,7 @@ Fork 维护与修复贡献：**LinKy**
 
 ## Fork 修改说明
 
-本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-9`，生产基线为 OpenClaw `2026.7.1-2`；版本规则为 `3.0.0-<构建号>`。
+本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-10`，生产基线为 OpenClaw `2026.7.1-2`；版本规则为 `3.0.0-<构建号>`。
 
 维护重点：Bot WS 长任务可靠投递（合并接管、ACK/流窗口兜底、分片与去重）、Bot/Agent 双通道、多账号隔离、企业微信协作能力，以及媒体白名单、运行时上下文围栏和生产配置回归。上游官方仓库是独立架构重建，本 fork 只移植经过验证的改动，不整树替换。版本详情见 [`changelog/`](./changelog/)。
 
@@ -316,6 +316,10 @@ npm run compat:check   # 对 2026.7.1-2 与最新稳定版各跑一遍 typecheck
 ## 📋 本 fork 近期更新
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
+
+#### 📌 3.0.0-10（2026-09-12，LinKy fork）
+
+修复媒体收尾丢件：Bot WS 在 deferred 回合关闭流前处理 block 暂存的文件、图片，上传结果写入日志，失败时尝试主动提示；Bot webhook 的媒体循环不再因第一个非图片文件或媒体处理异常提前退出。详见 [`changelog/v3.0.0-10.md`](./changelog/v3.0.0-10.md)。
 
 #### 📌 3.0.0-9（2026-09-11，LinKy fork）
 

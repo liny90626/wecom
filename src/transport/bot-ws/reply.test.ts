@@ -3060,6 +3060,61 @@ describe("createBotWsReplyHandle", () => {
     );
   });
 
+  it("flushes media deferred by a block before closing a deferred turn", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-deferred-block-media" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: "报告见附件", mediaUrls: ["/tmp/a.png", "/tmp/b.pdf"] },
+      { kind: "block" },
+    );
+    expect(uploadAndSendBotWsMediaMock).not.toHaveBeenCalled();
+
+    await expect(handle.closeDeferred?.()).resolves.toBe(true);
+    expect(uploadAndSendBotWsMediaMock).toHaveBeenCalledTimes(2);
+    expect(uploadAndSendBotWsMediaMock.mock.calls.map(([params]) => params.mediaUrl)).toEqual([
+      "/tmp/a.png",
+      "/tmp/b.pdf",
+    ]);
+  });
+
+  it("reports deferred media failures instead of closing as a silent success", async () => {
+    uploadAndSendBotWsMediaMock.mockResolvedValueOnce({
+      ok: false,
+      error: "permission denied",
+    } as any);
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-deferred-media-failure" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    await handle.deliver(
+      { text: "报告见附件", mediaUrls: ["/tmp/denied.pdf"] },
+      { kind: "block" },
+    );
+
+    await expect(handle.closeDeferred?.()).resolves.toBe(false);
+    expect(mockClient.sendMessage).toHaveBeenCalledWith(
+      "alice",
+      expect.objectContaining({
+        markdown: expect.objectContaining({ content: expect.stringContaining("媒体发送失败") }),
+      }),
+    );
+  });
+
   it("includes default global media local roots for final media sends", async () => {
     const runtime = await import("../../runtime.js");
     runtime.setWecomRuntime({

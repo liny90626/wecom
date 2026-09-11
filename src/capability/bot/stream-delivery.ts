@@ -293,7 +293,7 @@ export function createBotReplyDispatcher(params: {
                 });
               }
             }
-            return;
+            continue;
           }
         } catch (err) {
           target.runtime.error?.(`Failed to process outbound media: ${mediaPath}: ${String(err)}`);
@@ -353,7 +353,7 @@ export function createBotReplyDispatcher(params: {
               });
             }
           }
-          return;
+          continue;
         }
       }
 

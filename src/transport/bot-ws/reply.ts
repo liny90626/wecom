@@ -1828,6 +1828,52 @@ export function createBotWsReplyHandle(params: {
     return deferredMediaUrls;
   };
 
+  const flushDeferredMedia = async (): Promise<boolean> => {
+    if (deferredMediaUrls.length === 0) {
+      return true;
+    }
+    const cfg = getWecomRuntimeConfig();
+    const mediaLocalRoots = resolveWecomMergedMediaLocalRoots({ cfg });
+    const mediaMaxBytes = resolveWecomMediaMaxBytes(cfg, params.accountId);
+    const pending = deferredMediaUrls.slice();
+    const failures: string[] = [];
+    for (const mediaUrl of pending) {
+      const result = await uploadAndSendBotWsMedia({
+        wsClient: params.client,
+        chatId: peerId,
+        mediaUrl,
+        mediaLocalRoots,
+        maxBytes: mediaMaxBytes,
+      });
+      if (result.ok) {
+        console.info(
+          `[wecom-media] sent account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} media=${mediaUrl} type=${result.finalType ?? "unknown"} phase=deferred-close`,
+        );
+      } else {
+        const failure = formatMediaFailure(mediaUrl, result.error, result.rejectReason);
+        failures.push(failure);
+        console.warn(
+          `[wecom-media] send-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} media=${mediaUrl} phase=deferred-close reason=${result.rejectReason ?? result.error ?? "unknown"}`,
+        );
+      }
+    }
+    deferredMediaUrls = [];
+    if (failures.length === 0) {
+      return true;
+    }
+    try {
+      await sendMarkdownChunksViaActivePush(failures.join("\n"), {
+        reason: "deferred-media-failure",
+        isObsolete: () => streamSettled || supersededByNewInbound,
+      });
+    } catch (error) {
+      console.warn(
+        `[wecom-media] failure-notice-failed account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} error=${formatFallbackError(error)}`,
+      );
+    }
+    return false;
+  };
+
   let finalDelivered = false;
   /** The delivered final was an error notice, so a distinct successor may still land. */
   let finalDeliveredWasError = false;
@@ -2077,6 +2123,7 @@ export function createBotWsReplyHandle(params: {
         | "final-retry"
         | "preview-expired"
         | "forced-progress"
+        | "deferred-media-failure"
         | "fail-notice";
       appendCompletionMarker?: boolean;
       progress?: { delivered: number };
@@ -3908,6 +3955,9 @@ export function createBotWsReplyHandle(params: {
         console.info(
           `[wecom-b3] deferred-close-declined account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} bodyChars=${accumulatedText.length} deliveredChars=${deliveredSourceText.length}`,
         );
+        return false;
+      }
+      if (!(await flushDeferredMedia())) {
         return false;
       }
       // Everything this turn produced is already on screen. Finish the stream

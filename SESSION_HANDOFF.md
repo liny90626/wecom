@@ -1,12 +1,12 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-09-09
+> 最后更新：2026-09-11
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
-- 当前发布版本 **3.0.0-8**，修复长任务过程 Markdown 表格、日期区间及块级步骤边界，包含 3.0.0-7 空白气泡修复。2026-09-09 用户授权打包与发布；生产 OpenClaw 为 `2026.7.1-2`，本次不部署生产。上次明确确认的生产插件版本为 3.0.0-6（2026-09-05），不要将其视为本次实时核验结果。
+- 当前发布版本 **3.0.0-9**，修复思考块累计快照的阶梯式重复文本，包含 3.0.0-8 表格显示和 3.0.0-7 空白气泡修复。2026-09-11 用户授权打包与发布；生产 OpenClaw 为 `2026.7.1-2`，本次不部署生产。上次明确确认的生产插件版本为 3.0.0-6（2026-09-05），不要将其视为本次实时核验结果。
 - 3.0.0-5、3.0.0-v1、3.0.0-v2 均已取代或撤回，相关 tag 已删除，不要安装；历史说明保留在 changelog 文件中。
 - **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。三个候选 tag 已删除，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
 - 上游 `YanHaidao/wecom` 与官方 `WecomTeam/wecom-openclaw-plugin` 的对账基线：官方 HEAD `3b1cbe3`（2026.8.17）此后无新提交；`npm run upstream:check` 可随时复核（只读 `official` 远端）。
@@ -37,7 +37,7 @@
 ### 当前 Git 状态
 
 - 发布分支：main；修复分支：fix/progress-markdown。
-- 发布节点以 `released/3.0.0-8` 为准；上一个已发布节点为 `released/3.0.0-7`（`5fa5322`）。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返。
+- 发布节点以 `released/3.0.0-9` 为准；上一个已发布节点为 `released/3.0.0-8`（`7f5cd92`）。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返。
 - 维护远端：fork = git@github.com:liny90626/wecom.git
 - 上游远端：origin = https://github.com/YanHaidao/wecom.git（v3.0.0 = 官方插件重建，见第 8 节）；官方远端：official = https://github.com/WecomTeam/wecom-openclaw-plugin.git，push URL 为 DISABLED，只供 `npm run upstream:check`
 - 允许推送的目标只有 fork；禁止向 origin 推送。
@@ -55,13 +55,17 @@
 
 ### 发布状态
 
-- 当前版本号 `3.0.0-8`，包文件为 `yanhaidao-wecom-3.0.0-8.tgz`；本次发布不代表部署生产。
-- `released/3.0.0-6`、`released/3.0.0-7` 已推送 fork；本次发布 tag 为 `released/3.0.0-8`。
+- 当前版本号 `3.0.0-9`，包文件为 `yanhaidao-wecom-3.0.0-9.tgz`；本次发布不代表部署生产。
+- `released/3.0.0-6`、`released/3.0.0-7`、`released/3.0.0-8` 已推送 fork；本次发布 tag 为 `released/3.0.0-9`。
 - `released/3.0.0-5`、`released/3.0.0-v1`、`released/3.0.0-v2` 已从本地与 fork 删除。
 - 版本规则：`3.0.0-<构建号>`，构建号递增；tag `released/<版本>`；只推 fork。
 - origin 仍停在 f5f5650，无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-8 思考块累计快照（3.0.0-9）
+
+OpenClaw reasoning 回调的累计快照曾被通用合并逻辑误当成新段落，形成 `No`/`No new`、`Let`/`Let me`、`Finance`/`Finance still` 重复阶梯。新增 reasoning 专用合并，仅替换当前末行的延续快照，真正的新句子继续追加；正文合并逻辑不变。回归测试见 `src/transport/bot-ws/reply.test.ts`。
 
 ### 2.-7 长任务过程 Markdown（3.0.0-8）
 

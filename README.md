@@ -21,7 +21,7 @@ Fork 维护与修复贡献：**LinKy**
 
 ## Fork 修改说明
 
-本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-8`，生产基线为 OpenClaw `2026.7.1-2`；版本规则为 `3.0.0-<构建号>`。
+本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-9`，生产基线为 OpenClaw `2026.7.1-2`；版本规则为 `3.0.0-<构建号>`。
 
 维护重点：Bot WS 长任务可靠投递（合并接管、ACK/流窗口兜底、分片与去重）、Bot/Agent 双通道、多账号隔离、企业微信协作能力，以及媒体白名单、运行时上下文围栏和生产配置回归。上游官方仓库是独立架构重建，本 fork 只移植经过验证的改动，不整树替换。版本详情见 [`changelog/`](./changelog/)。
 
@@ -316,6 +316,10 @@ npm run compat:check   # 对 2026.7.1-2 与最新稳定版各跑一遍 typecheck
 ## 📋 本 fork 近期更新
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
+
+#### 📌 3.0.0-9（2026-09-11，LinKy fork）
+
+修复思考块累计快照造成的阶梯式重复文本：`No → No new`、`Let → Let me`、`Finance → Finance still` 现在会合并为当前思考行，不再逐条追加；真正的新句子仍会保留。详见 [`changelog/v3.0.0-9.md`](./changelog/v3.0.0-9.md)。
 
 #### 📌 3.0.0-8（2026-09-09，LinKy fork）
 

@@ -991,6 +991,43 @@ describe("createBotWsReplyHandle", () => {
     expect(frames.at(-1)).toContain(marks.at(-1));
   });
 
+  it("coalesces cumulative short reasoning snapshots instead of showing repetition", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-cumulative-short" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+    const snapshots = [
+      "No",
+      "No new",
+      "No new user content — just runtime context. Let me continue waiting for finance.",
+      "Let me poll again.",
+      "Let",
+      "Let me",
+      "Let me continue waiting for finance. Let me poll the waiter.",
+      "Finance",
+      "Finance still",
+      "Finance still running. Let me keep waiting.",
+    ];
+    for (const [index, text] of snapshots.entries()) {
+      await handle.deliver({ text, isReasoning: true }, { kind: "block" });
+      await vi.advanceTimersByTimeAsync(index === 0 ? 0 : 3_000);
+      await flushPromises();
+    }
+    const latest = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(latest).toContain("No new user content — just runtime context.");
+    expect(latest).toContain("Let me continue waiting for finance.");
+    expect(latest).toContain("Finance still running. Let me keep waiting.");
+    expect(latest).not.toContain("No\nNo new");
+    expect(latest).not.toContain("Let\nLet me");
+    expect(latest).not.toContain("Finance\nFinance still");
+  });
+
   it("keeps the frame inside its budget when escaping expands the reasoning", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

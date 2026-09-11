@@ -770,6 +770,23 @@ function mergeReplyText(previous: string, incoming: string): string {
   return `${base}\n${next}`;
 }
 
+/** OpenClaw reasoning callbacks may repeat the still-growing final line. */
+function mergeReasoningText(previous: string, incoming: string): string {
+  const base = previous.trim();
+  const next = incoming.trim();
+  if (!base) return next;
+  if (!next || base === next) return base;
+  if (next.startsWith(base)) return next;
+
+  const lines = base.split("\n");
+  const tail = lines.at(-1) ?? "";
+  if (tail && next.startsWith(tail)) {
+    lines[lines.length - 1] = next;
+    return lines.join("\n");
+  }
+  return mergeReplyText(base, next);
+}
+
 /**
  * @param incomingWasRespaced The turn carried a media directive, so the core
  * collapsed every blank line out of THIS final while the blocks kept theirs.
@@ -4017,7 +4034,7 @@ export function createBotWsReplyHandle(params: {
         if (isEvent || supersededByNewInbound || streamSettled || !thinkingText) {
           return;
         }
-        accumulatedThinkingText = mergeReplyText(accumulatedThinkingText, thinkingText);
+        accumulatedThinkingText = mergeReasoningText(accumulatedThinkingText, thinkingText);
         await sendThinkingSnapshot();
         return;
       }
@@ -4025,7 +4042,7 @@ export function createBotWsReplyHandle(params: {
       const rawText = payload.text?.trim() || "";
       const extracted = extractInlineThinkBlocks(rawText);
       if (extracted.thinkingText && !isEvent && !supersededByNewInbound && !streamSettled) {
-        accumulatedThinkingText = mergeReplyText(accumulatedThinkingText, extracted.thinkingText);
+        accumulatedThinkingText = mergeReasoningText(accumulatedThinkingText, extracted.thinkingText);
         if (info.kind === "final") {
           await sendThinkingSnapshot({ force: true });
         }

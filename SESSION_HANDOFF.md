@@ -6,7 +6,7 @@
 
 ## 0. 先读结论
 
-- 当前发布版本 **3.0.0-11**：对 3.0.0-7 至 -10 的对抗式审核跟进（空流收尾改收「（回复完毕）」、两处测试修正），包含 -10 的 deferred 媒体收尾与 -9 思考块修复。2026-09-12 用户审阅后授权发版；生产 OpenClaw 为 `2026.7.1-2`，现网仍在 3.0.0-6，-7 至 -11 均未部署生产。审核决定与已知差异见 2.-10 与 5.9。
+- 当前发布版本 **3.0.0-11**（同版本号重新发布，tag 已移动）：现网 3.0.0-10 两条反馈的修复（「新指令冲突」通知只在核心确有活跃 run 时发出、空正文仅思考的 final 改发「本轮没有生成正文回复」、通知类 final 不再追加标记，见 2.-11）+ 对 3.0.0-7 至 -10 的审核跟进（见 2.-10）。生产 OpenClaw 为 `2026.7.1-2`，现网在 3.0.0-10；-11 待部署验收。
 - 3.0.0-5、3.0.0-v1、3.0.0-v2 均已取代或撤回，相关 tag 已删除，不要安装；历史说明保留在 changelog 文件中。
 - **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。三个候选 tag 已删除，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
 - 上游 `YanHaidao/wecom` 与官方 `WecomTeam/wecom-openclaw-plugin` 的对账基线：官方 HEAD `3b1cbe3`（2026.8.17）此后无新提交；`npm run upstream:check` 可随时复核（只读 `official` 远端）。
@@ -36,7 +36,7 @@
 
 ### 当前 Git 状态
 
-- 发布分支：main。3.0.0-11 的内容提交：`e728924`（空流收尾改收「（回复完毕）」）、`506f71a`（测试修正）、`eaa2d5d`（审核文档）；发版提交见 tag。
+- 发布分支：main。3.0.0-11 的内容提交：`e728924`（空流收尾改收「（回复完毕）」）、`506f71a`（测试修正）、`eaa2d5d`（审核文档）、`744f1bb`（首次发版提交）、`d7446ac`（现网通知修复，见 2.-11）；重新发版提交见 tag `released/3.0.0-11`（已从 744f1bb 移动）。
 - 发布节点以 `released/3.0.0-11` 为准；上一个已发布节点为 `released/3.0.0-10`（`816b9bb`）。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返。
 - 维护远端：fork = git@github.com:liny90626/wecom.git
 - 上游远端：origin = https://github.com/YanHaidao/wecom.git（v3.0.0 = 官方插件重建，见第 8 节）；官方远端：official = https://github.com/WecomTeam/wecom-openclaw-plugin.git，push URL 为 DISABLED，只供 `npm run upstream:check`
@@ -62,6 +62,15 @@
 - origin 停在 `133773f`（上游 v3.0.0，2026-09-05 对账，见第 8 节），无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-11 现网 -10 反馈：「新指令冲突」与裸「（回复完毕）」（3.0.0-11）
+
+两条现网反馈，都是通知类 final 的表达问题；根因链路只定位到插件侧能确认的部分：
+
+- **「之前任务还在处理中，新指令冲突啦…」且回答从未到达。** 发出点有两个：①`reply-orchestrator.ts` 的 `dispatch-busy-not-accepted`——核心对同一消息两次返回 flagless 零结果（第一次后等 500 ms 重试）。零结果来源两种、插件不可区分：回复操作占用（`finishReplyOperationBusyDispatch`，reason=reply-operation-active）与入站去重（`claimInboundDedupe` duplicate/inflight，key=[agent 作用域, 路由, msgid]，TTL 20 分钟）。现在按 `resolveActiveEmbeddedRunSessionId(sessionKey)` 分流：有 run 说「任务冲突」，无 run 说「（这条消息没有被处理…请重新发送）」。②`dispatcher.ts` 的 `pre-dispatch-run-busy`——核心 embedded run 登记表报告该会话有 run、abort 被拒（7.1 在终态提交后冻结 abort）、settle 窗口内不释放，文案不变（核心确实有 run）。**根因未定案**：现网这台机器同一时段有 `EmbeddedAttemptSessionTakeoverError`、`deferred-close-declined bodyChars=561 deliveredChars=0`、`stream-final-skip-unreliable`，最像的是上一轮遗留的 run / 回复操作没释放；下次发生时按第 5 节 5.10 捞日志。已排除：`welcomeText` 已配置的 `enter_chat` 走静态欢迎语，不占会话；Bot WS 文本帧没有 msgid 去重，但没有重复投递证据，不加。
+- **思考十几分钟后只收到「（回复完毕）」。** 对应 `stream-final-skip-unreliable` 后的推送：final 正文为空且 `accumulatedThinkingText` 非空时，`reasoningOnlyFinal` 分支把正文置为完成标记。现改为 `REASONING_ONLY_FINAL_NOTICE`（「（本轮没有生成正文回复，可重新发送一次指令）」）。单聊里空 final 会带 fallback 标记走 deferred 路径、不推标记，所以到这个分支的 final 是核心以 `queuedFinal` 交来的「有 final 但正文为空」，例如整段是 `<think>` 块。上游原因不在本插件。
+- **通知类 final 不再追加「（回复完毕）」。** 追加点有三处：`shouldAppendStreamCompletionMarker`、`deliverNormalFinalViaStream` 里的 `fallbackAppendCompletionMarker`（死窗回退推送，对所有非 deferred 正文追加，这就是两张截图里标记的来源）、`scheduleFinalPushRetry` 的 `appendCompletionMarker`。通知通过 `channelData.wecomNoticeFinal` 标记三处全部跳过；`reasoningOnlyFinal` 分支自己置 `noticeFinal = true`。
+- 回归：reply.test.ts「closes reasoning-only streams by saying no answer was produced」「pushes the no-answer notice instead of a bare marker once the window is dead」（复现 846608 死窗后的推送路径）「never appends a completion marker to a handoff notice final」；reply-orchestrator.test.ts「answers a flagless zero result with the notice that matches the core's run state」两例；dispatcher.test.ts「reports the unprocessed notice once after one flagless retry」。
 
 ### 2.-10 对抗式审核跟进（3.0.0-11）
 
@@ -286,6 +295,7 @@ lastDeliveredBodySourceText / previewFrozenDeliveredSourceText 全部失效，�
 5.7 8.x 行为差异（未改代码）：零可见输出的回合，8.x 核心自己投递英文兜底「No reply was generated for this message…」并报告 `noVisibleReplyFallbackDelivered`，7.x 由插件发中文提示；插件对两种形态都处理正确，措辞不同。已安装实例升到 8.x 必须手动补 `plugins.entries.wecom.hooks.allowConversationAccess=true`（向导只在安装时写）。
 5.8 核心层事实（改运行时上下文相关代码前先知道）：核心只对自己嵌入的不可信文本（子代理结果、MCP 应用上下文）转义分隔符，从不转义渠道入站，自带渠道亦然；`onCommentaryText` → `onItemEvent` 的 preamble 与 reasoning 不经 `sanitizeUserFacingText`。伪造入站上下文是核心层面对所有渠道的通病，插件只堵自己这三条门。
 5.9 `flushDeferredMedia`（3.0.0-10）与 final 媒体路径的三处已知差异（2026-09-12 审核记录，未改）：①flush 循环不看 `supersededByNewInbound` / `runtimeRetired`，final 路径在接管时 break、退役时 return，最坏是用户换话题后旧回合的文件仍陆续到达；②失败提示 `媒体发送失败：<路径>` 把本地路径发给用户，与 final 路径一致，属既有行为；③上传期间气泡仍开着，大文件拉长关流帧撞死窗的窗口，后果只是 `onFail` 记一条 `lastError`，无用户可见通知。碰这段代码时顺手对齐即可，不值得单独发版。
+5.10 「新指令冲突 / 消息未被处理」根因未定案（2026-09-12）。下次现网再出现时捞这几组日志（事发前后 15 分钟、同一 sessionKey）：`dispatch-handoff-retry`、`dispatch-busy-not-accepted sessionId=…`（`n/a` = 核心无已知 run，指向去重或回复操作遗留）、`pre-dispatch-run-drain / pre-dispatch-run-busy`（核心有 run 但 abort 被拒）、上一轮的 `error-final` / `deferred-close-declined` / `stream-final-skip-unreliable` / `EmbeddedAttemptSessionTakeoverError`、`[wecom-runtime] inbound` 是否同一 messageId 出现两次（重复投递）。核心自己对这两种零结果都不打日志。若定位到遗留回复操作，核心的 stale 恢复只在 diagnostics 开启时生效，插件侧不能 forceClear（会把健康 run 标成 run_failed）。
 5.1 仓库 package-lock.json 为 0 字节，npm audit --omit=dev 返回 ENOLOCK。生成 lockfile 会改变安装解析，属于会影响使用者的动作，需用户点头，至今未生成。
 5.3 补发改走 wecom-cli 已评估并**否掉**：CLI 的 chat_id 必须取自本次 sessions list（技能明文禁止历史 chat_id），
     只能发给授权人与最近 10 个会话（长任务的目标会话可能已掉出窗口），子进程时延 300~500ms 且按 botId 全局串行，
@@ -335,9 +345,9 @@ src/transport/bot-ws/sdk-adapter.ts
 
 ### 3.0.0-11 发布验证（2026-09-12）
 
-- tsc 0 错误；全量 Vitest **threads pool** 单 worker 66 文件 / 865 通过（此前该命令下 media「expands ~」必红，已修）；media.test.ts 在 forks pool 下 6 / 6 亦通过。
-- `npm run compat:check -- 2026.7.1-2 2026.9.3` 与 `-- 2026.9.4`：三版 typecheck PASS，各 66 文件 / 865 用例 PASS（9.x 沿用 file-access-runtime 类型 shim）。
-- build / verify-dist / B1 / B2 / B3 / diff check PASS。两次 `npm pack` 指纹一致：258 个文件、619,062 bytes，SHA-256 `c45edf1f1232d7f855828dcc69b63c84e9bdbdcf311c21b4462f8692de1fec04`，npm shasum `5bc7332739fea4be392ce6527653544dd259f386`；包内无测试或凭据。
+- 重新发布（含 2.-11 现网修复）：定向 357 个通过；tsc 0 错误；全量 Vitest **threads pool** 单 worker 66 文件 / 869 通过（此前该命令下 media「expands ~」必红，已修）；media.test.ts 在 forks pool 下 6 / 6 亦通过。
+- `npm run compat:check -- 2026.7.1-2 2026.9.3 2026.9.4`：三版 typecheck PASS，各 66 文件 / 869 用例 PASS（9.x 沿用 file-access-runtime 类型 shim）。
+- build / verify-dist / B1 / B2 / B3 / diff check PASS。两次 `npm pack` 指纹一致：258 个文件、619,879 bytes，SHA-256 `58d506ea8a862169b55ece0d1a178d00c7e49fce8c6f389c920bbb560c3dfb1a`，npm shasum `bb1784ee1dfea6823dd097a077133d15b16a206a`；包内无测试或凭据。首次 3.0.0-11 包（SHA-256 `c45edf1f…fec04`，仅审核跟进）已被取代，未部署。
 - 7.1-2 隔离安装：空配置装 tgz → 把生产形状 `channels.wecom` 合并进安装器写的配置 → `config validate` PASS、`plugins inspect --runtime` 3.0.0-11 / loaded / diagnostics=[]、`channels list` 两账号 installed、configured、enabled。未启动网关；真实企微客户端未验收。
 
 ### 3.0.0-10 发布验证（2026-09-12）
@@ -380,15 +390,15 @@ npm pack 两次: SHA-256 一致
 
 ### 包指纹
 
-3.0.0-11（当前发布，未部署生产）：
+3.0.0-11（当前发布，重新发布后的包；未部署生产）：
 
 ~~~text
 yanhaidao-wecom-3.0.0-11.tgz（仓库根目录，.gitignore 忽略）
-size:        619,062 bytes
-unpacked:    2,340,086 bytes
+size:        619,879 bytes
+unpacked:    2,342,171 bytes
 files:       258
-npm shasum:  5bc7332739fea4be392ce6527653544dd259f386
-SHA-256:     c45edf1f1232d7f855828dcc69b63c84e9bdbdcf311c21b4462f8692de1fec04
+npm shasum:  bb1784ee1dfea6823dd097a077133d15b16a206a
+SHA-256:     58d506ea8a862169b55ece0d1a178d00c7e49fce8c6f389c920bbb560c3dfb1a
 ~~~
 
 3.0.0-6（现网在跑）：

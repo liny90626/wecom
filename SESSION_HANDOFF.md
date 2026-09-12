@@ -1,12 +1,13 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-09-12
+> 最后更新：2026-09-12（审核跟进）
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
 - 当前发布版本 **3.0.0-10**，修复 deferred 收尾暂存媒体丢件和 Bot webhook 多媒体循环提前退出，包含 3.0.0-9 思考块与此前显示修复。2026-09-11 用户授权打包与发布；生产 OpenClaw 为 `2026.7.1-2`，本次不部署生产。用户本轮反馈 3.0.0-9 媒体丢件，3.0.0-10 尚待生产验收。
+- 2026-09-12 对 3.0.0-7 至 -10 做了对抗式审核：四个修复无阻断缺陷；跟进改动已提交 main 未发版，决定与已知差异见 2.-10 与 5.9。
 - 3.0.0-5、3.0.0-v1、3.0.0-v2 均已取代或撤回，相关 tag 已删除，不要安装；历史说明保留在 changelog 文件中。
 - **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。三个候选 tag 已删除，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
 - 上游 `YanHaidao/wecom` 与官方 `WecomTeam/wecom-openclaw-plugin` 的对账基线：官方 HEAD `3b1cbe3`（2026.8.17）此后无新提交；`npm run upstream:check` 可随时复核（只读 `official` 远端）。
@@ -37,6 +38,7 @@
 ### 当前 Git 状态
 
 - 发布分支：main；媒体修复提交：`80d4159`。
+- 2026-09-12 审核跟进（未发版、未推送 fork）：`e728924` 空流收尾改收「（回复完毕）」，`506f71a` 测试修正，随后一个文档提交；main 领先 `released/3.0.0-10` 三个提交，详见 2.-10。
 - 发布节点以 `released/3.0.0-10` 为准；上一个已发布节点为 `released/3.0.0-9`（`1285f23`）。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返。
 - 维护远端：fork = git@github.com:liny90626/wecom.git
 - 上游远端：origin = https://github.com/YanHaidao/wecom.git（v3.0.0 = 官方插件重建，见第 8 节）；官方远端：official = https://github.com/WecomTeam/wecom-openclaw-plugin.git，push URL 为 DISABLED，只供 `npm run upstream:check`
@@ -59,9 +61,19 @@
 - `released/3.0.0-6` 至 `released/3.0.0-9` 已推送 fork；本次发布 tag 为 `released/3.0.0-10`。
 - `released/3.0.0-5`、`released/3.0.0-v1`、`released/3.0.0-v2` 已从本地与 fork 删除。
 - 版本规则：`3.0.0-<构建号>`，构建号递增；tag `released/<版本>`；只推 fork。
-- origin 仍停在 f5f5650，无本仓库的 tag；始终只读，从未推送。
+- origin 停在 `133773f`（上游 v3.0.0，2026-09-05 对账，见第 8 节），无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-10 对抗式审核跟进（2026-09-12，未发版）
+
+对 3.0.0-7 至 3.0.0-10 的提交与本文件做了一轮对抗式审核，四个修复没有阻断性缺陷；以下是审核后的改动与决定：
+
+- **A 已改**：`closeOpenedStreamSilently` 收尾正文为空时不再复用 placeholder。3.0.0-7 的做法让「⏳ 正在思考中...」成为气泡终态，在 `wecomExternalFinalDelivered`（答案已作独立消息推送）与两条消息合并两种场景下尤其误导；现改为收在 `（回复完毕）`。回归：reply.test.ts「finishes an opened placeholder stream without sending an empty terminal frame」。
+- **B 已改**：media.test.ts「expands ~」改用 `vi.spyOn(os, "homedir")`，不再改写 `process.env.HOME`。threads pool 下 worker 线程的 `process.env` 是副本，libuv 的 `uv_os_homedir` 读不到，该用例必红；默认 forks pool 下通过，所以发版记录的 865/865 成立，但第 7 节推荐审核 agent 用的 threads 命令跑出来是红的。生产运行在主线程，不受影响。
+- **C 已改**：reply.test.ts「flushes media deferred by a block before closing a deferred turn」新增断言：终止帧在全部附件上传之后发出，且收在用户已见的正文上。`flushDeferredMedia` 与 final 媒体路径的三处差异保留为已知差异，见第 5 节 5.9。
+- **D 不改**（评估结论）：核心 reasoning 回调在 embedded 车道（`selection` / `btw`）发的是当前思考段的累计快照且**不带** `isReasoningSnapshot`，只有 CLI 车道（claude live session）带该标记。按标记分叉等于维护两套合并逻辑，而 3.0.0-9 的末行前缀启发式与核心自己的 `mergeReasoningProgressText` 思路一致、已覆盖现网日志形态。出现启发式漏掉的真实日志再改。
+- **E 不改**（评估结论）：企微 markdown-v2 子集（群机器人 webhook 文档 path/99110 的 markdown_v2 节；智能机器人长连接文档 path/101463 的 markdown.content 链接到同一节；SDK `StreamReplyBody` 注明 stream.content 支持 Markdown）只列标题、字体（斜体 / 加粗）、列表、引用、链接、分割线、代码、表格，**没有任何删除线语法**。单个 `~` 从来不是企微构造，-8 保留它是对的；`~~` 继续降级为纯文本。官方插件 Bot WS 车道（monitor.ts）不改写模型 Markdown，直接流式发送。`>`、有序 / 无序列表、表格都在子集内，-8 把块级步骤换到独立行得到的是文档定义的渲染。残余风险只剩客户端若私自实现 GFM 删除线，也只影响 `~x~` 这种两侧无空格的写法，日期区间 `1/1 ~ 9/7` 不构成定界符。
 
 ### 2.-9 deferred 媒体收尾（3.0.0-10）
 
@@ -81,7 +93,7 @@ OpenClaw reasoning 回调的累计快照曾被通用合并逻辑误当成新段�
 
 复现：连续发送两条消息，第二条被 OpenClaw 接管到仍在运行的回合；核心返回 `noVisibleReplyFallbackEligible`，插件关闭没有正文或预览的流。旧逻辑发送空终止帧，企微客户端显示空白气泡。
 
-修复：`closeOpenedStreamSilently` 在收尾正文为空时复用已发送的 placeholder；已有正文仍使用原内容，流窗口失效和 supersede 分支不改变。回归覆盖见 `src/transport/bot-ws/reply.test.ts`，详见 `changelog/v3.0.0-7.md`。
+修复：`closeOpenedStreamSilently` 在收尾正文为空时不再发空终止帧。3.0.0-7 复用已发送的 placeholder 文案；2026-09-12 审核后改为收在 `（回复完毕）`（未发版，见 2.-10）。已有正文仍使用原内容，流窗口失效和 supersede 分支不改变。回归覆盖见 `src/transport/bot-ws/reply.test.ts`，详见 `changelog/v3.0.0-7.md`。
 
 ### 2.-5 运行时上下文围栏（3.0.0-5 已包含）
 
@@ -275,6 +287,7 @@ lastDeliveredBodySourceText / previewFrozenDeliveredSourceText 全部失效，�
 5.6 2.7.260-26 需真机复验：①长任务答案末尾不再有时钟；②答案改走推送时上方气泡应已关闭且不带时钟（日志 `stream-final-skip-unreliable` 新增 `ackUntrusted` / `windowDead` 字段区分两种收尾）；③气泡帧最大从约 10 KB 变为最多 15 KB、每 1.5 秒一帧，看长答案流式是否顺畅；④死窗后长任务后段消息条数会变多（每 20 秒最多一条正文推送）。
 5.7 8.x 行为差异（未改代码）：零可见输出的回合，8.x 核心自己投递英文兜底「No reply was generated for this message…」并报告 `noVisibleReplyFallbackDelivered`，7.x 由插件发中文提示；插件对两种形态都处理正确，措辞不同。已安装实例升到 8.x 必须手动补 `plugins.entries.wecom.hooks.allowConversationAccess=true`（向导只在安装时写）。
 5.8 核心层事实（改运行时上下文相关代码前先知道）：核心只对自己嵌入的不可信文本（子代理结果、MCP 应用上下文）转义分隔符，从不转义渠道入站，自带渠道亦然；`onCommentaryText` → `onItemEvent` 的 preamble 与 reasoning 不经 `sanitizeUserFacingText`。伪造入站上下文是核心层面对所有渠道的通病，插件只堵自己这三条门。
+5.9 `flushDeferredMedia`（3.0.0-10）与 final 媒体路径的三处已知差异（2026-09-12 审核记录，未改）：①flush 循环不看 `supersededByNewInbound` / `runtimeRetired`，final 路径在接管时 break、退役时 return，最坏是用户换话题后旧回合的文件仍陆续到达；②失败提示 `媒体发送失败：<路径>` 把本地路径发给用户，与 final 路径一致，属既有行为；③上传期间气泡仍开着，大文件拉长关流帧撞死窗的窗口，后果只是 `onFail` 记一条 `lastError`，无用户可见通知。碰这段代码时顺手对齐即可，不值得单独发版。
 5.1 仓库 package-lock.json 为 0 字节，npm audit --omit=dev 返回 ENOLOCK。生成 lockfile 会改变安装解析，属于会影响使用者的动作，需用户点头，至今未生成。
 5.3 补发改走 wecom-cli 已评估并**否掉**：CLI 的 chat_id 必须取自本次 sessions list（技能明文禁止历史 chat_id），
     只能发给授权人与最近 10 个会话（长任务的目标会话可能已掉出窗口），子进程时延 300~500ms 且按 botId 全局串行，
@@ -321,6 +334,11 @@ src/transport/bot-ws/sdk-adapter.ts
 - 不在渲染层做模糊语义去重；判断重复前先区分同一 item 快照、跨 item flush、真实模型重复和重复投递。
 
 ## 7. 当前验证证据
+
+### 审核跟进复验（2026-09-12，main 未发版）
+
+- tsc 0 错误；全量 Vitest **threads pool** 单 worker 66 文件 / 865 通过（此前该命令下 media「expands ~」必红，已修）；media.test.ts 在 forks pool 下 6 / 6 亦通过。
+- B1 / B2 / B3 READY；`git diff --check` clean。未跑 compat:check、build / verify-dist 与隔离安装，发版时按第 10 节补齐。
 
 ### 3.0.0-10 发布验证（2026-09-12）
 

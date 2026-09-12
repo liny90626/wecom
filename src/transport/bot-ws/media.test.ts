@@ -130,8 +130,9 @@ describe("uploadAndSendBotWsMedia", () => {
 
   it("expands ~ the way the send-media skill shows it", async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), "wecom-media-home-"));
-    const previousHome = process.env.HOME;
-    process.env.HOME = home;
+    // Spy instead of rewriting HOME: under the threads pool a worker's
+    // process.env is a copy libuv never reads, so os.homedir() would ignore it.
+    const homedir = vi.spyOn(os, "homedir").mockReturnValue(home);
     try {
       await writeFile(path.join(home, "report.txt"), "home body");
       const wsClient = buildWsClient();
@@ -146,7 +147,7 @@ describe("uploadAndSendBotWsMedia", () => {
       expect(result.ok).toBe(true);
       expect(wsClient.uploadMedia).toHaveBeenCalledWith(Buffer.from("home body"), expect.anything());
     } finally {
-      process.env.HOME = previousHome;
+      homedir.mockRestore();
     }
   });
 });

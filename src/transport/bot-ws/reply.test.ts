@@ -3084,6 +3084,15 @@ describe("createBotWsReplyHandle", () => {
       "/tmp/a.png",
       "/tmp/b.pdf",
     ]);
+    // The bubble finishes only after every attachment went out, on the text
+    // the user already saw, so no file lands behind a closed stream.
+    const closeIndex = mockClient.replyStream.mock.calls.findIndex((call) => call[3] === true);
+    expect(closeIndex).toBeGreaterThanOrEqual(0);
+    expect(String(mockClient.replyStream.mock.calls[closeIndex]?.[2])).toContain("报告见附件");
+    const closeOrder = mockClient.replyStream.mock.invocationCallOrder[closeIndex]!;
+    for (const uploadOrder of uploadAndSendBotWsMediaMock.mock.invocationCallOrder) {
+      expect(uploadOrder).toBeLessThan(closeOrder);
+    }
   });
 
   it("reports deferred media failures instead of closing as a silent success", async () => {

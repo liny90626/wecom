@@ -625,6 +625,8 @@ archive changed during validation
 Also not a valid hook pack
 ~~~
 
+机制（2026-09-12 核对 7.1-2 的 `@openclaw/fs-safe/archive` `stageArchiveFileForExtraction`）：解包前对源文件做三次 stat——按路径 `lstat`、打开后按句柄 `fstat`、再按路径 `lstat`，`sameFileIdentity` 要求三者 `ino` 相同、`dev` 相同（win32 允许一方为 0），否则抛这句错误。这一步在读取任何字节之前，**与包内容无关**，同一个 tgz 复制到本地 NTFS 就能装，正说明如此。映射盘 / 同步盘 / WebDAV 上，刚落盘或尚未被客户端缓存的文件，路径 stat 与句柄 stat 常给出不同的文件索引；同一路径上放了几小时的旧包能装、新拷的包装不上，差别在文件状态不在包。CLI 会先按插件包、再按 hook pack 各试一次，所以日志里两行 Extracting。
+
 先独立验证 tarball 的 SHA-256 和解包内容；然后把包复制到本地 NTFS，再执行：
 
 ~~~bash

@@ -2775,9 +2775,10 @@ export function createBotWsReplyHandle(params: {
     }
     try {
       // WeCom treats an empty terminal frame as an empty bubble. Deferred or
-      // tool-only turns can reach this path without ever painting a preview,
-      // so retain the acknowledgement text instead of blanking the stream.
-      const closeText = stripElapsedStatusLine(content) || placeholderText.trimEnd();
+      // tool-only turns can reach this path without ever painting a preview;
+      // close on the completion marker rather than leave "正在思考中" as the
+      // bubble's terminal state while the answer lives in another message.
+      const closeText = stripElapsedStatusLine(content) || FINAL_COMPLETION_MARKER;
       // The last painted frame may have been a status frame; the turn is over,
       // so the bubble closes on that frame's content without its clock.
       await withHandleSendTimeout(

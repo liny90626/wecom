@@ -220,7 +220,7 @@ describe("createBotWsReplyHandle", () => {
     expect(mockClient.replyStream.mock.calls[1]).toEqual([
       expect.objectContaining({ headers: { req_id: "req-empty-final-close" } }),
       placeholderCall?.[1],
-      "正在思考...",
+      "（回复完毕）",
       true,
     ]);
   });

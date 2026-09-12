@@ -1787,7 +1787,7 @@ describe("dispatchInboundEvent", () => {
       expect(previousSupersede).not.toHaveBeenCalled();
       expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
       expect(deliver).toHaveBeenCalledWith(
-        { text: expect.stringContaining("确认新指令未执行后再重试") },
+        expect.objectContaining({ text: expect.stringContaining("确认新指令未执行后再重试") }),
         { kind: "final" },
       );
     } finally {
@@ -1839,7 +1839,7 @@ describe("dispatchInboundEvent", () => {
       expect(openClawHandoffState.abortAndDrainAgentHarnessRun).not.toHaveBeenCalled();
       expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
       expect(deliver).toHaveBeenCalledWith(
-        { text: expect.stringContaining("确认新指令未执行后再重试") },
+        expect.objectContaining({ text: expect.stringContaining("确认新指令未执行后再重试") }),
         { kind: "final" },
       );
     } finally {
@@ -1950,7 +1950,7 @@ describe("dispatchInboundEvent", () => {
     }
   });
 
-  it("reports busy once after one flagless busy retry", async () => {
+  it("reports the unprocessed notice once after one flagless retry", async () => {
     vi.useFakeTimers();
     openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue(undefined);
     const deliver = vi.fn().mockResolvedValue(undefined);
@@ -1979,7 +1979,7 @@ describe("dispatchInboundEvent", () => {
       expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
       expect(deliver).toHaveBeenCalledOnce();
       expect(deliver).toHaveBeenCalledWith(
-        { text: expect.stringContaining("确认新指令未执行后再重试") },
+        expect.objectContaining({ text: expect.stringContaining("没有被处理") }),
         { kind: "final" },
       );
       expect(fail).not.toHaveBeenCalled();
@@ -2103,7 +2103,7 @@ describe("dispatchInboundEvent", () => {
       expect(oldAbortSignal?.aborted).toBe(false);
       expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
       expect(busyDeliver).toHaveBeenCalledWith(
-        { text: expect.stringContaining("确认新指令未执行后再重试") },
+        expect.objectContaining({ text: expect.stringContaining("确认新指令未执行后再重试") }),
         { kind: "final" },
       );
 

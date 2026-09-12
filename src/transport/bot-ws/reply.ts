@@ -88,6 +88,12 @@ const LONG_FINAL_DEDUP_MIN_CHARS = 3_000;
 const LONG_FINAL_DEDUP_MIN_SEGMENT_CHARS = 120;
 const STRUCTURED_TAIL_MIN_DUPLICATE_LINES = 4;
 const FINAL_COMPLETION_MARKER = "（回复完毕）";
+/**
+ * A final with no body after visible reasoning. The field saw twelve minutes of
+ * "思考中" end in a bare "（回复完毕）" push: the user needs to hear that no
+ * answer was produced, not that a reply completed.
+ */
+const REASONING_ONLY_FINAL_NOTICE = "（本轮没有生成正文回复，可重新发送一次指令）";
 const LONG_TASK_STATUS_PREFIX = "【长任务处理中，请勿打断，已用时";
 /** Before the long-task threshold "still working" must not ask the user to
  *  change their behaviour — a 90-second turn is not a long task. */
@@ -2510,6 +2516,8 @@ export function createBotWsReplyHandle(params: {
       isError: boolean;
       /** OpenClaw deferred this turn's answer to a later run. */
       deferred: boolean;
+      /** A handoff / no-answer notice: it states the turn did not produce a reply. */
+      notice: boolean;
     },
   ): Promise<boolean | "retry-scheduled"> => {
     const markdownChunks = chunkWeComMarkdownWireV2(
@@ -2533,7 +2541,8 @@ export function createBotWsReplyHandle(params: {
     // A pushed message has no bubble context, so it normally carries the marker
     // to show the answer ended there. A deferred turn has NOT ended: the marker
     // would tell the user to stop waiting for the answer that is still coming.
-    const fallbackAppendCompletionMarker = !options.isError && !options.deferred;
+    const fallbackAppendCompletionMarker =
+      !options.isError && !options.deferred && !options.notice;
     // The fallback retry must reuse the EXACT identity of the failed push
     // (text/marker/default limits): any drift would reset the tracked chunk
     // progress and re-push chunks the user already confirmed-received.
@@ -4143,6 +4152,9 @@ export function createBotWsReplyHandle(params: {
       // OpenClaw deferred this turn's answer to a later run. Everything that
       // would announce completion has to stay off this delivery.
       const deferredTurn = payload.channelData?.wecomDeferredTurn === true;
+      // Handoff notices ("消息未被处理", "任务冲突") describe a turn that did not
+      // run; a "（回复完毕）" under them reads as a completed reply.
+      let noticeFinal = payload.channelData?.wecomNoticeFinal === true;
       let finalText = outboundText;
 
       // Template cards leave this reply as their own WeCom messages, so the JSON
@@ -4290,6 +4302,7 @@ export function createBotWsReplyHandle(params: {
           payload.isError !== true &&
           !isEvent &&
           !deferredTurn &&
+          !noticeFinal &&
           shouldAppendStreamCompletionMarker({
             finalText,
             previewFrozen,
@@ -4300,7 +4313,12 @@ export function createBotWsReplyHandle(params: {
           // the marker here would actively push a stray "（回复完毕）" bubble
           // into the newer conversation.
           if (!finalText && reasoningOnlyFinal && !supersededByNewInbound && !deferredTurn) {
-            finalText = FINAL_COMPLETION_MARKER;
+            finalText = REASONING_ONLY_FINAL_NOTICE;
+            // The notice already says the turn ended; a trailing marker would
+            // read as "回复完毕" right under "没有生成正文回复" — on the stream
+            // frame and on the push retry a dead window falls back to.
+            noticeFinal = true;
+            finalAppendCompletionMarker = false;
           }
         }
       }
@@ -4406,6 +4424,7 @@ export function createBotWsReplyHandle(params: {
             peerDedup: currentFinalUsesPeerDedup,
             isError: payload.isError === true,
             deferred: deferredTurn,
+            notice: noticeFinal,
           });
           if (normalFinalResult === "retry-scheduled") {
             return;
@@ -4421,7 +4440,7 @@ export function createBotWsReplyHandle(params: {
                 text: resolveStreamFallbackText(finalText, payload.isError === true),
                 deliveryKey: currentFinalDeliveryKey,
                 peerDedup: currentFinalUsesPeerDedup,
-                appendCompletionMarker: payload.isError !== true,
+                appendCompletionMarker: payload.isError !== true && !noticeFinal,
                 alreadyMarkedDelivered: finalMediaDelivered,
                 preserveDeliveryClaim: finalMediaDelivered,
               });

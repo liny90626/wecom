@@ -19,7 +19,11 @@ const agentHarnessState = vi.hoisted(() => ({
 
 vi.mock("openclaw/plugin-sdk/agent-harness", () => agentHarnessState);
 
-import { dispatchRuntimeReply } from "./reply-orchestrator.js";
+import {
+  BOT_WS_BUSY_INBOUND_NOTICE_TEXT,
+  BOT_WS_UNPROCESSED_INBOUND_NOTICE_TEXT,
+  dispatchRuntimeReply,
+} from "./reply-orchestrator.js";
 import {
   __resetBotWsReplyTestState,
   createBotWsReplyHandle,
@@ -228,6 +232,43 @@ describe("dispatchRuntimeReply", () => {
       { kind: "block" },
     );
   });
+
+  it.each([
+    { runSessionId: undefined, expected: BOT_WS_UNPROCESSED_INBOUND_NOTICE_TEXT, label: "no run" },
+    { runSessionId: "run-live", expected: BOT_WS_BUSY_INBOUND_NOTICE_TEXT, label: "active run" },
+  ])(
+    "answers a flagless zero result with the notice that matches the core's run state ($label)",
+    async ({ runSessionId, expected }) => {
+      // Reply-operation admission and inbound dedupe both come back as this
+      // flagless zero result; only a run the core still reports justifies the
+      // "task still running" copy.
+      agentHarnessState.resolveActiveEmbeddedRunSessionId.mockReturnValue(runSessionId);
+      const dispatchReplyWithBufferedBlockDispatcher = vi
+        .fn()
+        .mockResolvedValue({ queuedFinal: false, counts: { block: 0, final: 0, tool: 0 } });
+      const deliver = vi.fn().mockResolvedValue(undefined);
+
+      await dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: {} as any,
+        session: { ctx: { SessionKey: "session-flagless-zero" } } as any,
+        replyHandle: {
+          context: {
+            transport: "bot-ws",
+            accountId: "default",
+            raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
+          },
+          deliver,
+        } as any,
+      });
+
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(deliver).toHaveBeenCalledWith(
+        { text: expected, channelData: { wecomNoticeFinal: true } },
+        { kind: "final" },
+      );
+    },
+  );
 
   it("forwards OpenClaw preamble progress to bot-ws reply handles", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
@@ -1869,7 +1910,7 @@ describe("dispatchRuntimeReply", () => {
     expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
     expect(deliver).toHaveBeenCalledOnce();
     expect(deliver).toHaveBeenCalledWith(
-      { text: expect.stringContaining("已并入当前任务") },
+      expect.objectContaining({ text: expect.stringContaining("已并入当前任务") }),
       { kind: "final" },
     );
   });
@@ -1906,7 +1947,7 @@ describe("dispatchRuntimeReply", () => {
 
     expect(agentHarnessState.resolveActiveEmbeddedRunSessionId).toHaveReturnedWith(undefined);
     expect(deliver).toHaveBeenCalledWith(
-      { text: expect.stringContaining("已并入当前任务") },
+      expect.objectContaining({ text: expect.stringContaining("已并入当前任务") }),
       { kind: "final" },
     );
     expect(fail).not.toHaveBeenCalled();
@@ -2005,7 +2046,7 @@ describe("dispatchRuntimeReply", () => {
 
     expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
     expect(deliver).toHaveBeenCalledWith(
-      { text: expect.stringContaining("已并入当前任务") },
+      expect.objectContaining({ text: expect.stringContaining("已并入当前任务") }),
       { kind: "final" },
     );
     expect(String(deliver.mock.calls[0]?.[0]?.text ?? "")).not.toContain("确认新指令未执行");
@@ -2473,7 +2514,7 @@ describe("dispatchRuntimeReply", () => {
     ).resolves.toBeUndefined();
 
     expect(deliver).toHaveBeenCalledWith(
-      { text: expect.stringContaining("确认新指令未执行后再重试") },
+      expect.objectContaining({ text: expect.stringContaining("没有被处理") }),
       { kind: "final" },
     );
     expect(fail).not.toHaveBeenCalled();

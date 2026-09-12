@@ -27,6 +27,12 @@ const PREAMBLE_LOG_MAX_STEPS = 200;
 // that user to resend duplicates model work and tool side effects.
 export const BOT_WS_BUSY_INBOUND_NOTICE_TEXT =
   "之前任务还在处理中，新指令冲突啦，请先等待当前任务结束；确认新指令未执行后再重试。";
+// A flagless zero result while the core reports no run for the session: reply
+// operation admission and inbound dedupe are indistinguishable from here, so
+// the notice must not assert that a task is running. The field saw the busy
+// copy on an idle session with no answer ever arriving.
+export const BOT_WS_UNPROCESSED_INBOUND_NOTICE_TEXT =
+  "（这条消息没有被处理，可能与上一轮收尾冲突或被判为重复，请重新发送）";
 const BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT =
   "⏳ 上一轮任务仍在进行，本条消息已并入当前任务，完成后一并回复；若长时间未收到回复，请重新发送。";
 
@@ -370,7 +376,10 @@ export async function dispatchRuntimeReply(params: {
       throw new WeComReplyBusyNotAcceptedError(sessionKey || undefined);
     }
     try {
-      await replyHandle.deliver({ text: notice.text }, { kind: "final" });
+      await replyHandle.deliver(
+        { text: notice.text, channelData: { wecomNoticeFinal: true } },
+        { kind: "final" },
+      );
     } catch (noticeError) {
       await failAndThrow(noticeError);
     }
@@ -698,10 +707,13 @@ export async function dispatchRuntimeReply(params: {
     // between that return and this check, so its current value is diagnostic
     // only. Since neither acceptance callback fired, one bounded retry cannot
     // repeat a newly accepted turn; a second zero result becomes the notice.
+    const flaglessRunSessionId = resolveActiveRunSessionId(sessionKey);
     await deliverHandoffNotice({
-      text: BOT_WS_BUSY_INBOUND_NOTICE_TEXT,
+      text: flaglessRunSessionId
+        ? BOT_WS_BUSY_INBOUND_NOTICE_TEXT
+        : BOT_WS_UNPROCESSED_INBOUND_NOTICE_TEXT,
       logEvent: "dispatch-busy-not-accepted",
-      runSessionId: resolveActiveRunSessionId(sessionKey),
+      runSessionId: flaglessRunSessionId,
       throwForRetry: retryFlaglessBusy,
     });
     return;

@@ -1800,7 +1800,7 @@ describe("createBotWsReplyHandle", () => {
     expect(previewText).not.toContain("【第");
   });
 
-  it("closes reasoning-only streams with a completion marker", async () => {
+  it("closes reasoning-only streams by saying no answer was produced", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,
       frame: {
@@ -1819,7 +1819,59 @@ describe("createBotWsReplyHandle", () => {
     const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
     expect(finalText).not.toContain("<think>");
     expect(finalText).not.toContain("只有思考过程");
-    expect(finalText).toContain(FINAL_COMPLETION_MARKER);
+    expect(finalText).toContain("（本轮没有生成正文回复，可重新发送一次指令）");
+    expect(finalText).not.toContain(FINAL_COMPLETION_MARKER);
+    expect(mockClient.replyStream.mock.calls.at(-1)?.[3]).toBe(true);
+  });
+
+  it("pushes the no-answer notice instead of a bare marker once the window is dead", async () => {
+    // Field report: twelve minutes of "思考中", then a lone "（回复完毕）" bubble.
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-thinking-only-dead-window" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "只有思考过程", isReasoning: true }, { kind: "block" });
+    mockClient.replyStream.mockRejectedValueOnce({
+      headers: { req_id: "req-thinking-only-dead-window" },
+      errcode: 846608,
+      errmsg: "stream message update expired (>6 minutes), cannot update",
+    });
+    await handle.deliver({ text: "", isReasoning: false }, { kind: "final" });
+    await drainChunkTimers();
+
+    const pushed = mockClient.sendMessage.mock.calls
+      .map(([, body]) => String((body as { markdown?: { content?: string } })?.markdown?.content ?? ""))
+      .join("\n");
+    expect(pushed).toContain("（本轮没有生成正文回复，可重新发送一次指令）");
+    expect(pushed).not.toContain(FINAL_COMPLETION_MARKER);
+  });
+
+  it("never appends a completion marker to a handoff notice final", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-notice-final" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver(
+      { text: "（这条消息没有被处理，请重新发送）", channelData: { wecomNoticeFinal: true } },
+      { kind: "final" },
+    );
+
+    const finalText = String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(finalText).toBe("（这条消息没有被处理，请重新发送）");
     expect(mockClient.replyStream.mock.calls.at(-1)?.[3]).toBe(true);
   });
 

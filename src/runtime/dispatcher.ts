@@ -709,7 +709,7 @@ export async function dispatchInboundEvent(params: {
         // into the next inbound either — that would execute it after all.
         clearPendingReply();
         await activeReplyHandle.deliver(
-          { text: BOT_WS_BUSY_INBOUND_NOTICE_TEXT },
+          { text: BOT_WS_BUSY_INBOUND_NOTICE_TEXT, channelData: { wecomNoticeFinal: true } },
           { kind: "final" },
         );
         return;

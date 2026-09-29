@@ -329,6 +329,240 @@ describe("wecomOutbound", () => {
     now.mockRestore();
   });
 
+  describe("proactive template cards", () => {
+    const wsCfg = (bot: Record<string, unknown> = {}) => ({
+      channels: {
+        wecom: {
+          enabled: true,
+          defaultAccount: "acct-ws",
+          accounts: {
+            "acct-ws": {
+              enabled: true,
+              bot: {
+                primaryTransport: "ws",
+                ws: { botId: "bot-1", secret: "secret-1" },
+                ...bot,
+              },
+              agent: {
+                corpId: "corp-ws",
+                corpSecret: "agent-secret",
+                agentId: 10001,
+                token: "token-ws",
+                encodingAESKey: "aes-ws",
+              },
+            },
+          },
+        },
+      },
+    });
+    // The exact simplified shape the agent wrote in the field (2026-09-29).
+    const surveyText = [
+      "麻烦给这次答疑打个分～",
+      "",
+      "```json",
+      JSON.stringify({
+        card_type: "vote_interaction",
+        title: "为本次表现打个分",
+        description: "1=很不满意，5=非常满意",
+        options: [
+          { id: "s1", text: "1 很不满意" },
+          { id: "s2", text: "2 不满意" },
+          { id: "s3", text: "3 一般" },
+          { id: "s4", text: "4 满意" },
+          { id: "s5", text: "5 非常满意" },
+        ],
+        mode: 0,
+        submit_text: "提交",
+        task_id: "task_qa_survey_probe_1790573900",
+      }),
+      "```",
+    ].join("\n");
+
+    it("pushes the card instead of raw JSON, then the remaining text", async () => {
+      const runtime = await import("./runtime.js");
+      const order: string[] = [];
+      const sendMarkdown = vi.fn().mockImplementation(async () => {
+        order.push("markdown");
+      });
+      const sendTemplateCard = vi.fn().mockImplementation(async () => {
+        order.push("card");
+      });
+      runtime.registerBotWsPushHandle("acct-ws", createBotWsHandle({ sendMarkdown, sendTemplateCard }));
+
+      const result = await wecomOutbound.sendText({
+        cfg: wsCfg(),
+        accountId: "acct-ws",
+        to: "user:lisi",
+        text: surveyText,
+      } as any);
+
+      expect(sendTemplateCard).toHaveBeenCalledTimes(1);
+      const sent = sendTemplateCard.mock.calls[0]?.[0];
+      expect(sent).toMatchObject({ chatId: "lisi", chatType: "direct" });
+      expect(sent.templateCard).toMatchObject({
+        card_type: "vote_interaction",
+        main_title: { title: "为本次表现打个分", desc: "1=很不满意，5=非常满意" },
+        checkbox: { mode: 0 },
+      });
+      expect(sent.templateCard.checkbox.option_list.map((o: { id: string }) => o.id)).toEqual([
+        "s1",
+        "s2",
+        "s3",
+        "s4",
+        "s5",
+      ]);
+      expect(sent.templateCard.task_id).toMatch(/^task_qa_survey_probe_\d+_/);
+      expect(sendMarkdown).toHaveBeenCalledWith("lisi", "麻烦给这次答疑打个分～");
+      expect(order).toEqual(["card", "markdown"]);
+      expect(result.messageId).toBe(`bot-ws-card-${sent.templateCard.task_id}`);
+    });
+
+    it("sends no empty markdown when the message is only a card", async () => {
+      const runtime = await import("./runtime.js");
+      const sendMarkdown = vi.fn().mockResolvedValue(undefined);
+      const sendTemplateCard = vi.fn().mockResolvedValue(undefined);
+      runtime.registerBotWsPushHandle("acct-ws", createBotWsHandle({ sendMarkdown, sendTemplateCard }));
+
+      await wecomOutbound.sendText({
+        cfg: wsCfg(),
+        accountId: "acct-ws",
+        to: "user:lisi",
+        text: surveyText.slice(surveyText.indexOf("```")),
+      } as any);
+
+      expect(sendTemplateCard).toHaveBeenCalledTimes(1);
+      expect(sendMarkdown).not.toHaveBeenCalled();
+    });
+
+    it("marks group targets as group chats", async () => {
+      const runtime = await import("./runtime.js");
+      const sendTemplateCard = vi.fn().mockResolvedValue(undefined);
+      runtime.registerBotWsPushHandle("acct-ws", createBotWsHandle({ sendTemplateCard }));
+
+      await wecomOutbound.sendText({
+        cfg: wsCfg(),
+        accountId: "acct-ws",
+        to: "group:wr-chat-1",
+        text: surveyText,
+      } as any);
+
+      expect(sendTemplateCard.mock.calls[0]?.[0]).toMatchObject({
+        chatId: "wr-chat-1",
+        chatType: "group",
+      });
+    });
+
+    it("rejects a card missing its options without sending anything", async () => {
+      const runtime = await import("./runtime.js");
+      const sendMarkdown = vi.fn().mockResolvedValue(undefined);
+      const sendTemplateCard = vi.fn().mockResolvedValue(undefined);
+      runtime.registerBotWsPushHandle("acct-ws", createBotWsHandle({ sendMarkdown, sendTemplateCard }));
+
+      await expect(
+        wecomOutbound.sendText({
+          cfg: wsCfg(),
+          accountId: "acct-ws",
+          to: "user:lisi",
+          text: '打分\n```json\n{"card_type":"vote_interaction","title":"打分"}\n```',
+        } as any),
+      ).rejects.toThrow(/missing required field "checkbox"; nothing was sent/);
+      expect(sendTemplateCard).not.toHaveBeenCalled();
+      expect(sendMarkdown).not.toHaveBeenCalled();
+    });
+
+    it("does not send the text when the card push is refused", async () => {
+      const runtime = await import("./runtime.js");
+      const sendMarkdown = vi.fn().mockResolvedValue(undefined);
+      const sendTemplateCard = vi
+        .fn()
+        .mockRejectedValue(new Error("WeCom template card push failed: errcode=93017 errmsg=x"));
+      runtime.registerBotWsPushHandle("acct-ws", createBotWsHandle({ sendMarkdown, sendTemplateCard }));
+
+      await expect(
+        wecomOutbound.sendText({
+          cfg: wsCfg(),
+          accountId: "acct-ws",
+          to: "user:lisi",
+          text: surveyText,
+        } as any),
+      ).rejects.toThrow(/errcode=93017.*\(nothing was sent\)/);
+      expect(sendMarkdown).not.toHaveBeenCalled();
+    });
+
+    it("keeps the old markdown behaviour when proactiveTemplateCards is off", async () => {
+      const runtime = await import("./runtime.js");
+      const sendMarkdown = vi.fn().mockResolvedValue(undefined);
+      const sendTemplateCard = vi.fn().mockResolvedValue(undefined);
+      runtime.registerBotWsPushHandle("acct-ws", createBotWsHandle({ sendMarkdown, sendTemplateCard }));
+
+      await wecomOutbound.sendText({
+        cfg: wsCfg({ proactiveTemplateCards: false }),
+        accountId: "acct-ws",
+        to: "user:lisi",
+        text: surveyText,
+      } as any);
+
+      expect(sendTemplateCard).not.toHaveBeenCalled();
+      // Old path: the whole text, JSON included, goes out as markdown.
+      expect(sendMarkdown).toHaveBeenCalledTimes(1);
+      expect(sendMarkdown.mock.calls[0]?.[1]).toContain('"card_type":"vote_interaction"');
+    });
+
+    it("leaves ordinary JSON code blocks alone", async () => {
+      const runtime = await import("./runtime.js");
+      const sendMarkdown = vi.fn().mockResolvedValue(undefined);
+      const sendTemplateCard = vi.fn().mockResolvedValue(undefined);
+      runtime.registerBotWsPushHandle("acct-ws", createBotWsHandle({ sendMarkdown, sendTemplateCard }));
+      const text = '配置示例：\n```json\n{"card_type":"not_a_card","a":1}\n```';
+
+      await wecomOutbound.sendText({
+        cfg: wsCfg(),
+        accountId: "acct-ws",
+        to: "user:lisi",
+        text,
+      } as any);
+
+      expect(sendTemplateCard).not.toHaveBeenCalled();
+      expect(sendMarkdown).toHaveBeenCalledTimes(1);
+      expect(sendMarkdown.mock.calls[0]?.[1]).toContain('"card_type":"not_a_card"');
+    });
+
+    it("refuses cards on the Agent API path instead of sending raw JSON", async () => {
+      const runtime = await import("./runtime.js");
+      const api = await import("./transport/agent-api/core.js");
+      (api.sendText as any).mockClear();
+      const sendTemplateCard = vi.fn().mockResolvedValue(undefined);
+      runtime.registerBotWsPushHandle("acct-ws", createBotWsHandle({ sendTemplateCard }));
+
+      await expect(
+        wecomOutbound.sendText({
+          cfg: wsCfg(),
+          accountId: "acct-ws",
+          to: "wecom-agent:acct-ws:user:lisi",
+          text: surveyText,
+        } as any),
+      ).rejects.toThrow(/only be pushed over Bot WS/);
+      expect(sendTemplateCard).not.toHaveBeenCalled();
+      expect(api.sendText).not.toHaveBeenCalled();
+    });
+
+    it("refuses cards when the live runtime cannot push them", async () => {
+      const runtime = await import("./runtime.js");
+      const sendMarkdown = vi.fn().mockResolvedValue(undefined);
+      runtime.registerBotWsPushHandle("acct-ws", createBotWsHandle({ sendMarkdown }));
+
+      await expect(
+        wecomOutbound.sendText({
+          cfg: wsCfg(),
+          accountId: "acct-ws",
+          to: "user:lisi",
+          text: surveyText,
+        } as any),
+      ).rejects.toThrow(/cannot push template cards/);
+      expect(sendMarkdown).not.toHaveBeenCalled();
+    });
+  });
+
   it("keeps agent-source sessions on the Agent text path even when ws is primary", async () => {
     const { wecomOutbound } = await import("./outbound.js");
     const runtime = await import("./runtime.js");

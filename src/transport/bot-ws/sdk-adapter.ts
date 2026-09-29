@@ -3,6 +3,7 @@ import AiBot, {
   generateReqId,
   type BaseMessage,
   type EventMessage,
+  type TemplateCard,
   type WsFrame,
 } from "@wecom/aibot-node-sdk";
 import type { WecomAccountRuntime } from "../../app/account-runtime.js";
@@ -11,7 +12,11 @@ import {
   unregisterBotWsPushHandle,
   type BotWsPushHandle,
 } from "../../app/index.js";
-import { updateTemplateCardOnEvent } from "../../capability/card/manager.js";
+import {
+  buildTemplateCardMessageBody,
+  saveTemplateCardToCache,
+  updateTemplateCardOnEvent,
+} from "../../capability/card/manager.js";
 import { clearWecomMcpAccountCache } from "../../capability/mcp/index.js";
 import { PLUGIN_VERSION } from "../../version.js";
 import type { ReplyHandle, RuntimeLogSink, UnifiedInboundEvent } from "../../types/index.js";
@@ -318,6 +323,31 @@ export class BotWsSdkAdapter {
           lastError: result.ok ? undefined : result.error,
         });
         return result;
+      },
+      sendTemplateCard: async ({ chatId, chatType, templateCard }) => {
+        const card = templateCard as unknown as TemplateCard;
+        let lastError: string | undefined;
+        try {
+          await client.sendMessage(chatId, buildTemplateCardMessageBody(card, chatType));
+          saveTemplateCardToCache(this.runtime.account.accountId, card);
+        } catch (error) {
+          // The SDK rejects a non-zero ack with the raw frame, not an Error.
+          const ack = error as { errcode?: unknown; errmsg?: unknown } | undefined;
+          lastError =
+            error instanceof Error
+              ? error.message
+              : `errcode=${String(ack?.errcode ?? "unknown")} errmsg=${String(ack?.errmsg ?? "")}`;
+          throw new Error(`WeCom template card push failed: ${lastError}`);
+        } finally {
+          this.runtime.touchTransportSession("bot-ws", {
+            ownerId: this.ownerId,
+            running: true,
+            connected: client.isConnected,
+            authenticated: client.isConnected,
+            lastOutboundAt: Date.now(),
+            lastError,
+          });
+        }
       },
     };
     this.pushHandle = pushHandle;

@@ -256,6 +256,21 @@ export function describeTemplateCardEvent(params: {
 }
 
 /**
+ * `aibot_send_msg` 的卡片消息体。回复链路与主动出口共用，两边的 chat_type
+ * 语义必须一致：不写的话企微会先按群聊猜。
+ */
+export function buildTemplateCardMessageBody(
+  templateCard: TemplateCard,
+  chatType: "group" | "direct",
+): Parameters<WSClient["sendMessage"]>[1] {
+  return {
+    msgtype: "template_card",
+    template_card: templateCard,
+    chat_type: chatType === "group" ? 2 : 1,
+  } as Parameters<WSClient["sendMessage"]>[1];
+}
+
+/**
  * 主动推送已抽出的卡片。
  *
  * 单张失败不阻塞其余卡片，也不阻塞正文投递：卡片是回复的附加形态，
@@ -279,11 +294,10 @@ export async function sendTemplateCards(params: {
     }
     const templateCard = card.cardJson as unknown as TemplateCard;
     try {
-      await params.client.sendMessage(params.chatId, {
-        msgtype: "template_card",
-        template_card: templateCard,
-        chat_type: params.chatType === "group" ? 2 : 1,
-      } as Parameters<WSClient["sendMessage"]>[1]);
+      await params.client.sendMessage(
+        params.chatId,
+        buildTemplateCardMessageBody(templateCard, params.chatType),
+      );
       sent += 1;
       saveTemplateCardToCache(params.accountId, templateCard);
       console.info(

@@ -54,6 +54,12 @@ export type WecomBotConfig = {
   primaryTransport?: WecomBotPrimaryTransport;
   streamPlaceholderContent?: string;
   welcomeText?: string;
+  /**
+   * 主动出口（`message` 工具、cron announce）是否把正文里的模板卡片代码块当
+   * 卡片推送。默认开启；设为 `false` 回到旧行为——整段按 markdown 发送。
+   * 回复链路的卡片不受此开关影响。
+   */
+  proactiveTemplateCards?: boolean;
   dm?: WecomDmConfig;
   /**
    * Deprecated compatibility fields kept only while old webhook helpers are

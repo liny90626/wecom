@@ -49,6 +49,8 @@ export interface BotConfig {
   primaryTransport?: "ws" | "webhook";
   streamPlaceholderContent?: string;
   welcomeText?: string;
+  /** 主动出口是否把模板卡片代码块推成卡片，默认 true。 */
+  proactiveTemplateCards?: boolean;
   dm?: DmConfig;
   aibotid?: string;
   botIds?: string[];

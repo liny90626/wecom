@@ -50,6 +50,7 @@ vi.mock("@wecom/aibot-node-sdk", () => ({
 
 import { BotWsSdkAdapter } from "./sdk-adapter.js";
 import { getBotWsPushHandle, unregisterBotWsPushHandle } from "../../app/index.js";
+import { getTemplateCardFromCache } from "../../capability/card/manager.js";
 import { WecomGatewaySim } from "../../test-utils/wecom-gateway-sim.js";
 
 const waitForAsyncCallbacks = async () => {
@@ -1761,6 +1762,61 @@ describe("BotWsSdkAdapter", () => {
     expect(calls[0]?.[1]).toMatchObject({ chat_type: 1, markdown: { content: "direct push" } });
     expect(calls[1]?.[1]).toMatchObject({ chat_type: 2, markdown: { content: "group push" } });
     expect(calls[2]?.[1]).not.toHaveProperty("chat_type");
+  });
+
+  it("pushes a template card with the conversation kind and caches it for the click callback", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-card",
+        bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+    const handle = getBotWsPushHandle("acc-card");
+    const templateCard = {
+      card_type: "vote_interaction",
+      task_id: "task_qa_1",
+      main_title: { title: "打分" },
+      checkbox: { question_key: "q", option_list: [{ id: "s1", text: "1 分" }] },
+    };
+
+    await handle?.sendTemplateCard?.({ chatId: "user-1", chatType: "direct", templateCard });
+
+    const call = sdkMockState.client?.sendMessage.mock.calls.at(-1);
+    expect(call?.[0]).toBe("user-1");
+    expect(call?.[1]).toMatchObject({ msgtype: "template_card", chat_type: 1, template_card: templateCard });
+    expect(getTemplateCardFromCache("acc-card", "task_qa_1")).toMatchObject({ task_id: "task_qa_1" });
+  });
+
+  it("turns a rejected template card ack frame into a readable error", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-card-fail",
+        bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
+      },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+    const handle = getBotWsPushHandle("acc-card-fail");
+    sdkMockState.client?.sendMessage.mockRejectedValueOnce({ errcode: 93017, errmsg: "no session" });
+
+    await expect(
+      handle?.sendTemplateCard?.({
+        chatId: "chat-1",
+        chatType: "group",
+        templateCard: { card_type: "vote_interaction", task_id: "task_qa_2" },
+      }),
+    ).rejects.toThrow(/errcode=93017 errmsg=no session/);
+    expect(getTemplateCardFromCache("acc-card-fail", "task_qa_2")).toBeUndefined();
   });
 
   it("回复企微的版本握手事件，而不是拿它跑一轮 agent", async () => {

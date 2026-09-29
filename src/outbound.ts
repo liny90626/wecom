@@ -3,6 +3,11 @@ import type { ResolvedAgentAccount } from "./types/account.js";
 import { WecomAgentDeliveryService } from "./capability/agent/index.js";
 import { WecomUpstreamAgentDeliveryService } from "./capability/agent/upstream-delivery-service.js";
 import {
+  containsTemplateCardBlock,
+  planProactiveTemplateCards,
+  type ExtractedTemplateCard,
+} from "./capability/card/parser.js";
+import {
   resolveWecomMergedMediaLocalRoots,
   resolveWecomMediaMaxBytes,
   resolveWecomAccount,
@@ -365,6 +370,8 @@ async function sendTextViaBotWs(params: {
   to: string | undefined;
   text: string;
   sessionKey?: string | null;
+  /** 先于正文推送的模板卡片；卡片被拒时正文不发，重试不会让用户收到两遍提示语。 */
+  cards?: ExtractedTemplateCard[];
 }): Promise<boolean> {
   const { preferred, accountId } = shouldPreferBotWsOutbound(params);
   if (!preferred) {
@@ -388,7 +395,34 @@ async function sendTextViaBotWs(params: {
       `WeCom outbound account=${accountId} is configured for Bot WS active push, but the WS transport is not connected.`,
     );
   }
-  const markdownChunks = chunkWeComMarkdownV2(params.text);
+  const cards = params.cards ?? [];
+  if (cards.length > 0) {
+    const sendTemplateCard = handle.sendTemplateCard;
+    if (!sendTemplateCard) {
+      throw new Error(
+        `WeCom outbound account=${accountId}: the live WS runtime cannot push template cards. Nothing was sent.`,
+      );
+    }
+    const chatType = resolveOutboundPeer({ to: params.to, accountId })?.peerKind ?? "direct";
+    for (const [index, card] of cards.entries()) {
+      try {
+        await sendTemplateCard({ chatId, chatType, templateCard: card.cardJson });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          index > 0
+            ? `${reason} (${index} of ${cards.length} cards were already sent; the text was not sent)`
+            : `${reason} (nothing was sent)`,
+        );
+      }
+      console.log(
+        `[wecom-outbound] Sent Bot WS template card to chatId=${chatId} taskId=${String(card.cardJson.task_id)}`,
+      );
+    }
+  }
+  // 整条消息就是卡片时没有剩余正文，不能再推一条空 markdown。
+  const markdownChunks =
+    cards.length > 0 && !params.text.trim() ? [] : chunkWeComMarkdownV2(params.text);
   console.log(
     `[wecom-outbound] Sending Bot WS active message to target=${String(params.to ?? "")} chatId=${chatId} (chunks=${markdownChunks.length})`,
   );
@@ -409,6 +443,13 @@ async function sendTextViaBotWs(params: {
   });
   console.log(`[wecom-outbound] Successfully sent Bot WS active message to ${chatId}`);
   return true;
+}
+
+function isProactiveTemplateCardsEnabled(params: {
+  cfg: WecomOutboundConfig;
+  accountId?: string | null;
+}): boolean {
+  return resolveOutboundAccountOrThrow(params).bot?.config.proactiveTemplateCards !== false;
 }
 
 async function sendMediaViaBotWs(params: {
@@ -548,11 +589,23 @@ export const wecomOutbound: ChannelOutboundAdapter = {
     let sentViaBotWs = false;
     let agent: ReturnType<typeof resolveAgentConfigOrThrow> | null = null;
     let upstreamTarget: ReturnType<typeof resolveUpstreamTarget> | undefined;
+    let cardPlan: ReturnType<typeof planProactiveTemplateCards>;
 
     try {
       // 首先检查是否是上下游用户
       upstreamTarget = resolveUpstreamTarget({ to, cfg, accountId, sessionKey });
-      
+
+      // 正文里带模板卡片代码块：推成卡片，不再整段当 markdown 发出裸 JSON。
+      cardPlan =
+        containsTemplateCardBlock(outgoingText) && isProactiveTemplateCardsEnabled({ cfg, accountId })
+          ? planProactiveTemplateCards(outgoingText)
+          : undefined;
+      if (cardPlan && upstreamTarget) {
+        throw new Error(
+          `WeCom template cards cannot be pushed to upstream-corp users (target=${String(to ?? "")}). Nothing was sent; send the content as plain text instead.`,
+        );
+      }
+
       if (upstreamTarget) {
         logOutboundDecision({
           phase: "sendText:path-upstream",
@@ -584,9 +637,16 @@ export const wecomOutbound: ChannelOutboundAdapter = {
         cfg,
         accountId,
         to,
-        text: outgoingText,
+        text: cardPlan ? cardPlan.remainingText : outgoingText,
         sessionKey,
+        cards: cardPlan?.cards,
       });
+      if (!sentViaBotWs && cardPlan) {
+        // Agent API 路径的卡片回调落在另一条通道上，点了也回不到这个会话。
+        throw new Error(
+          `WeCom template cards can only be pushed over Bot WS, but target=${String(to ?? "")} is not delivered through Bot WS. Nothing was sent; send the content as plain text instead.`,
+        );
+      }
       if (!sentViaBotWs) {
         // Defer Agent resolution until needed for fallback
         agent = resolveAgentConfigOrThrow({ cfg, accountId });
@@ -624,6 +684,14 @@ export const wecomOutbound: ChannelOutboundAdapter = {
       throw err;
     }
 
+    if (cardPlan) {
+      // task_id 带回给调用方：解析器会给它追加时间戳，台账只能以这里为准。
+      return {
+        channel: "wecom",
+        messageId: `bot-ws-card-${cardPlan.cards.map((card) => String(card.cardJson.task_id)).join(",")}`,
+        timestamp: Date.now(),
+      };
+    }
     return {
       channel: "wecom",
       messageId: `${sentViaBotWs ? "bot-ws" : "agent"}-${Date.now()}`,

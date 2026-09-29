@@ -37,6 +37,9 @@ const WECOM_TEMPLATE_CARD_GUIDANCE = [
   "其中 card_type 字段标明卡片类型（text_notice / news_notice / button_interaction /",
   "vote_interaction / multiple_interaction）。插件会自动提取该代码块、作为企业微信卡片消息发送，",
   "并把它从正文中移除；代码块之外的文字照常作为普通回复发送。详见 wecom-send-template-card 技能。",
+  "主动发起的消息（message 工具、定时提醒）同样支持：把同样的 ```json 代码块放进 message 的正文即可，",
+  "插件会先推卡片、再发其余文字；返回的 messageId 形如 bot-ws-card-<task_id>。发送失败时工具会报错且什么都不发，",
+  "按报错修正卡片后重试，不要把卡片 JSON 改成普通文本发给用户。",
   "不要调用 wecom-cli 或其他工具发送卡片。",
 ].join("\n");
 

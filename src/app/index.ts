@@ -36,6 +36,15 @@ export type BotWsPushHandle = {
     rejectReason?: string;
     error?: string;
   }>;
+  /**
+   * 主动推一张模板卡片（`aibot_send_msg`），并登记进卡片缓存，好让点击回调
+   * 能把卡片改成「已提交」。可选：旧的测试替身与非 WS 运行时没有它。
+   */
+  sendTemplateCard?: (params: {
+    chatId: string;
+    chatType: "direct" | "group";
+    templateCard: Record<string, unknown>;
+  }) => Promise<void>;
 };
 
 function normalizeOptional(value: string | null | undefined): string | undefined {

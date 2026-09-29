@@ -403,3 +403,30 @@ export function maskTemplateCardBlocks(text: string): string {
 export function containsTemplateCardBlock(text: string): boolean {
   return text.includes("```") && CARD_TYPE_KEYWORD_RE.test(text);
 }
+
+/**
+ * 主动出口（`message` 工具、cron announce）的卡片抽取。
+ *
+ * 与回复链路不同，这里不容忍坏卡片：回复链路里卡片是附加形态，丢一张还有正文；
+ * 主动出口多半整条消息就是这张卡片（回访评分），缺字段时发出去的要么是被企微
+ * 拒掉的空气，要么是裸 JSON。所以一张不合格就整条拒绝，把原因抛回给调用方。
+ *
+ * 没有合法卡片代码块时返回 undefined，调用方照旧按文本发送。
+ */
+export function planProactiveTemplateCards(
+  text: string,
+): TemplateCardExtractionResult | undefined {
+  const extraction = extractTemplateCards(text);
+  if (extraction.cards.length === 0) {
+    return undefined;
+  }
+  for (const card of extraction.cards) {
+    const missing = missingCoreFields(card.cardJson);
+    if (missing) {
+      throw new Error(
+        `WeCom template card (${card.cardType}) is missing required field "${missing}"; nothing was sent.`,
+      );
+    }
+  }
+  return extraction;
+}

@@ -1,12 +1,13 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-09-12（3.0.0-11）
+> 最后更新：2026-09-29（3.0.0-12）
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
-- 当前发布版本 **3.0.0-11**（同版本号重新发布，tag 已移动）：现网 3.0.0-10 两条反馈的修复（「新指令冲突」通知只在核心确有活跃 run 时发出、空正文仅思考的 final 改发「本轮没有生成正文回复」、通知类 final 不再追加标记，见 2.-11）+ 对 3.0.0-7 至 -10 的审核跟进（见 2.-10）。生产 OpenClaw 为 `2026.7.1-2`，现网在 3.0.0-10；-11 待部署验收。
+- 当前发布版本 **3.0.0-12**：主动出口（`message` 工具、cron announce）支持模板卡片，不再把卡片 JSON 当 markdown 发出（见 2.-12），现网验收通过。
+- 上一版 **3.0.0-11**（同版本号重新发布，tag 已移动）：现网 3.0.0-10 两条反馈的修复（「新指令冲突」通知只在核心确有活跃 run 时发出、空正文仅思考的 final 改发「本轮没有生成正文回复」、通知类 final 不再追加标记，见 2.-11）+ 对 3.0.0-7 至 -10 的审核跟进（见 2.-10）。生产 OpenClaw 为 `2026.7.1-2`，现网在 3.0.0-10；-11 待部署验收。
 - 3.0.0-5、3.0.0-v1、3.0.0-v2 均已取代或撤回，相关 tag 已删除，不要安装；历史说明保留在 changelog 文件中。
 - **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。三个候选 tag 已删除，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
 - 上游 `YanHaidao/wecom` 与官方 `WecomTeam/wecom-openclaw-plugin` 的对账基线：官方 HEAD `3b1cbe3`（2026.8.17）此后无新提交；`npm run upstream:check` 可随时复核（只读 `official` 远端）。
@@ -36,8 +37,9 @@
 
 ### 当前 Git 状态
 
-- 发布分支：main。3.0.0-11 的内容提交：`e728924`（空流收尾改收「（回复完毕）」）、`506f71a`（测试修正）、`eaa2d5d`（审核文档）、`744f1bb`（首次发版提交）、`d7446ac`（现网通知修复，见 2.-11）；重新发版提交见 tag `released/3.0.0-11`（已从 744f1bb 移动）。
-- 发布节点以 `released/3.0.0-11` 为准；上一个已发布节点为 `released/3.0.0-10`（`816b9bb`）。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返。
+- 发布分支：main。3.0.0-12 = 功能提交 + 发版提交（开发分支 `claude/determined-volta-4z4i1m` 压缩合入后已删除），发布节点见 tag `released/3.0.0-12`。
+- 3.0.0-11 的内容提交：`e728924`（空流收尾改收「（回复完毕）」）、`506f71a`（测试修正）、`eaa2d5d`（审核文档）、`744f1bb`（首次发版提交）、`d7446ac`（现网通知修复，见 2.-11）；重新发版提交见 tag `released/3.0.0-11`（已从 744f1bb 移动）。
+- 发布节点以 `released/3.0.0-12` 为准；上一个已发布节点为 `released/3.0.0-11`（`7fc858a`）。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返。
 - 维护远端：fork = git@github.com:liny90626/wecom.git
 - 上游远端：origin = https://github.com/YanHaidao/wecom.git（v3.0.0 = 官方插件重建，见第 8 节）；官方远端：official = https://github.com/WecomTeam/wecom-openclaw-plugin.git，push URL 为 DISABLED，只供 `npm run upstream:check`
 - 允许推送的目标只有 fork；禁止向 origin 推送。
@@ -55,13 +57,22 @@
 
 ### 发布状态
 
-- 当前版本号 `3.0.0-11`，包文件为 `yanhaidao-wecom-3.0.0-11.tgz`；本次发布不代表部署生产。
-- `released/3.0.0-6` 至 `released/3.0.0-10` 已推送 fork；本次发布 tag 为 `released/3.0.0-11`。
+- 当前版本号 `3.0.0-12`，包文件为 `yanhaidao-wecom-3.0.0-12.tgz`，与现网验收包逐字节一致（SHA-256 `9a247864…deea4`）。
+- `released/3.0.0-6` 至 `released/3.0.0-11` 已推送 fork；本次发布 tag 为 `released/3.0.0-12`。
 - `released/3.0.0-5`、`released/3.0.0-v1`、`released/3.0.0-v2` 已从本地与 fork 删除。
 - 版本规则：`3.0.0-<构建号>`，构建号递增；tag `released/<版本>`；只推 fork。
 - origin 停在 `133773f`（上游 v3.0.0，2026-09-05 对账，见第 8 节），无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-12 主动出口发模板卡片（3.0.0-12）
+
+答疑回访需要 agent 主动推评分卡片。现网：回复轮里输出卡片代码块能收到卡片，主动发起（定时提醒、`message` 工具）收到裸 JSON。根因在插件：卡片抽取只接在 `reply.ts` 的 final 收尾，主动出口 `wecomOutbound.sendText` 整段按 markdown 发。企微侧无障碍——回复轮发卡本来就用 `aibot_send_msg` 主动推送命令。
+
+- 改法：`sendText` 仅当正文含卡片代码块时读开关 `bot.proactiveTemplateCards`（默认开）并调 `planProactiveTemplateCards`（parser.ts，复用 `extractTemplateCards` + `missingCoreFields`，坏卡片整条抛错）；卡片作为 `cards` 参数交给已有的 `sendTextViaBotWs`，在同一套路由与连接检查之后先推卡片、再发剩余正文。推送句柄新增可选 `sendTemplateCard`（sdk-adapter.ts：带 chat_type、成功后入卡片缓存、把 SDK 以原始回执帧 reject 的错误转成 `errcode=… errmsg=…`）。非 Bot WS / 上下游目标一律抛错不降级。`messageId` = `bot-ws-card-<task_id>`。不含卡片的消息路径逐行不变；回复轮发卡只把消息体构造抽成共用的 `buildTemplateCardMessageBody`。
+- 现网首轮验收失败的原因是**围栏丢失**，不是代码：验证指令经企微窗口转发时 ```json 被客户端渲染掉，agent 发出的是裸 JSON（`textLen=302`，带围栏约 313，且没有「代码（json）：」改写痕迹）。按文字描述围栏重发后验收通过。是否放宽到识别裸 JSON 对象未做，需用户决定。
+- 已知限制：核心 20480 字节预分片可能切开超长正文里的卡片块；卡片缓存仍只在进程内，重启后旧卡片不变「已提交」、可重复提交，台账按 task_id + 用户去重；卡片已发、正文失败且核心重试时会以新 task_id 再发一张（极窄窗口）。
+- 回归：outbound.test.ts「proactive template cards」9 例、sdk-adapter.test.ts 2 例。
 
 ### 2.-11 现网 -10 反馈：「新指令冲突」与裸「（回复完毕）」（3.0.0-11）
 
@@ -343,6 +354,14 @@ src/transport/bot-ws/sdk-adapter.ts
 
 ## 7. 当前验证证据
 
+### 3.0.0-12 发布验证（2026-09-29）
+
+- 现网验收：account=knowledge，`message` 工具主动发送「提示语 + ```json 卡片」，收到可点卡片。
+- tsc 0 错误；diff check；B1 / B2 / B3 READY。全量 Vitest 在 Node 24.21.0 下 66 文件 / 880 通过（Node 22.22.2 下 8 个真实 dispatcher 用例因 OpenClaw 拒绝其内置 SQLite 失败，main 同样失败）。
+- `npm run compat:check -- 2026.7.1-2 2026.9.4`（Node 24.21.0）：两版 typecheck PASS，各 66 个文件 / 880 个用例 PASS（9.x 沿用 file-access-runtime 类型 shim）。
+- 两次 `npm pack` 一致且等于验收包：258 个文件、622,196 bytes，SHA-256 `9a2478641d4a42fcbb0e6f34086098a771960a109d5ce83649bb406b344deea4`，npm shasum `2c0b7ca34984e7bdaaf8b430137dafae1f6c0ec4`。
+- 7.1-2 隔离安装（Node 24）：`config validate` PASS（含 `bot.proactiveTemplateCards`）、`plugins inspect --runtime` 3.0.0-12 / loaded / diagnostics=[]。
+
 ### 3.0.0-11 发布验证（2026-09-12）
 
 - 重新发布（含 2.-11 现网修复）：定向 357 个通过；tsc 0 错误；全量 Vitest **threads pool** 单 worker 66 文件 / 869 通过（此前该命令下 media「expands ~」必红，已修）；media.test.ts 在 forks pool 下 6 / 6 亦通过。
@@ -503,6 +522,8 @@ npx vitest run \
 | 点选后 agent 回复里选项显示成 `b` 而不是「饭」 | 卡片缓存缺失（进程重启过），按设计退回原始 id，不是 bug。 |
 | 正文出现「⚠️ 有 N 张卡片消息发送失败。」 | 卡片被企微拒绝。同一行日志 `[wecom-card] send-failed` 有原始错误。 |
 | 日志有 `send-skipped … reason=missing-<field>` | 模型给的卡片缺核心字段（button_list / checkbox / select_list），插件补不出来，按设计不发。 |
+
+**主动发卡（3.0.0-12 起）**：`message` 工具正文里放同样的 ```json 代码块即可；成功的日志是 `[wecom-outbound] Sent Bot WS template card … taskId=…` 与 `sendText:path-bot-ws-card`，返回 `bot-ws-card-<task_id>`。只看到 `sendText:path-bot-ws` 而没有卡片行，先查正文里有没有围栏（textLen 比带围栏的长度少约 12）。
 
 注意企微要求收到 template_card_event 后**5 秒内**回复才能更新卡片，排查更新问题时先看这条链路有没有被别的耗时操作堵住。
 

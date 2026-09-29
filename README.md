@@ -21,7 +21,7 @@ Fork 维护与修复贡献：**LinKy**
 
 ## Fork 修改说明
 
-本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-11`，生产基线为 OpenClaw `2026.7.1-2`；版本规则为 `3.0.0-<构建号>`。
+本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-12`，生产基线为 OpenClaw `2026.7.1-2`；版本规则为 `3.0.0-<构建号>`。
 
 维护重点：Bot WS 长任务可靠投递（合并接管、ACK/流窗口兜底、分片与去重）、Bot/Agent 双通道、多账号隔离、企业微信协作能力，以及媒体白名单、运行时上下文围栏和生产配置回归。上游官方仓库是独立架构重建，本 fork 只移植经过验证的改动，不整树替换。版本详情见 [`changelog/`](./changelog/)。
 
@@ -316,6 +316,10 @@ npm run compat:check   # 对 2026.7.1-2 与最新稳定版各跑一遍 typecheck
 ## 📋 本 fork 近期更新
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
+
+#### 📌 3.0.0-12（2026-09-29，LinKy fork）
+
+主动发起的消息（`message` 工具、定时提醒 / cron announce）现在能发模板卡片：正文里的 ```json 卡片代码块会被推成可点卡片，其余文字照常发送；此前这条路径整段按 markdown 发出，用户看到裸 JSON。卡片不合格、会话不走 Bot WS 或企微拒收时整条报错、什么都不发。新增开关 `bot.proactiveTemplateCards`（默认开启），关闭即回到旧行为；回复轮发卡不受影响。详见 [`changelog/v3.0.0-12.md`](./changelog/v3.0.0-12.md)。
 
 #### 📌 3.0.0-11（2026-09-12，LinKy fork）
 

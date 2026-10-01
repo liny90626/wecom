@@ -4,6 +4,8 @@
 
 ## 本 fork 维护版本
 
+- [`3.0.0-13`](./v3.0.0-13.md)（发布 tag `released/3.0.0-13`）：生产升级 OpenClaw 2026.9.7 的兼容修复（`onTurnAdopted` 被删导致的重发与假通知、`infra-runtime` 待删除、附件 `media` 字段、9.7 测试隔离），移植官方 9.15 `wecomcli-doc` / `wecomcli-sheet` 新建流程，开发基线改为 9.7、7.1-2 作兼容底线。
+
 - [`3.0.0-12`](./v3.0.0-12.md)（发布 tag `released/3.0.0-12`，已推送；现网验收通过）：主动出口（`message` 工具、cron announce）支持模板卡片，不再发出裸 JSON；新增开关 `bot.proactiveTemplateCards`（默认开启）。
 
 - [`3.0.0-11`](./v3.0.0-11.md)（发布 tag `released/3.0.0-11`，已推送 `fork`；同版本号重新发布，tag 已移动）：现网 -10 反馈修复——「新指令冲突」通知只在核心确有活跃 run 时发出，否则改为「消息没有被处理，请重新发送」；空正文 + 仅思考的 final 改发「本轮没有生成正文回复」；通知类 final 不再追加「（回复完毕）」。审核跟进——空流收尾改收「（回复完毕）」；`~` 媒体用例与 Vitest pool 解耦；deferred 媒体用例补顺序断言；记录 reasoning 合并与单个 `~` 两项「不改」结论。

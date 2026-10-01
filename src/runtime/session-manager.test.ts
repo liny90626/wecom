@@ -100,6 +100,55 @@ describe("prepareInboundSession", () => {
     expect(result.ctx.Surface).toBe("wecom");
   });
 
+  it("sends canonical media facts next to the legacy media fields", async () => {
+    getPeerContextToken.mockReturnValue("ctx-bot");
+    const { core, finalizeInboundContext } = createCore();
+    const mediaService = {
+      normalizeFirstAttachment: vi.fn(async () => ({ contentType: "application/pdf" })),
+      saveInboundAttachment: vi.fn(async () => "/tmp/spec.pdf"),
+    } as any;
+
+    await prepareInboundSession({
+      core,
+      cfg: {} as any,
+      event: {
+        accountId: "default",
+        transport: "bot-ws",
+        messageId: "msg-bot-media",
+        conversation: { peerKind: "direct", peerId: "HiDaoMax", senderId: "HiDaoMax" },
+        text: "看下附件",
+      } as any,
+      mediaService,
+    });
+
+    expect(finalizeInboundContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        MediaPath: "/tmp/spec.pdf",
+        MediaType: "application/pdf",
+        media: [{ path: "/tmp/spec.pdf", url: "/tmp/spec.pdf", contentType: "application/pdf" }],
+      }),
+    );
+  });
+
+  it("omits canonical media facts when there is no attachment", async () => {
+    const { core, finalizeInboundContext } = createCore();
+
+    await prepareInboundSession({
+      core,
+      cfg: {} as any,
+      event: {
+        accountId: "default",
+        transport: "bot-ws",
+        messageId: "msg-bot-text",
+        conversation: { peerKind: "direct", peerId: "HiDaoMax", senderId: "HiDaoMax" },
+        text: "hello",
+      } as any,
+      mediaService: createMediaService(),
+    });
+
+    expect(finalizeInboundContext.mock.calls[0]?.[0]).not.toHaveProperty("media");
+  });
+
   it("keeps agent-callback turns on provider-only context", async () => {
     getPeerContextToken.mockReturnValue(undefined);
     const { core, finalizeInboundContext } = createCore();

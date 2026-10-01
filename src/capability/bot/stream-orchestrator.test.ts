@@ -166,6 +166,10 @@ describe("createBotStreamOrchestrator merged media", () => {
         MediaType: "application/pdf",
         MediaPaths: ["/tmp/spec.pdf", "/tmp/photo.png"],
         MediaTypes: ["application/pdf", "image/png"],
+        media: [
+          { path: "/tmp/spec.pdf", url: "/tmp/spec.pdf", contentType: "application/pdf" },
+          { path: "/tmp/photo.png", url: "/tmp/photo.png", contentType: "image/png" },
+        ],
       }),
     );
     expect(ctx.Attachments.map((attachment: { name: string }) => attachment.name)).toEqual([

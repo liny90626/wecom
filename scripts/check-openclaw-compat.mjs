@@ -3,8 +3,8 @@
  * Self-check: does this plugin still typecheck and pass its tests against
  * every OpenClaw line it claims to support?
  *
- *   node scripts/check-openclaw-compat.mjs                 # devDependency + latest
- *   node scripts/check-openclaw-compat.mjs 2026.7.1-2 2026.8.2
+ *   node scripts/check-openclaw-compat.mjs                 # devDependency + latest + floor
+ *   node scripts/check-openclaw-compat.mjs 2026.7.1-2 2026.9.7
  *
  * For each version this installs `openclaw@<version>` under
  * `~/.cache/wecom-openclaw-compat/<version>/` (cached; delete the directory
@@ -65,6 +65,9 @@ function capture(cmd, args, options = {}) {
   return result.stdout.trim();
 }
 
+/** Retired production line still kept compiling and passing as a compatibility floor. */
+const COMPAT_FLOOR = "2026.7.1-2";
+
 function resolveVersions(argv) {
   if (argv.length > 0) {
     return argv;
@@ -74,7 +77,7 @@ function resolveVersions(argv) {
     throw new Error("package.json has no openclaw devDependency to use as the baseline");
   }
   const latest = capture("npm", ["view", "openclaw", "dist-tags.latest"]);
-  return pinned === latest ? [pinned] : [pinned, latest];
+  return [...new Set([pinned, latest, COMPAT_FLOOR])];
 }
 
 function ensureInstalled(version) {

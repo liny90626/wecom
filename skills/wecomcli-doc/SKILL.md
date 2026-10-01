@@ -53,7 +53,7 @@ description: 企微 doc 内容操作技能，包含新建在线文档、导入�
 仅适用于用户**没有本地文件，需要从零开始创建doc文档**的场景，统一走「生成 `.docx` → 导入」两步流程：
 
 1. 生成 `.docx` 文件：按 [+doc-create](references/doc-create.md) 生成 `.docx` 文件。
-2. 导入为企微doc文档：使用下方「导入doc文档」接口将生成的 `.docx` 文件导入为企微doc文档。
+2. 导入为企微doc文档：使用下方「导入doc文档」接口将生成的 `.docx` 文件导入为企微doc文档。注意import导入的时候 `file_name` 应和文档标题保持一致（生成的文件名可能被规整为 `document.docx`，不要直接沿用）。
 
 ### 导入doc文档
 

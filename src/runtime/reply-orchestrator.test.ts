@@ -2599,7 +2599,9 @@ describe("dispatchRuntimeReply", () => {
     },
   );
 
-  it("settles a 9.x deliberate silent turn without retrying or reporting a failure", async () => {
+  it("does not take a 9.x silent result without a started run as acceptance", async () => {
+    // Under a group silentReply "allow" policy a refused (active-run) inbound
+    // also finalizes "silent"; only the run-start evidence proves acceptance.
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
       queuedFinal: false,
       counts: { block: 0, final: 0, tool: 0 },
@@ -2612,14 +2614,12 @@ describe("dispatchRuntimeReply", () => {
       dispatchRuntimeReply({
         core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
         cfg: {} as any,
-        session: { ctx: { SessionKey: "session-9x-silent" } } as any,
+        session: { ctx: { SessionKey: "session-9x-silent-refused" } } as any,
         replyHandle: botWsHandle(deliver, fail),
         retryFlaglessBusy: true,
       }),
-    ).resolves.toBeUndefined();
-
-    expect(deliver).toHaveBeenCalledWith({ text: "" }, { kind: "final" });
-    expect(fail).not.toHaveBeenCalled();
+    ).rejects.toMatchObject({ name: "WeComReplyBusyNotAcceptedError" });
+    expect(deliver).not.toHaveBeenCalled();
   });
 
   it("still fails a 9.x silent turn that was blocked before the agent run", async () => {

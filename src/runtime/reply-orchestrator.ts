@@ -13,10 +13,9 @@ type CompatibleReplyOptions = ReplyOptions & {
   onTurnAdopted?: () => void | Promise<void>;
 };
 type CompatibleDispatchResult = Awaited<ReturnType<DispatchReply>> & {
-  // 2026.9.x: the inbound was accepted into the session's active run.
+  // 2026.9.x: the inbound was accepted into the session's active run. Never
+  // set together with noVisibleReplyFallbackEligible.
   deferredToActiveRun?: "steer" | "followup";
-  // 2026.9.x: the turn ended silent (or blocked) on purpose.
-  deliberateSilentTerminalReply?: boolean;
 };
 
 // Progress callbacks are intentionally detached from OpenClaw's model stream,
@@ -663,8 +662,7 @@ export async function dispatchRuntimeReply(params: {
     }
     const absorbingRunSessionId = resolveActiveRunSessionId(sessionKey);
     const adoptedIntoExistingRun =
-      result.deferredToActiveRun !== undefined ||
-      (turnAdopted && !agentRunStarted && result.beforeAgentRunBlocked !== true);
+      turnAdopted && !agentRunStarted && result.beforeAgentRunBlocked !== true;
     if (
       adoptedIntoExistingRun ||
       (!agentRunStarted && result.beforeAgentRunBlocked !== true && absorbingRunSessionId)
@@ -710,7 +708,7 @@ export async function dispatchRuntimeReply(params: {
       });
       return;
     }
-    if (turnAdopted || agentRunStarted || result.deliberateSilentTerminalReply === true) {
+    if (turnAdopted || agentRunStarted) {
       // OpenClaw omits the fallback flag when the configured silent reply
       // policy allows an accepted turn to finish without visible output.
       // Keep the transport lifecycle balanced without inventing a failure.

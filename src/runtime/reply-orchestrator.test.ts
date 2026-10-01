@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WSClient } from "@wecom/aibot-node-sdk";
 
 /**
@@ -9,9 +9,18 @@ import type { WSClient } from "@wecom/aibot-node-sdk";
  * Every run gets its own directory: a store left behind by another OpenClaw
  * version fails the schema check (2026.8.x demands a migration that a
  * 2026.7.x file never had), which is exactly what a shared /tmp path produced.
+ * The directory is shared by the whole file and removed once: 2026.9.x keeps
+ * the first directory's database open for the life of the process and ignores
+ * a later OPENCLAW_STATE_DIR, so a per-test directory is deleted under it.
  */
-const freshStateDir = (label: string): string =>
-  mkdtempSync(path.join(os.tmpdir(), `wecom-openclaw-${label}-`));
+let runStateDir: string | undefined;
+const freshStateDir = (): string =>
+  (runStateDir ??= mkdtempSync(path.join(os.tmpdir(), "wecom-openclaw-reply-orchestrator-")));
+afterAll(() => {
+  if (runStateDir) rmSync(runStateDir, { recursive: true, force: true });
+});
+// The first real-dispatcher test pays the core's cold import (about 4 s on 2026.9.7).
+vi.setConfig({ testTimeout: 30_000 });
 
 const agentHarnessState = vi.hoisted(() => ({
   resolveActiveEmbeddedRunSessionId: vi.fn(),
@@ -119,7 +128,7 @@ describe("dispatchRuntimeReply", () => {
     // context would otherwise put the fenced block into the bubble and the push.
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    const stateDir = freshStateDir("runtime-context-fence");
+    const stateDir = freshStateDir();
     process.env.OPENCLAW_STATE_DIR = stateDir;
     process.env.OPENCLAW_TEST_FAST = "1";
     try {
@@ -187,7 +196,6 @@ describe("dispatchRuntimeReply", () => {
       } else {
         process.env.OPENCLAW_TEST_FAST = previousTestFast;
       }
-      rmSync(stateDir, { recursive: true, force: true });
     }
   });
 
@@ -563,7 +571,7 @@ describe("dispatchRuntimeReply", () => {
   it("keeps real commentary flowing through the real OpenClaw dispatcher", async () => {
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    const stateDir = freshStateDir("commentary-dispatcher");
+    const stateDir = freshStateDir();
     process.env.OPENCLAW_STATE_DIR = stateDir;
     process.env.OPENCLAW_TEST_FAST = "1";
     try {
@@ -643,14 +651,13 @@ describe("dispatchRuntimeReply", () => {
       } else {
         process.env.OPENCLAW_TEST_FAST = previousTestFast;
       }
-      rmSync(stateDir, { recursive: true, force: true });
     }
   });
 
   it("keeps every real-dispatcher lifecycle event out of the channel", async () => {
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    const stateDir = freshStateDir("lifecycle-dispatcher");
+    const stateDir = freshStateDir();
     process.env.OPENCLAW_STATE_DIR = stateDir;
     process.env.OPENCLAW_TEST_FAST = "1";
     try {
@@ -772,7 +779,6 @@ describe("dispatchRuntimeReply", () => {
       } else {
         process.env.OPENCLAW_TEST_FAST = previousTestFast;
       }
-      rmSync(stateDir, { recursive: true, force: true });
     }
   });
 
@@ -795,7 +801,7 @@ describe("dispatchRuntimeReply", () => {
     async (caseId, itemEvent) => {
       const previousStateDir = process.env.OPENCLAW_STATE_DIR;
       const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-      const stateDir = freshStateDir(`filtered-item-${caseId}`);
+      const stateDir = freshStateDir();
       process.env.OPENCLAW_STATE_DIR = stateDir;
       process.env.OPENCLAW_TEST_FAST = "1";
       try {
@@ -880,7 +886,6 @@ describe("dispatchRuntimeReply", () => {
         } else {
           process.env.OPENCLAW_TEST_FAST = previousTestFast;
         }
-        rmSync(stateDir, { recursive: true, force: true });
       }
     },
   );

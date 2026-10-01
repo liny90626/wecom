@@ -9,8 +9,14 @@ import type { PreparedSession } from "./session-manager.js";
 type DispatchReply = PluginRuntime["channel"]["reply"]["dispatchReplyWithBufferedBlockDispatcher"];
 type ReplyOptions = NonNullable<Parameters<DispatchReply>[0]["replyOptions"]>;
 type CompatibleReplyOptions = ReplyOptions & {
-  // Added in 2026.7.1. Older cores ignore the extra runtime option.
+  // 2026.7.1 only: 2026.9.x removed it and reports adoption on the result.
   onTurnAdopted?: () => void | Promise<void>;
+};
+type CompatibleDispatchResult = Awaited<ReturnType<DispatchReply>> & {
+  // 2026.9.x: the inbound was accepted into the session's active run.
+  deferredToActiveRun?: "steer" | "followup";
+  // 2026.9.x: the turn ended silent (or blocked) on purpose.
+  deliberateSilentTerminalReply?: boolean;
 };
 
 // Progress callbacks are intentionally detached from OpenClaw's model stream,
@@ -459,7 +465,7 @@ export async function dispatchRuntimeReply(params: {
       }
     : undefined;
 
-  let result: Awaited<ReturnType<DispatchReply>> | undefined;
+  let result: CompatibleDispatchResult | undefined;
   try {
     result = await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: session.ctx,
@@ -657,7 +663,8 @@ export async function dispatchRuntimeReply(params: {
     }
     const absorbingRunSessionId = resolveActiveRunSessionId(sessionKey);
     const adoptedIntoExistingRun =
-      turnAdopted && !agentRunStarted && result.beforeAgentRunBlocked !== true;
+      result.deferredToActiveRun !== undefined ||
+      (turnAdopted && !agentRunStarted && result.beforeAgentRunBlocked !== true);
     if (
       adoptedIntoExistingRun ||
       (!agentRunStarted && result.beforeAgentRunBlocked !== true && absorbingRunSessionId)
@@ -693,7 +700,17 @@ export async function dispatchRuntimeReply(params: {
       // accepted as an intentional silent reply.
       return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
     }
-    if (turnAdopted || agentRunStarted) {
+    if (result.deferredToActiveRun !== undefined) {
+      // 2026.9.x accepts an inbound into the active run without the fallback
+      // flag or onTurnAdopted. It was accepted: retrying would duplicate it.
+      await deliverHandoffNotice({
+        text: BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT,
+        logEvent: "dispatch-absorbed-by-active-run",
+        runSessionId: resolveActiveRunSessionId(sessionKey),
+      });
+      return;
+    }
+    if (turnAdopted || agentRunStarted || result.deliberateSilentTerminalReply === true) {
       // OpenClaw omits the fallback flag when the configured silent reply
       // policy allows an accepted turn to finish without visible output.
       // Keep the transport lifecycle balanced without inventing a failure.

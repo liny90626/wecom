@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
+import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
 import { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/media-runtime";
 
 // 默认给一个相对“够用”的上限（80MB），避免视频/较大文件频繁触发失败。

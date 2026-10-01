@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
+import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
 import { resolveWecomMediaMaxBytes, resolveWecomMergedMediaLocalRoots } from "./media.js";
 
 describe("resolveWecomMergedMediaLocalRoots", () => {

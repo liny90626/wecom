@@ -5,17 +5,17 @@ import { describe, expect, it } from "vitest";
 
 /**
  * Every `openclaw/…` module the plugin imports must exist in BOTH OpenClaw
- * lines this plugin supports: 2026.7.1-2 and the current 2026.8.x. OpenClaw
+ * lines this plugin supports: 2026.9.7 (production) and 2026.7.1-2. OpenClaw
  * 2026.8.1 removed the root barrel `openclaw/plugin-sdk` together with some
  * fifty subpaths, and a plugin importing any of them no longer loads at all.
  *
- * This list was checked against both export maps on 2026-09-02. Add a subpath
+ * This list was checked against both export maps on 2026-10-01. Add a subpath
  * only after confirming it in `node_modules/openclaw/package.json#exports` of
  * BOTH versions (`npm view openclaw@<version> exports` works too).
  *
- * `infra-runtime` is deprecated upstream (removal target 2026-09-01, still
- * shipped in 2026.8.2) and kept only for `resolvePreferredOpenClawTmpDir`,
- * whose focused home (`file-access-runtime`) does not exist in 2026.7.1-2.
+ * `infra-runtime` is gone from this list: 2026.9.7 marks it removal-pending
+ * after 2026-10-01. Its one helper, `resolvePreferredOpenClawTmpDir`, comes
+ * from `temp-path`, which both 2026.7.1-2 and 2026.9.7 export.
  */
 const ALLOWED_OPENCLAW_MODULES = new Set([
   "openclaw/plugin-sdk/agent-harness",
@@ -25,13 +25,12 @@ const ALLOWED_OPENCLAW_MODULES = new Set([
   "openclaw/plugin-sdk/config-contracts",
   "openclaw/plugin-sdk/core",
   "openclaw/plugin-sdk/error-runtime",
-  "openclaw/plugin-sdk/file-access-runtime",
-  "openclaw/plugin-sdk/infra-runtime",
   "openclaw/plugin-sdk/media-runtime",
   "openclaw/plugin-sdk/reply-runtime",
   "openclaw/plugin-sdk/routing",
   "openclaw/plugin-sdk/runtime-env",
   "openclaw/plugin-sdk/setup",
+  "openclaw/plugin-sdk/temp-path",
 ]);
 
 const IMPORT_RE = /(?:from\s*|import\s*\(\s*|require\s*\(\s*)"(openclaw(?:\/[^"]*)?)"/g;

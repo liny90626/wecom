@@ -32,22 +32,11 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cacheRoot = path.join(os.homedir(), ".cache", "wecom-openclaw-compat");
 const pkg = JSON.parse(fs.readFileSync(path.join(repo, "package.json"), "utf8"));
 
-/** Ambient declarations for subpaths whose 2026.8.x packages ship no .d.ts. */
-const TYPE_SHIMS = {
-  "openclaw/plugin-sdk/file-access-runtime": `
-declare module "openclaw/plugin-sdk/file-access-runtime" {
-  export function readLocalFileFromRoots(options: {
-    filePath: string;
-    roots: readonly string[];
-    label?: string;
-    maxBytes?: number;
-    symlinks?: "reject" | "follow-within-root";
-    hardlinks?: "reject" | "allow";
-    nonBlockingRead?: boolean;
-  }): Promise<{ buffer: Buffer; realPath: string; root: string } | null>;
-}
-`,
-};
+/**
+ * Ambient declarations for imported subpaths whose package ships no .d.ts.
+ * Empty since the plugin stopped importing `file-access-runtime` (3.0.0-6).
+ */
+const TYPE_SHIMS = {};
 
 // npm is a .cmd shim on Windows, which Node only runs through a shell.
 const npmShell = process.platform === "win32";

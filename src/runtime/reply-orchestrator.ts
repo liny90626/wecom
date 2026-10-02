@@ -21,16 +21,21 @@ const DETACHED_PROGRESS_DRAIN_GRACE_MS = 500;
 // oldest steps and is reported downstream so the record can say so.
 const PREAMBLE_LOG_MAX_STEPS = 200;
 
-// OpenClaw's block chunker holds the first block until 800 characters
-// (agents.defaults.blockStreamingChunk.minChars): the Bot WS bubble showed its
-// first text 6-12 s late and never streamed a shorter answer. Only an unset
-// minimum is defaulted, so a configured one still wins; coalescing follows it
-// unless configured on its own, and the core keeps paragraph breaks.
+// OpenClaw's block chunker holds the first block until 800 characters and,
+// within a paragraph, cuts only at 1200 (agents.defaults.blockStreamingChunk):
+// the Bot WS bubble showed its first text 6-12 s late and never streamed a
+// shorter answer. 200/600 shows it at the first paragraph break after 200
+// characters, or by 600 inside a long paragraph. Every block boundary becomes
+// a line break in the bubble (mergeReplyText), so the core's paragraph
+// preference stays and the cap is not lowered further. Only unset fields are
+// defaulted; coalescing follows them unless configured on its own.
 const BOT_WS_BLOCK_STREAM_MIN_CHARS = 200;
+const BOT_WS_BLOCK_STREAM_MAX_CHARS = 600;
 
 function withBotWsBlockStreamingDefaults(cfg: OpenClawConfig): OpenClawConfig {
   const defaults = cfg.agents?.defaults;
-  if (defaults?.blockStreamingChunk?.minChars !== undefined) {
+  const chunk = defaults?.blockStreamingChunk;
+  if (chunk?.minChars !== undefined && chunk.maxChars !== undefined) {
     return cfg;
   }
   return {
@@ -40,8 +45,9 @@ function withBotWsBlockStreamingDefaults(cfg: OpenClawConfig): OpenClawConfig {
       defaults: {
         ...defaults,
         blockStreamingChunk: {
-          ...defaults?.blockStreamingChunk,
-          minChars: BOT_WS_BLOCK_STREAM_MIN_CHARS,
+          ...chunk,
+          minChars: chunk?.minChars ?? BOT_WS_BLOCK_STREAM_MIN_CHARS,
+          maxChars: chunk?.maxChars ?? BOT_WS_BLOCK_STREAM_MAX_CHARS,
         },
       },
     },

@@ -80,7 +80,7 @@ describe("dispatchRuntimeReply", () => {
     );
   });
 
-  it("lowers the core's 800-character first block for bot-ws unless configured", async () => {
+  it("lowers the core's 800/1200 block sizes for bot-ws unless configured", async () => {
     const cfgSeen = async (transport: string, cfg: Record<string, unknown>) => {
       const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
         await params.dispatcherOptions.deliver({ text: "ok" }, { kind: "final" });
@@ -104,16 +104,24 @@ describe("dispatchRuntimeReply", () => {
 
     const base = { channels: { wecom: {} }, agents: { defaults: { model: "m" } } };
     const lowered = await cfgSeen("bot-ws", base);
-    expect(lowered.agents.defaults).toEqual({ model: "m", blockStreamingChunk: { minChars: 200 } });
+    expect(lowered.agents.defaults).toEqual({
+      model: "m",
+      blockStreamingChunk: { minChars: 200, maxChars: 600 },
+    });
     expect(lowered.channels).toBe(base.channels);
     expect(base.agents.defaults).toEqual({ model: "m" });
 
-    const configured = { agents: { defaults: { blockStreamingChunk: { minChars: 500 } } } };
+    const configured = {
+      agents: { defaults: { blockStreamingChunk: { minChars: 500, maxChars: 900 } } },
+    };
     expect(await cfgSeen("bot-ws", configured)).toBe(configured);
-    const maxOnly = { agents: { defaults: { blockStreamingChunk: { maxChars: 600 } } } };
-    expect((await cfgSeen("bot-ws", maxOnly)).agents.defaults.blockStreamingChunk).toEqual({
+    const minOnly = {
+      agents: { defaults: { blockStreamingChunk: { minChars: 100, breakPreference: "newline" } } },
+    };
+    expect((await cfgSeen("bot-ws", minOnly)).agents.defaults.blockStreamingChunk).toEqual({
+      minChars: 100,
       maxChars: 600,
-      minChars: 200,
+      breakPreference: "newline",
     });
     expect(await cfgSeen("agent-callback", base)).toBe(base);
   });

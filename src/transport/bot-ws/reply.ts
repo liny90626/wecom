@@ -1959,6 +1959,26 @@ export function createBotWsReplyHandle(params: {
   /** Reasoning window already carried by the push lane; never re-pushed. */
   let pushedThinkingText = "";
   let previewExpiredNoticeInFlight = false;
+  // An in-flight push that carries answer body. Its body bookmark advances
+  // only on a confirmed push, so a final resolving its remainder meanwhile
+  // resends that text. Process-only pushes never move the bookmark and must
+  // not hold the final back.
+  let previewExpiredNoticeTask: Promise<void> | undefined;
+  const awaitInFlightBodyPush = async (): Promise<void> => {
+    const task = previewExpiredNoticeTask;
+    if (!task) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      task,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, WECOM_REPLY_SEND_TIMEOUT_MS);
+        timer.unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
+  };
   let previewExpiredNoticeCancelled = false;
   let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   // Only a cadence that has actually started may be deferred: arming one from
@@ -3077,7 +3097,7 @@ export function createBotWsReplyHandle(params: {
     ]
       .filter(Boolean)
       .join("\n\n");
-    void sendMarkdownChunksViaActivePush(
+    const noticeTask: Promise<void> = sendMarkdownChunksViaActivePush(
       noticeText,
       {
         reason: "preview-expired",
@@ -3117,6 +3137,9 @@ export function createBotWsReplyHandle(params: {
       })
       .finally(() => {
         previewExpiredNoticeInFlight = false;
+        if (previewExpiredNoticeTask === noticeTask) {
+          previewExpiredNoticeTask = undefined;
+        }
         if (previewExpiredNoticeStarted) {
           schedulePreviewExpiredNotice(
             Math.max(0, nextLongTaskStatusDueAt() - Date.now()),
@@ -3124,6 +3147,9 @@ export function createBotWsReplyHandle(params: {
           );
         }
       });
+    if (undeliveredProgress) {
+      previewExpiredNoticeTask = noticeTask;
+    }
   };
 
   /** A confirmed frame proves the user has this step range on screen. Only a
@@ -4134,6 +4160,13 @@ export function createBotWsReplyHandle(params: {
         accumulatedText = mergeReplyText(accumulatedText, text);
         await deliverBlockPreview(accumulatedText);
         return;
+      }
+
+      if (info.kind === "final") {
+        // Let a dead-window body push still awaiting its ACK confirm first: the
+        // remainder below is resolved from the bookmark that confirmation
+        // advances, and resolving it now would push that text a second time.
+        await awaitInFlightBodyPush();
       }
 
       if (info.kind === "final" && supersededByNewInbound && suppressSupersededFinalPush) {

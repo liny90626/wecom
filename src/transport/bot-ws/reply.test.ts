@@ -8000,6 +8000,47 @@ describe("createBotWsReplyHandle", () => {
     expect(JSON.stringify(mockClient.sendMessage.mock.calls)).not.toContain("welcome failed");
   });
 
+  it("does not resend the last body when the final arrives while its push awaits the ACK", async () => {
+    // Dead window, body on the 20-second push lane: OpenClaw sends the final
+    // right after the last block, within that block's push ACK latency.
+    let dead = false;
+    const client = {
+      replyStream: vi.fn(async () => {
+        if (dead) throw { errcode: 846608, errmsg: "stream message update expired" };
+        return {};
+      }),
+      sendMessage: vi.fn(() => new Promise((resolve) => setTimeout(() => resolve({}), 400))),
+    } as unknown as WSClient;
+    const handle = createBotWsReplyHandle({
+      client,
+      frame: {
+        headers: { req_id: "race_final_req" },
+        body: { msgid: "race_final_msg", from: { userid: "u1" }, chattype: "single" },
+        cmd: "aibot_msg_callback",
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: true,
+    });
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    dead = true;
+    const first = "第一段：这是已经推送过的正文内容。";
+    const last = "第二段：这是最后一个块，紧接着就是 final。";
+    await handle.deliver({ text: first }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(25_000);
+    const lastBlock = handle.deliver({ text: last }, { kind: "block" });
+    await Promise.resolve();
+    const final = handle.deliver({ text: `${first}\n\n${last}` }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await lastBlock;
+    await final;
+
+    const pushes = (client.sendMessage as any).mock.calls.map((call: any[]) =>
+      String(call[1].markdown.content),
+    );
+    expect(pushes.filter((text: string) => text.includes("第二段"))).toHaveLength(1);
+  });
+
   it("closes the bubble on the generic notice, never on an internal error message", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

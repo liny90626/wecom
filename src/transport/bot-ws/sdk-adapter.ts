@@ -380,7 +380,10 @@ export class BotWsSdkAdapter {
     client.on("disconnected", (reason) => {
       clearWecomMcpAccountCache(this.runtime.account.accountId);
       const normalizedReason = String(reason ?? "").toLowerCase();
+      // SDK 1.0.7 words a handover as "New connection established, server
+      // disconnected this connection".
       const kicked =
+        normalizedReason.includes("new connection") ||
         normalizedReason.includes("kick") ||
         normalizedReason.includes("owner") ||
         normalizedReason.includes("replaced");
@@ -513,8 +516,9 @@ export class BotWsSdkAdapter {
       if (eventType) {
         // 同一机器人同一时刻只允许一条长连接：新连接订阅成功后，这条会先收到
         // 通知再被服务端断开。它和用户事件走同一条 event 通道，却没有发送者、
-        // 没有会话，派发出去只会在一条正在终止的连接上跑一轮 agent。也不能重连
-        // ——新 owner 会立刻把我们再踢一次。
+        // 没有会话，派发出去只会在一条正在终止的连接上跑一轮 agent。SDK 不会
+        // 自行重连；OpenClaw 健康检查发现连接断开后会在几分钟内重启账号，
+        // 若另一处仍在用同一个 botId，两边会轮流把对方顶下线。
         if (eventType === "disconnected_event") {
           this.log.warn?.(
             `[wecom-ws] handed-over account=${this.runtime.account.accountId} reason=disconnected_event`,
@@ -522,7 +526,7 @@ export class BotWsSdkAdapter {
           this.runtime.recordOperationalIssue({
             transport: "bot-ws",
             category: "ws-kicked",
-            summary: "ws handed over: another connection took this bot; no auto-reconnect",
+            summary: "ws handed over: another connection took this bot; the SDK does not reconnect, OpenClaw's health check restarts the account",
             error: "disconnected_event",
           });
           return;

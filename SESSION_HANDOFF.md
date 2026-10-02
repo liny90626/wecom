@@ -74,6 +74,7 @@
 - **正文**：Bot WS 调 `buildInboundBody(msg, { omitMediaUrls: true })`，不再写加密 URL；webhook 车道调用不变。
 - **auth_change_event**：`inbound.ts` 的 `describeAuthChangeEvent` 生成权限说明与操作指引（措辞取自官方）。
 - **状态**：同一次顶号只记一次 ws-kicked（`disconnected_event` 帧记，随后 "New connection" 断线不再重复记）；入口丢弃重复送达只写审计日志，不设 lastError。
+- **首段门槛**（`reply-orchestrator.ts` `withBotWsBlockStreamingDefaults`）：Bot WS 回复传给核心的 cfg 在 `agents.defaults.blockStreamingChunk.minChars` 未配置时补 200（核心默认 800；7.1-2 只从 `agents.defaults` 读分块配置，没有按渠道的入口）。已配置就原样传入。维护者确认生产未配置这一项。
 - **官方有、我们不跟进**：Bot WS 的 dmPolicy / groupPolicy / 配对（生产依赖 Bot WS 不校验发送者，照搬会拦掉现有用户；`channel.ts` 状态里报告的 `dmPolicy: "pairing"` 对 Bot WS 并不生效）；鉴权失败不重试、被顶号后挂起账号；reqid 持久化、会话排队。
 
 ### 2.-14 回退 7.1-2、对抗式检查与性能稳定性（3.0.0-15 的前半部分；-14 为未发布候选）
@@ -85,7 +86,7 @@
 - **WS 放弃重连**：`reportTransportFatal` / `onTransportFatal` 是可重复触发的监听器。`WecomBotCapabilityService` 收到后只替换 WS 适配器：5 秒起翻倍，上限 5 分钟，最多 10 次，稳定运行 10 分钟后重新计数。**不要让整个账号任务退出**：生产账号同时配有 agent 回调，那样会反复把健康的 agent 回调一起拉下线（对抗式复审发现）。
 - **顶号**：SDK 不重连，但 OpenClaw 健康检查（默认开启，每 5 分钟一次）会重启账号。同一 botId 被两处同时使用时，双方会轮流把对方顶下线。
 - **性能**：思考片段（`kind=block && isReasoning`）不写日志、不刷状态，其余投递只写一行 `deliver-done`；媒体帧进入 1 秒合并窗口时就调用 `mediaService.prefetchFirstAttachment` 开始下载（key 为账号 + URL，只取用一次，60 秒后释放）。
-- **待维护者决定**：Bot WS 车道的分块阈值（核心默认最少 800 字才出首段，测算首屏晚 6–12 秒）；建议在 OpenClaw 配置里设 `media.ttlHours`（插件自己的 `media.retentionHours` 等配置项没有任何代码读取）；agent 回调的 context-store 每条同步写入、重启后从不读回（只影响上下游企业场景），未改。
+- **待维护者决定**：（分块阈值已在 3.0.0-15 定为 Bot WS 未配置时 200 字）建议在 OpenClaw 配置里设 `media.ttlHours`（插件自己的 `media.retentionHours` 等配置项没有任何代码读取）；agent 回调的 context-store 每条同步写入、重启后从不读回（只影响上下游企业场景），未改。
 
 ### 2.-13 生产升级 OpenClaw 2026.9.7（3.0.0-13，已作废：生产已回退 7.1-2，9.x 专用代码在 3.0.0-15 删除）
 
@@ -387,8 +388,8 @@ src/transport/bot-ws/sdk-adapter.ts
 
 ### 3.0.0-15 发布验证（2026-10-02）
 
-- 7.1-2（Node 24.21.0）：tsc 0 错误，68 文件 / 901 用例通过；B1 / B2 / B3 READY；diff check 通过。每项修复都配有敏感性用例（逐提交回退源码验证）。
-- 两次 `npm pack` 一致：258 个文件、626,541 bytes，SHA-256 `cbe00b28eabca13ec06610d8758f1c5bc7cfd252c4712bec4dad2987da7a0a43`，npm shasum `0843ae797d7a33e46d09f79a08d26c937c31f132`。未发布的 3.0.0-14 候选包（SHA-256 `0b071fdc…cf3f1`）已作废。
+- 7.1-2（Node 24.21.0）：tsc 0 错误，68 文件 / 902 用例通过；B1 / B2 / B3 READY；diff check 通过。每项修复都配有敏感性用例（逐提交回退源码验证）。
+- 两次 `npm pack` 一致：258 个文件、626,886 bytes，SHA-256 `c8df0cec7274614f98e3dfd85d757f6627eb5b7b61add58742f23c6e6e407665`，npm shasum `0adc608b60626cdd46b509b0127b4a6a5c77f8c1`。同日先发出的 3.0.0-15 包（`cbe00b28…a0a43`，不含首段 200 字）已取代。未发布的 3.0.0-14 候选包（SHA-256 `0b071fdc…cf3f1`）已作废。
 - 7.1-2 隔离安装：`plugins install <tgz>` 不需要额外参数；双账号生产形状配置 `config validate` PASS；`plugins inspect --runtime` 3.0.0-15 / loaded / diagnostics=[]；`channels list` 两个账号均 enabled。未启动网关；真实企微客户端未验收。
 
 ### 3.0.0-13 发布验证（2026-10-01）

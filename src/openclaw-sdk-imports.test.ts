@@ -4,18 +4,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 /**
- * Every `openclaw/…` module the plugin imports must exist in BOTH OpenClaw
- * lines this plugin supports: 2026.9.7 (production) and 2026.7.1-2. OpenClaw
- * 2026.8.1 removed the root barrel `openclaw/plugin-sdk` together with some
- * fifty subpaths, and a plugin importing any of them no longer loads at all.
+ * Every `openclaw/…` module the plugin imports must exist in the production
+ * OpenClaw line, 2026.7.1-2 — the only line this plugin supports. A plugin
+ * importing a subpath its host does not export no longer loads at all.
  *
- * This list was checked against both export maps on 2026-10-01. Add a subpath
- * only after confirming it in `node_modules/openclaw/package.json#exports` of
- * BOTH versions (`npm view openclaw@<version> exports` works too).
- *
- * `infra-runtime` is gone from this list: 2026.9.7 marks it removal-pending
- * after 2026-10-01. Its one helper, `resolvePreferredOpenClawTmpDir`, comes
- * from `temp-path`, which both 2026.7.1-2 and 2026.9.7 export.
+ * Add a subpath only after confirming it in
+ * `node_modules/openclaw/package.json#exports` (`npm view openclaw@2026.7.1-2
+ * exports` works too). `resolvePreferredOpenClawTmpDir` comes from the focused
+ * `temp-path` subpath rather than the broad `infra-runtime` barrel.
  */
 const ALLOWED_OPENCLAW_MODULES = new Set([
   "openclaw/plugin-sdk/agent-harness",

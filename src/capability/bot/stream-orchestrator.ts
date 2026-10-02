@@ -25,7 +25,6 @@ import { handleDirectLocalPathIntent } from "./local-path-delivery.js";
 import { stageWecomInboundMediaForSession } from "./sandbox-media.js";
 import { recordInboundSessionSettled } from "../../shared/inbound-session.js";
 import { escapeInternalRuntimeContextDelimiters } from "../../shared/internal-runtime-context.js";
-import { inboundMediaFacts } from "../../shared/media-types.js";
 import { createBotReplyDispatcher } from "./stream-delivery.js";
 import type { BotRuntimeLogger, RecordBotOperationalEvent } from "./types.js";
 
@@ -429,7 +428,6 @@ export function createBotStreamOrchestrator(params: {
       MediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
       MediaUrls: mediaPaths.length > 0 ? mediaPaths : undefined,
       MediaTypes: mediaTypesPayload,
-      ...inboundMediaFacts(stagedMediaRecords),
     });
 
     await recordInboundSessionSettled(core, {

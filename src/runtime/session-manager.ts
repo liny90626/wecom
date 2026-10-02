@@ -7,7 +7,6 @@ import { recordInboundSessionSettled } from "../shared/inbound-session.js";
 import { buildWecomContextTarget } from "../target.js";
 import { resolveRuntimeRoute } from "./routing-bridge.js";
 import { registerWecomSourceSnapshot } from "./source-registry.js";
-import { inboundMediaFacts } from "../shared/media-types.js";
 
 export type PreparedSession = {
   route: ReturnType<typeof resolveRuntimeRoute>;
@@ -132,7 +131,6 @@ export async function prepareInboundSession(params: {
     MediaPath: mediaPath,
     MediaUrl: mediaPath,
     MediaType: firstAttachment?.contentType,
-    ...inboundMediaFacts([{ path: mediaPath, contentType: firstAttachment?.contentType }]),
   });
 
   if (source) {

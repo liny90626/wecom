@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WSClient } from "@wecom/aibot-node-sdk";
 
 /**
@@ -9,18 +9,9 @@ import type { WSClient } from "@wecom/aibot-node-sdk";
  * Every run gets its own directory: a store left behind by another OpenClaw
  * version fails the schema check (2026.8.x demands a migration that a
  * 2026.7.x file never had), which is exactly what a shared /tmp path produced.
- * The directory is shared by the whole file and removed once: 2026.9.x keeps
- * the first directory's database open for the life of the process and ignores
- * a later OPENCLAW_STATE_DIR, so a per-test directory is deleted under it.
  */
-let runStateDir: string | undefined;
-const freshStateDir = (): string =>
-  (runStateDir ??= mkdtempSync(path.join(os.tmpdir(), "wecom-openclaw-reply-orchestrator-")));
-afterAll(() => {
-  if (runStateDir) rmSync(runStateDir, { recursive: true, force: true });
-});
-// The first real-dispatcher test pays the core's cold import (about 4 s on 2026.9.7).
-vi.setConfig({ testTimeout: 30_000 });
+const freshStateDir = (label: string): string =>
+  mkdtempSync(path.join(os.tmpdir(), `wecom-openclaw-${label}-`));
 
 const agentHarnessState = vi.hoisted(() => ({
   resolveActiveEmbeddedRunSessionId: vi.fn(),
@@ -128,7 +119,7 @@ describe("dispatchRuntimeReply", () => {
     // context would otherwise put the fenced block into the bubble and the push.
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    const stateDir = freshStateDir();
+    const stateDir = freshStateDir("runtime-context-fence");
     process.env.OPENCLAW_STATE_DIR = stateDir;
     process.env.OPENCLAW_TEST_FAST = "1";
     try {
@@ -196,6 +187,7 @@ describe("dispatchRuntimeReply", () => {
       } else {
         process.env.OPENCLAW_TEST_FAST = previousTestFast;
       }
+      rmSync(stateDir, { recursive: true, force: true });
     }
   });
 
@@ -571,7 +563,7 @@ describe("dispatchRuntimeReply", () => {
   it("keeps real commentary flowing through the real OpenClaw dispatcher", async () => {
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    const stateDir = freshStateDir();
+    const stateDir = freshStateDir("commentary-dispatcher");
     process.env.OPENCLAW_STATE_DIR = stateDir;
     process.env.OPENCLAW_TEST_FAST = "1";
     try {
@@ -651,13 +643,14 @@ describe("dispatchRuntimeReply", () => {
       } else {
         process.env.OPENCLAW_TEST_FAST = previousTestFast;
       }
+      rmSync(stateDir, { recursive: true, force: true });
     }
   });
 
   it("keeps every real-dispatcher lifecycle event out of the channel", async () => {
     const previousStateDir = process.env.OPENCLAW_STATE_DIR;
     const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-    const stateDir = freshStateDir();
+    const stateDir = freshStateDir("lifecycle-dispatcher");
     process.env.OPENCLAW_STATE_DIR = stateDir;
     process.env.OPENCLAW_TEST_FAST = "1";
     try {
@@ -779,6 +772,7 @@ describe("dispatchRuntimeReply", () => {
       } else {
         process.env.OPENCLAW_TEST_FAST = previousTestFast;
       }
+      rmSync(stateDir, { recursive: true, force: true });
     }
   });
 
@@ -801,7 +795,7 @@ describe("dispatchRuntimeReply", () => {
     async (caseId, itemEvent) => {
       const previousStateDir = process.env.OPENCLAW_STATE_DIR;
       const previousTestFast = process.env.OPENCLAW_TEST_FAST;
-      const stateDir = freshStateDir();
+      const stateDir = freshStateDir(`filtered-item-${caseId}`);
       process.env.OPENCLAW_STATE_DIR = stateDir;
       process.env.OPENCLAW_TEST_FAST = "1";
       try {
@@ -886,6 +880,7 @@ describe("dispatchRuntimeReply", () => {
         } else {
           process.env.OPENCLAW_TEST_FAST = previousTestFast;
         }
+        rmSync(stateDir, { recursive: true, force: true });
       }
     },
   );
@@ -2556,92 +2551,6 @@ describe("dispatchRuntimeReply", () => {
       expect(fail).not.toHaveBeenCalled();
     },
   );
-
-  // 2026.9.x removed onTurnAdopted and reports adoption on the dispatch result.
-  const botWsHandle = (deliver: ReturnType<typeof vi.fn>, fail: ReturnType<typeof vi.fn>) =>
-    ({
-      context: {
-        transport: "bot-ws",
-        accountId: "default",
-        raw: { transport: "bot-ws", envelopeType: "ws", body: {} },
-      },
-      deliver,
-      fail,
-    }) as any;
-
-  it.each(["steer", "followup"] as const)(
-    "treats a 9.x %s into the active run as accepted instead of retrying it",
-    async (mode) => {
-      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
-        queuedFinal: false,
-        counts: { block: 0, final: 0, tool: 0 },
-        deferredToActiveRun: mode,
-      });
-      const deliver = vi.fn().mockResolvedValue(undefined);
-      const fail = vi.fn().mockResolvedValue(undefined);
-
-      await expect(
-        dispatchRuntimeReply({
-          core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
-          cfg: {} as any,
-          session: { ctx: { SessionKey: `session-9x-${mode}` } } as any,
-          replyHandle: botWsHandle(deliver, fail),
-          retryFlaglessBusy: true,
-        }),
-      ).resolves.toBeUndefined();
-
-      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
-      expect(deliver).toHaveBeenCalledWith(
-        expect.objectContaining({ text: expect.stringContaining("已并入当前任务") }),
-        { kind: "final" },
-      );
-      expect(fail).not.toHaveBeenCalled();
-    },
-  );
-
-  it("does not take a 9.x silent result without a started run as acceptance", async () => {
-    // Under a group silentReply "allow" policy a refused (active-run) inbound
-    // also finalizes "silent"; only the run-start evidence proves acceptance.
-    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
-      queuedFinal: false,
-      counts: { block: 0, final: 0, tool: 0 },
-      deliberateSilentTerminalReply: true,
-    });
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const fail = vi.fn().mockResolvedValue(undefined);
-
-    await expect(
-      dispatchRuntimeReply({
-        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
-        cfg: {} as any,
-        session: { ctx: { SessionKey: "session-9x-silent-refused" } } as any,
-        replyHandle: botWsHandle(deliver, fail),
-        retryFlaglessBusy: true,
-      }),
-    ).rejects.toMatchObject({ name: "WeComReplyBusyNotAcceptedError" });
-    expect(deliver).not.toHaveBeenCalled();
-  });
-
-  it("still fails a 9.x silent turn that was blocked before the agent run", async () => {
-    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
-      queuedFinal: false,
-      counts: { block: 0, final: 0, tool: 0 },
-      deliberateSilentTerminalReply: true,
-      beforeAgentRunBlocked: true,
-    });
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const fail = vi.fn().mockResolvedValue(undefined);
-
-    await expect(
-      dispatchRuntimeReply({
-        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
-        cfg: {} as any,
-        session: { ctx: { SessionKey: "session-9x-blocked" } } as any,
-        replyHandle: botWsHandle(deliver, fail),
-      }),
-    ).rejects.toMatchObject({ name: "WeComReplyNoVisibleOutputError" });
-    expect(fail).toHaveBeenCalledTimes(1);
-  });
 
   it("keeps Fast progress but rejects auto-off without a later body", async () => {
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {

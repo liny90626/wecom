@@ -3,8 +3,8 @@
  * Self-check: does this plugin still typecheck and pass its tests against
  * every OpenClaw line it claims to support?
  *
- *   node scripts/check-openclaw-compat.mjs                 # devDependency + latest + floor
- *   node scripts/check-openclaw-compat.mjs 2026.7.1-2 2026.9.7
+ *   node scripts/check-openclaw-compat.mjs                 # the pinned production version only
+ *   node scripts/check-openclaw-compat.mjs 2026.7.1-2 <other> # explicit versions, e.g. before an upgrade
  *
  * For each version this installs `openclaw@<version>` under
  * `~/.cache/wecom-openclaw-compat/<version>/` (cached; delete the directory
@@ -53,21 +53,6 @@ function run(cmd, args, options = {}) {
   return result.status ?? 1;
 }
 
-function capture(cmd, args, options = {}) {
-  const result = spawnSync(cmd, args, {
-    encoding: "utf8",
-    shell: cmd === "npm" && npmShell,
-    ...options,
-  });
-  if (result.status !== 0) {
-    throw new Error(`${cmd} ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
-  }
-  return result.stdout.trim();
-}
-
-/** Retired production line still kept compiling and passing as a compatibility floor. */
-const COMPAT_FLOOR = "2026.7.1-2";
-
 function resolveVersions(argv) {
   if (argv.length > 0) {
     return argv;
@@ -76,8 +61,8 @@ function resolveVersions(argv) {
   if (!pinned) {
     throw new Error("package.json has no openclaw devDependency to use as the baseline");
   }
-  const latest = capture("npm", ["view", "openclaw", "dist-tags.latest"]);
-  return [...new Set([pinned, latest, COMPAT_FLOOR])];
+  // Production runs exactly the pinned version; other lines are checked only on request.
+  return [pinned];
 }
 
 function ensureInstalled(version) {

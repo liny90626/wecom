@@ -9,13 +9,8 @@ import type { PreparedSession } from "./session-manager.js";
 type DispatchReply = PluginRuntime["channel"]["reply"]["dispatchReplyWithBufferedBlockDispatcher"];
 type ReplyOptions = NonNullable<Parameters<DispatchReply>[0]["replyOptions"]>;
 type CompatibleReplyOptions = ReplyOptions & {
-  // 2026.7.1 only: 2026.9.x removed it and reports adoption on the result.
+  // Added in 2026.7.1. Older cores ignore the extra runtime option.
   onTurnAdopted?: () => void | Promise<void>;
-};
-type CompatibleDispatchResult = Awaited<ReturnType<DispatchReply>> & {
-  // 2026.9.x: the inbound was accepted into the session's active run. Never
-  // set together with noVisibleReplyFallbackEligible.
-  deferredToActiveRun?: "steer" | "followup";
 };
 
 // Progress callbacks are intentionally detached from OpenClaw's model stream,
@@ -464,7 +459,7 @@ export async function dispatchRuntimeReply(params: {
       }
     : undefined;
 
-  let result: CompatibleDispatchResult | undefined;
+  let result: Awaited<ReturnType<DispatchReply>> | undefined;
   try {
     result = await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: session.ctx,
@@ -697,16 +692,6 @@ export async function dispatchRuntimeReply(params: {
       // is the only remaining proof that the turn was blocked rather than
       // accepted as an intentional silent reply.
       return failAndThrow(new WeComReplyNoVisibleOutputError(sessionKey || undefined));
-    }
-    if (result.deferredToActiveRun !== undefined) {
-      // 2026.9.x accepts an inbound into the active run without the fallback
-      // flag or onTurnAdopted. It was accepted: retrying would duplicate it.
-      await deliverHandoffNotice({
-        text: BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT,
-        logEvent: "dispatch-absorbed-by-active-run",
-        runSessionId: resolveActiveRunSessionId(sessionKey),
-      });
-      return;
     }
     if (turnAdopted || agentRunStarted) {
       // OpenClaw omits the fallback flag when the configured silent reply

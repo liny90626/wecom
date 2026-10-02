@@ -88,6 +88,8 @@ describe("mapBotWsFrameToInboundEvent", () => {
       },
     });
 
+    // The encrypted URLs stay out of the text; the files reach the agent as media.
+    expect(event.text).toBe("来看看这张图\n[image]\n[file]\n[video]");
     expect(event.attachments).toBeDefined();
     expect(event.attachments).toHaveLength(3);
     expect(event.attachments![0]).toEqual({
@@ -128,6 +130,7 @@ describe("mapBotWsFrameToInboundEvent", () => {
     });
 
     expect(event.inboundKind).toBe("text");
+    expect(event.text).toBe("请读取这个引用文件\n\n> [引用: 文件]");
     expect(event.attachments).toEqual([
       {
         name: "file",

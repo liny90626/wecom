@@ -50,7 +50,7 @@ function pushAttachment(
 
 function resolveEventText(message: BaseMessage | EventMessage, account: ResolvedBotAccount): string {
   if (message.msgtype !== "event") {
-    return buildInboundBody(message as WecomBotInboundMessage);
+    return buildInboundBody(message as WecomBotInboundMessage, { omitMediaUrls: true });
   }
 
   const event = message as EventMessage;

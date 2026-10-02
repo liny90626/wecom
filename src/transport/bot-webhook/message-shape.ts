@@ -35,15 +35,20 @@ export function shouldProcessBotInboundMessage(msg: WecomInboundMessage): BotInb
   return { shouldProcess: true, reason: "user_message", senderUserId, chatId: senderUserId };
 }
 
-function formatQuote(quote: WecomInboundQuote): string {
+/** Media URLs are kept unless asked otherwise; `omit` drops them from the text. */
+function mediaUrlSuffix(url: string | undefined, omit: boolean): string {
+  return omit ? "" : ` ${url || ""}`;
+}
+
+function formatQuote(quote: WecomInboundQuote, omitMediaUrls: boolean): string {
   const type = quote.msgtype ?? "";
   if (type === "text") return quote.text?.content || "";
-  if (type === "image") return `[引用: 图片] ${quote.image?.url || ""}`;
+  if (type === "image") return `[引用: 图片]${mediaUrlSuffix(quote.image?.url, omitMediaUrls)}`;
   if (type === "mixed" && quote.mixed?.msg_item) {
     const items = quote.mixed.msg_item
       .map((item) => {
         if (item.msgtype === "text") return item.text?.content;
-        if (item.msgtype === "image") return `[图片] ${item.image?.url || ""}`;
+        if (item.msgtype === "image") return `[图片]${mediaUrlSuffix(item.image?.url, omitMediaUrls)}`;
         return "";
       })
       .filter(Boolean)
@@ -51,13 +56,22 @@ function formatQuote(quote: WecomInboundQuote): string {
     return `[引用: 图文] ${items}`;
   }
   if (type === "voice") return `[引用: 语音] ${quote.voice?.content || ""}`;
-  if (type === "file") return `[引用: 文件] ${quote.file?.url || ""}`;
+  if (type === "file") return `[引用: 文件]${mediaUrlSuffix(quote.file?.url, omitMediaUrls)}`;
   // 新增支持：引用视频类型 - 将在入站正规化中提取媒体并落盘
-  if (type === "video") return `[引用: 视频] ${quote.video?.url || ""}`;
+  if (type === "video") return `[引用: 视频]${mediaUrlSuffix(quote.video?.url, omitMediaUrls)}`;
   return "";
 }
 
-export function buildInboundBody(msg: WecomInboundMessage): string {
+/**
+ * `omitMediaUrls` is for Bot WS: its media URLs are AES-encrypted and the
+ * attachment itself reaches the agent as MediaPath, so the URL is only noise
+ * the model may try to fetch.
+ */
+export function buildInboundBody(
+  msg: WecomInboundMessage,
+  options: { omitMediaUrls?: boolean } = {},
+): string {
+  const omitMediaUrls = options.omitMediaUrls === true;
   let body = "";
   const msgtype = String(msg.msgtype ?? "").toLowerCase();
 
@@ -70,22 +84,22 @@ export function buildInboundBody(msg: WecomInboundMessage): string {
         .map((item: any) => {
           const t = String(item?.msgtype ?? "").toLowerCase();
           if (t === "text") return item?.text?.content || "";
-          if (t === "image") return `[image] ${item?.image?.url || ""}`;
+          if (t === "image") return `[image]${mediaUrlSuffix(item?.image?.url, omitMediaUrls)}`;
           return `[${t || "item"}]`;
         })
         .filter(Boolean)
         .join("\n");
     } else body = "[mixed]";
-  } else if (msgtype === "image") body = `[image] ${(msg as any).image?.url || ""}`;
-  else if (msgtype === "file") body = `[file] ${(msg as any).file?.url || ""}`;
-  else if (msgtype === "video") body = `[video] ${(msg as any).video?.url || ""}`;
+  } else if (msgtype === "image") body = `[image]${mediaUrlSuffix((msg as any).image?.url, omitMediaUrls)}`;
+  else if (msgtype === "file") body = `[file]${mediaUrlSuffix((msg as any).file?.url, omitMediaUrls)}`;
+  else if (msgtype === "video") body = `[video]${mediaUrlSuffix((msg as any).video?.url, omitMediaUrls)}`;
   else if (msgtype === "event") body = `[event] ${(msg as any).event?.eventtype || ""}`;
   else if (msgtype === "stream") body = `[stream_refresh] ${(msg as any).stream?.id || ""}`;
   else body = msgtype ? `[${msgtype}]` : "";
 
   const quote = (msg as any).quote;
   if (quote) {
-    const quoteText = formatQuote(quote).trim();
+    const quoteText = formatQuote(quote, omitMediaUrls).trim();
     if (quoteText) body += `\n\n> ${quoteText}`;
   }
   return body;

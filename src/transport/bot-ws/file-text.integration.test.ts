@@ -320,7 +320,7 @@ describe("file and text Bot WS integration", () => {
     expect(result.contexts).toHaveLength(2);
     expect(result.contexts[1]).toMatchObject({
       body:
-        "[file] https://example.com/msg-lost-placeholder-first.pdf\n请把附件整理成表格",
+        "[file]\n请把附件整理成表格",
       mediaPath: "/tmp/lost-placeholder.pdf",
     });
     expect(result.sim.visibleText().join("\n")).toContain("第三段结论。");

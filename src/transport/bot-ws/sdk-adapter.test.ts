@@ -808,7 +808,7 @@ describe("BotWsSdkAdapter", () => {
         expect(event).toMatchObject({
           messageId: "msg-mixed-cumulative",
           inboundKind: "mixed",
-          text: "请分析这张图\n[image] https://example.com/mixed.png",
+          text: "请分析这张图\n[image]",
           attachments: [
             {
               name: "image",
@@ -1257,7 +1257,7 @@ describe("BotWsSdkAdapter", () => {
 
     expect(runtime.handleEvent).toHaveBeenCalledTimes(2);
     expect(runtime.handleEvent.mock.calls.map(([event]) => event.text)).toEqual(
-      expect.arrayContaining(["[file] https://example.com/only.pdf", "另一位用户的消息"]),
+      expect.arrayContaining(["[file]", "另一位用户的消息"]),
     );
     adapter.stop();
     vi.useRealTimers();

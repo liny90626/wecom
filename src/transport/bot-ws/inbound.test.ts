@@ -109,6 +109,34 @@ describe("mapBotWsFrameToInboundEvent", () => {
     });
   });
 
+  it("tells the agent what an auth change granted and whether the doc task can go on", () => {
+    const authChange = (authList?: number[]) =>
+      mapBotWsFrameToInboundEvent({
+        account: createBotAccount(),
+        frame: {
+          cmd: "aibot_event_callback",
+          headers: { req_id: "req-auth" },
+          body: {
+            msgid: "msg-auth",
+            msgtype: "event",
+            chattype: "single",
+            from: { userid: "user-1" },
+            event: {
+              eventtype: "auth_change_event",
+              ...(authList ? { auth_change_event: { auth_list: authList } } : {}),
+            },
+          } as any,
+        },
+      }).text;
+
+    expect(authChange([1, 2])).toBe(
+      "[企业微信文档权限变更回调]\n当前权限列表: [1, 2] (新建和编辑文档、获取成员文档内容)\n\n" +
+        "[操作指引] 用户已授予文档内容读取权限，请继续之前的文档操作。",
+    );
+    expect(authChange([1])).toContain("请引导用户授予「获取成员文档内容」权限");
+    expect(authChange()).toContain("当前权限列表: [] (无)");
+  });
+
   it("extracts attachment from quote file in text events", () => {
     const event = mapBotWsFrameToInboundEvent({
       account: createBotAccount(),
@@ -376,10 +404,10 @@ describe("mapBotWsFrameToInboundEvent", () => {
           msgtype: "event",
           chattype: "single",
           from: { userid: "alice" },
-          event: { eventtype: "auth_change_event" },
+          event: { eventtype: "feedback_event" },
         },
       } as never,
     });
-    expect(event.text).toBe("[event:auth_change_event]");
+    expect(event.text).toBe("[event:feedback_event]");
   });
 });

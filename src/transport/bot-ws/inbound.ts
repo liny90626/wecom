@@ -48,6 +48,32 @@ function pushAttachment(
   list.push({ name, remoteUrl, aesKey });
 }
 
+const DOC_AUTH_NAMES: Record<number, string> = { 1: "新建和编辑文档", 2: "获取成员文档内容" };
+
+/**
+ * A member just changed the bot's doc permissions, usually because a doc tool
+ * asked them to. `[event:auth_change_event]` left the model guessing; this says
+ * what is granted now and whether the interrupted doc task can go on (wording
+ * follows the official plugin).
+ */
+function describeAuthChangeEvent(event: EventMessage): string {
+  const raw = (event.event as { auth_change_event?: { auth_list?: unknown } }).auth_change_event
+    ?.auth_list;
+  const authList = Array.isArray(raw) ? raw.map(Number).filter(Number.isFinite) : [];
+  const names = authList.map((code) => DOC_AUTH_NAMES[code] ?? `未知权限(${code})`).join("、");
+  const hint = authList.includes(2)
+    ? "用户已授予文档内容读取权限，请继续之前的文档操作。"
+    : authList.length > 0
+      ? "当前授权不包含文档内容读取权限，无法继续文档操作。请引导用户授予「获取成员文档内容」权限，该权限需要向管理员申请，管理员审批通过后可使用。"
+      : "当前无任何文档权限，无法继续文档操作。请引导用户完成文档授权。";
+  return [
+    "[企业微信文档权限变更回调]",
+    `当前权限列表: [${authList.join(", ")}] (${names || "无"})`,
+    "",
+    `[操作指引] ${hint}`,
+  ].join("\n");
+}
+
 function resolveEventText(message: BaseMessage | EventMessage, account: ResolvedBotAccount): string {
   if (message.msgtype !== "event") {
     return buildInboundBody(message as WecomBotInboundMessage, { omitMediaUrls: true });
@@ -69,6 +95,9 @@ function resolveEventText(message: BaseMessage | EventMessage, account: Resolved
     if (described) {
       return described;
     }
+  }
+  if (String(event.event?.eventtype) === "auth_change_event") {
+    return describeAuthChangeEvent(event);
   }
   return `[event:${String(event.event?.eventtype ?? "unknown")}]`;
 }

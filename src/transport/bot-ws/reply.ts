@@ -4494,22 +4494,27 @@ export function createBotWsReplyHandle(params: {
       const modelTimeout = isOpenClawModelTimeoutError(error, message);
       const prepareTimeout = isPrepareTimeoutError(error, message);
       const initConflict = isRetryableReplySessionAdmissionError(error);
+      // Errors written for the user (an oversized attachment) are shown as is;
+      // anything else is an internal message and stays in the log line below.
+      const userFacing = error instanceof Error && error.name === "WecomInboundMediaTooLargeError";
       // Only append the notice to previews that carried visible body text,
       // and rebuild the progress from the body-only source: lastPreviewText
       // can embed the <think> block, whose wrapper the markdown sanitizer
       // strips — promoting raw reasoning summaries to visible text.
-      const failNoticeText = initConflict
-        ? REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT
-        : prepareTimeout
-          ? REPLY_PREPARE_TIMEOUT_NOTICE_TEXT
-          : modelTimeout
-            ? REPLY_MODEL_TIMEOUT_NOTICE_TEXT
-            : noVisibleOutput && lastPreviewText && accumulatedText
-              ? appendFailureNoticeToProgress(accumulatedText, REPLY_FAIL_NOTICE_TEXT)
-              : REPLY_FAIL_NOTICE_TEXT;
-      const text = initConflict || prepareTimeout || modelTimeout || noVisibleOutput
-        ? failNoticeText
-        : `WeCom WS reply failed: ${message}`;
+      const failNoticeText = userFacing
+        ? message
+        : initConflict
+          ? REPLY_SESSION_INIT_CONFLICT_NOTICE_TEXT
+          : prepareTimeout
+            ? REPLY_PREPARE_TIMEOUT_NOTICE_TEXT
+            : modelTimeout
+              ? REPLY_MODEL_TIMEOUT_NOTICE_TEXT
+              : noVisibleOutput && lastPreviewText && accumulatedText
+                ? appendFailureNoticeToProgress(accumulatedText, REPLY_FAIL_NOTICE_TEXT)
+                : REPLY_FAIL_NOTICE_TEXT;
+      console.warn(
+        `[wecom-reply] fail account=${params.accountId} peer=${peerKind}:${peerId} reqId=${reqId} streamId=${streamId ?? "n/a"} error=${formatFallbackError(error)}`,
+      );
       const sendFailNoticeOnce = async (): Promise<void> => {
         if (isEvent || finalDelivered || finalPushRetryTimer || failNoticeSent) {
           return;
@@ -4569,7 +4574,7 @@ export function createBotWsReplyHandle(params: {
           await withHandleSendTimeout(
             params.client.replyWelcome(params.frame, {
               msgtype: "text",
-              text: { content: text },
+              text: { content: failNoticeText },
             }),
             "welcome error reply",
           );
@@ -4577,7 +4582,7 @@ export function createBotWsReplyHandle(params: {
           await withHandleSendTimeout(
             params.client.sendMessage(peerId, {
               msgtype: "markdown",
-              markdown: { content: text },
+              markdown: { content: failNoticeText },
               chat_type: peerKind === "group" ? 2 : 1,
             } as Parameters<typeof params.client.sendMessage>[1]),
             "event error markdown push",
@@ -4585,7 +4590,7 @@ export function createBotWsReplyHandle(params: {
         } else {
           visibleReplyStarted = true;
           await withHandleSendTimeout(
-            params.client.replyStream(params.frame, resolveStreamId(), text, true),
+            params.client.replyStream(params.frame, resolveStreamId(), failNoticeText, true),
             "stream error reply",
           );
         }

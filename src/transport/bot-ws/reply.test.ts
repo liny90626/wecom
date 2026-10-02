@@ -3,6 +3,7 @@ import path from "node:path";
 import type { WSClient } from "@wecom/aibot-node-sdk";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
+import { WecomInboundMediaTooLargeError } from "../../shared/media-service.js";
 import {
   getBotWsPushHandle,
   registerBotWsPushHandle,
@@ -7993,9 +7994,54 @@ describe("createBotWsReplyHandle", () => {
       "bob",
       expect.objectContaining({
         msgtype: "markdown",
-        markdown: expect.objectContaining({ content: expect.stringContaining("welcome failed") }),
+        markdown: expect.objectContaining({ content: expect.stringContaining("本次回复投递中断") }),
       }),
     );
+    expect(JSON.stringify(mockClient.sendMessage.mock.calls)).not.toContain("welcome failed");
+  });
+
+  it("closes the bubble on the generic notice, never on an internal error message", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "internal_error_req" },
+        body: { chattype: "single", from: { userid: "bob" } },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const failing = handle.fail(
+      new Error("Failed to decrypt media: error:1C800064:Provider routines::bad decrypt"),
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    await failing;
+
+    const frames = JSON.stringify(mockClient.replyStream.mock.calls);
+    expect(frames).toContain("本次回复投递中断");
+    expect(frames).not.toContain("bad decrypt");
+    expect(frames).not.toContain("WeCom WS reply failed");
+  });
+
+  it("shows an error written for the user as is", async () => {
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "media_too_large_req" },
+        body: { chattype: "single", from: { userid: "bob" } },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    const failing = handle.fail(new WecomInboundMediaTooLargeError(20 * 1024 * 1024));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await failing;
+
+    const frames = mockClient.replyStream.mock.calls.map((call) => String(call[2]));
+    expect(frames.at(-1)).toBe(new WecomInboundMediaTooLargeError(20 * 1024 * 1024).message);
   });
 
   it("returns from welcome replies when replyWelcome hangs", async () => {

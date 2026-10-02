@@ -35,7 +35,7 @@ Fork 维护与修复贡献：**LinKy**
 "plugins": { "entries": { "wecom": { "hooks": { "allowConversationAccess": true } } } }
 ```
 
-正文首次出现的快慢主要取决于 OpenClaw 的 block 切分：核心默认攒够 800 字才把第一个 block 交给渠道。自 `3.0.0-15` 起，Bot WS 回复在未配置 `agents.defaults.blockStreamingChunk.minChars` 时按 200 字处理（仍按段落切分）；配置了就以配置为准，例如想更快可设更小的值或配合 `breakPreference: "newline"`。
+正文首次出现的快慢主要取决于 OpenClaw 的 block 切分：核心默认攒够 800 字才把第一个 block 交给渠道。自 `3.0.0-15` 起，Bot WS 回复在未配置 `agents.defaults.blockStreamingChunk` 的 `minChars` / `maxChars` 时按 200 / 600 字处理（仍优先按段落切分）：写满 200 字后遇到段落结尾就显示，长段落最晚 600 字。配置了就以配置为准。注意 webhook 车道另有自己的 120 / 360 / 按句默认值（`dispatch-config.ts`），对 Bot WS 不生效。
 
 本候选同时固定 `@wecom/cli@1.2.0` 为插件私有依赖。插件通过专用 `wecom-cli` tool 按当前会话账号注入隔离配置目录，不使用 PATH 上的全局命令，也不要求用户手动执行 `auth init`。
 
@@ -334,7 +334,7 @@ npm run compat:check   # 对生产版 2026.7.1-2 跑 typecheck + 全量测试（
 - WS SDK 放弃重连后只重启 WS 适配器（带退避），同账号的 agent 回调不受影响；
 - 思考片段不再逐条同步写日志；
 - 媒体在 1 秒合并窗口内提前下载；
-- 正文首段从攒够 800 字降到 200 字就显示（未配置 `blockStreamingChunk.minChars` 时）；
+- 正文首段从攒够 800 字降到 200 字起显示，长段落最晚 600 字（未配置 `blockStreamingChunk` 时）；
 - 同一次顶号只记录一次，重复送达不再显示为账号错误。
 
 详见 [`changelog/v3.0.0-15.md`](./changelog/v3.0.0-15.md)。

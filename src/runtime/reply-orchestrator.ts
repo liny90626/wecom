@@ -21,6 +21,33 @@ const DETACHED_PROGRESS_DRAIN_GRACE_MS = 500;
 // oldest steps and is reported downstream so the record can say so.
 const PREAMBLE_LOG_MAX_STEPS = 200;
 
+// OpenClaw's block chunker holds the first block until 800 characters
+// (agents.defaults.blockStreamingChunk.minChars): the Bot WS bubble showed its
+// first text 6-12 s late and never streamed a shorter answer. Only an unset
+// minimum is defaulted, so a configured one still wins; coalescing follows it
+// unless configured on its own, and the core keeps paragraph breaks.
+const BOT_WS_BLOCK_STREAM_MIN_CHARS = 200;
+
+function withBotWsBlockStreamingDefaults(cfg: OpenClawConfig): OpenClawConfig {
+  const defaults = cfg.agents?.defaults;
+  if (defaults?.blockStreamingChunk?.minChars !== undefined) {
+    return cfg;
+  }
+  return {
+    ...cfg,
+    agents: {
+      ...cfg.agents,
+      defaults: {
+        ...defaults,
+        blockStreamingChunk: {
+          ...defaults?.blockStreamingChunk,
+          minChars: BOT_WS_BLOCK_STREAM_MIN_CHARS,
+        },
+      },
+    },
+  };
+}
+
 // Two different outcomes, two different truths: the busy notice is only for an
 // inbound OpenClaw provably refused (dispatch admission released it), while an
 // inbound OpenClaw steered/queued into the running turn was accepted — telling
@@ -463,7 +490,7 @@ export async function dispatchRuntimeReply(params: {
   try {
     result = await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: session.ctx,
-      cfg,
+      cfg: isBotWsReply ? withBotWsBlockStreamingDefaults(cfg) : cfg,
       replyOptions: isBotWsReply
         ? botWsReplyOptions
         : abortSignal

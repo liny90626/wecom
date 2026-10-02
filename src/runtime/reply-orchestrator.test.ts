@@ -80,6 +80,44 @@ describe("dispatchRuntimeReply", () => {
     );
   });
 
+  it("lowers the core's 800-character first block for bot-ws unless configured", async () => {
+    const cfgSeen = async (transport: string, cfg: Record<string, unknown>) => {
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {
+        await params.dispatcherOptions.deliver({ text: "ok" }, { kind: "final" });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      });
+      await dispatchRuntimeReply({
+        core: { channel: { reply: { dispatchReplyWithBufferedBlockDispatcher } } } as any,
+        cfg: cfg as any,
+        session: { ctx: { SessionKey: "session-a" } } as any,
+        replyHandle: {
+          context: {
+            transport,
+            accountId: "default",
+            raw: { transport, envelopeType: "ws", body: {} },
+          },
+          deliver: vi.fn(),
+        } as any,
+      });
+      return dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]![0].cfg;
+    };
+
+    const base = { channels: { wecom: {} }, agents: { defaults: { model: "m" } } };
+    const lowered = await cfgSeen("bot-ws", base);
+    expect(lowered.agents.defaults).toEqual({ model: "m", blockStreamingChunk: { minChars: 200 } });
+    expect(lowered.channels).toBe(base.channels);
+    expect(base.agents.defaults).toEqual({ model: "m" });
+
+    const configured = { agents: { defaults: { blockStreamingChunk: { minChars: 500 } } } };
+    expect(await cfgSeen("bot-ws", configured)).toBe(configured);
+    const maxOnly = { agents: { defaults: { blockStreamingChunk: { maxChars: 600 } } } };
+    expect((await cfgSeen("bot-ws", maxOnly)).agents.defaults.blockStreamingChunk).toEqual({
+      maxChars: 600,
+      minChars: 200,
+    });
+    expect(await cfgSeen("agent-callback", base)).toBe(base);
+  });
+
   it("strips a quoted runtime-context fence from reasoning before it reaches the bubble", async () => {
     // The core forwards reasoning raw, and the think block is shown to the user.
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async (params) => {

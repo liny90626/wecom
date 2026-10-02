@@ -124,11 +124,16 @@ describe("WecomMediaService", () => {
       maxBytes: 10,
     });
     await new WecomMediaService(core, {
-      channels: { wecom: { media: { downloadTimeoutMs: 90_000 } } },
+      channels: { wecom: { media: { downloadTimeoutMs: 40_000 } } },
     } as never).downloadEncryptedMedia({ url: "https://example.com/b", aesKey: "k", maxBytes: 10 });
+    // Capped below the 60 s prepare timeout, so a stalled file degrades instead
+    // of timing out the whole turn.
+    await new WecomMediaService(core, {
+      channels: { wecom: { network: { timeoutMs: 120_000 } } },
+    } as never).downloadEncryptedMedia({ url: "https://example.com/c", aesKey: "k", maxBytes: 10 });
 
     expect(decryptWecomMediaWithMeta.mock.calls.map((call) => call[2].http.timeoutMs)).toEqual([
-      30_000, 90_000,
+      30_000, 40_000, 45_000,
     ]);
   });
 

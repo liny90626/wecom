@@ -26,6 +26,12 @@ export class WecomInboundMediaTooLargeError extends Error {
 
 /** A prefetch nobody consumed (dropped or superseded frame) is released after this. */
 const PREFETCH_TTL_MS = 60_000;
+/**
+ * Upper bound for one Bot WS download, below the dispatcher's 60 s prepare
+ * timeout: a stalled file then degrades to a note beside the user's text
+ * instead of timing out the whole turn.
+ */
+const MAX_DOWNLOAD_TIMEOUT_MS = 45_000;
 
 export class WecomMediaService {
   private readonly prefetched = new Map<
@@ -67,12 +73,16 @@ export class WecomMediaService {
     url: string;
     aesKey: string;
     maxBytes: number;
+    signal?: AbortSignal;
   }): Promise<NormalizedMediaAttachment> {
     const decrypted = await decryptWecomMediaWithMeta(params.url, params.aesKey, {
       maxBytes: params.maxBytes,
       // The same media.downloadTimeoutMs (30 s default) the webhook path honours;
       // the bare 15 s default was too short for a large file on a slow line.
-      http: { timeoutMs: resolveWecomMediaDownloadTimeoutMs(this.cfg) },
+      http: {
+        timeoutMs: Math.min(resolveWecomMediaDownloadTimeoutMs(this.cfg), MAX_DOWNLOAD_TIMEOUT_MS),
+        signal: params.signal,
+      },
     });
     return {
       buffer: decrypted.buffer,
@@ -140,10 +150,14 @@ export class WecomMediaService {
     return first ? this.downloadAttachment(event, first) : Promise.resolve(undefined);
   }
 
-  /** Downloads one of the event's attachments; the first goes through normalizeFirstAttachment. */
+  /**
+   * Downloads one of the event's attachments; the first goes through
+   * normalizeFirstAttachment. `signal` stops it when the turn is abandoned.
+   */
   async downloadAttachment(
     event: UnifiedInboundEvent,
     attachment: NonNullable<UnifiedInboundEvent["attachments"]>[number],
+    signal?: AbortSignal,
   ): Promise<NormalizedMediaAttachment | undefined> {
     if (!attachment.remoteUrl) {
       return undefined;
@@ -158,6 +172,7 @@ export class WecomMediaService {
           url: attachment.remoteUrl,
           aesKey: attachment.aesKey,
           maxBytes,
+          signal,
         });
       }
       return await this.downloadRemoteMedia({ url: attachment.remoteUrl, maxBytes });

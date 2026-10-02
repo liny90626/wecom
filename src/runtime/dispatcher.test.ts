@@ -2571,7 +2571,7 @@ describe("dispatchInboundEvent", () => {
     expect(fail).not.toHaveBeenCalled();
     expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
     const ctx = dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]![0].ctx;
-    expect(ctx.Body).toBe("[file]\n请总结这个文件\n[附件下载失败，未能读取]");
+    expect(ctx.Body).toBe("[file]\n请总结这个文件\n[附件读取失败]");
     expect(ctx.CommandBody).toBe("[file]\n请总结这个文件");
     expect(ctx.MediaPath).toBeUndefined();
   });
@@ -2587,10 +2587,13 @@ describe("dispatchInboundEvent", () => {
         { name: "image" as const, remoteUrl: "https://example.com/1", aesKey: "k" },
         { name: "image" as const, remoteUrl: "https://example.com/2", aesKey: "k" },
         { name: "image" as const, remoteUrl: "https://example.com/3", aesKey: "k" },
+        { name: "file" as const, remoteUrl: "https://example.com/4", aesKey: "k" },
       ],
     };
     const downloadAttachment = vi.fn(async (_event: unknown, attachment: { remoteUrl: string }) => {
       if (attachment.remoteUrl.endsWith("/2")) throw new Error("bad decrypt");
+      // Only a too-large first attachment ends the turn.
+      if (attachment.remoteUrl.endsWith("/4")) throw new WecomInboundMediaTooLargeError(1);
       return { buffer: Buffer.from("3"), contentType: "image/jpeg" };
     });
 
@@ -2612,12 +2615,13 @@ describe("dispatchInboundEvent", () => {
       replyHandle: makeReplyHandle(),
     });
 
-    expect(downloadAttachment).toHaveBeenCalledTimes(2);
+    expect(downloadAttachment).toHaveBeenCalledTimes(3);
+    expect(downloadAttachment.mock.calls[0]![2]).toBeInstanceOf(AbortSignal);
     const ctx = dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]![0].ctx;
     expect(ctx.MediaPath).toBe("/media/1");
     expect(ctx.MediaPaths).toEqual(["/media/1", "/media/3"]);
     expect(ctx.MediaTypes).toEqual(["image/png", "image/jpeg"]);
-    expect(ctx.Body).toBe("看这几张图\n[image]\n[image]\n[image]\n[附件下载失败，未能读取]");
+    expect(ctx.Body).toBe("看这几张图\n[image]\n[image]\n[image]\n[2 个附件读取失败]");
   });
 
   it("does not let warm-session metadata stall core dispatch", async () => {

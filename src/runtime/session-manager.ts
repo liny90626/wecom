@@ -73,11 +73,11 @@ export async function prepareInboundSession(params: {
     mediaService.normalizeFirstAttachment(event),
     ...(event.attachments ?? [])
       .slice(1, MAX_INBOUND_ATTACHMENTS)
-      .map((attachment) => mediaService.downloadAttachment(event, attachment)),
+      .map((attachment) => mediaService.downloadAttachment(event, attachment, abortSignal)),
   ]);
   const media: Array<{ path: string; contentType?: string }> = [];
   let failedCount = 0;
-  for (const download of downloads) {
+  for (const [index, download] of downloads.entries()) {
     try {
       if (download.status === "rejected") {
         throw download.reason;
@@ -90,10 +90,11 @@ export async function prepareInboundSession(params: {
         });
       }
     } catch (error) {
-      // Too large is the user's to act on, and an abort is no failure: both still
-      // end the turn. Any other lost attachment must not take the text typed with
-      // it down too: the agent gets the text and learns the file was unreadable.
-      if (error instanceof WecomInboundMediaTooLargeError || abortSignal?.aborted) {
+      // An abort is no failure, and a too-large first attachment is the user's to
+      // act on: both still end the turn, as before. Any other lost attachment
+      // must not take the text typed with it, or the other files, down too: the
+      // agent gets them and learns this one was unreadable.
+      if (abortSignal?.aborted || (index === 0 && error instanceof WecomInboundMediaTooLargeError)) {
         throw error;
       }
       console.warn(
@@ -104,7 +105,7 @@ export async function prepareInboundSession(params: {
   }
   const rawBody =
     failedCount > 0
-      ? [event.text, `[${failedCount > 1 ? `${failedCount} 个` : ""}附件下载失败，未能读取]`]
+      ? [event.text, `[${failedCount > 1 ? `${failedCount} 个` : ""}附件读取失败]`]
           .filter((line) => line.trim())
           .join("\n")
       : event.text;

@@ -21,13 +21,13 @@ Fork 维护与修复贡献：**LinKy**
 
 ## Fork 修改说明
 
-本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-13`，生产基线为 OpenClaw `2026.9.7`（2026-10-01 起；`2026.7.1-2` 退出生产，保留为兼容底线）；版本规则为 `3.0.0-<构建号>`。
+本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-14`，生产基线为 OpenClaw `2026.7.1-2`（2026-10-02 从 9.7 回退，此后只支持这一个版本）；版本规则为 `3.0.0-<构建号>`。
 
 维护重点：Bot WS 长任务可靠投递（合并接管、ACK/流窗口兜底、分片与去重）、Bot/Agent 双通道、多账号隔离、企业微信协作能力，以及媒体白名单、运行时上下文围栏和生产配置回归。上游官方仓库是独立架构重建，本 fork 只移植经过验证的改动，不整树替换。版本详情见 [`changelog/`](./changelog/)。
 
 本轮收口 `wecom_mcp` 的 `851003 no authority`。根因是**结构性**的：`aibot_get_mcp_config` 签发的是 `/mcp/robot-doc`（「企微机器人文档 MCP」，**只有机器人自身作用域**），而后台「查看使用方式」的 apikey 签发的是 `/mcp/v2/bot/<biz_type>`（「动态文档 MCP」，**内嵌授权真人用户**）——不是授权没生效，是产品定位不同。因此新增 **`bot.mcpServers`** 配置项：按 `biz_type` 直接配后台地址，八个能力全部可用。同时严格对齐官方 MCP 实现（身份头、官方 UA、官方错误码分工、文档授权引导卡片），`tools/list` 按实测体积限幅，并与官方插件仓库同步了事件白名单、`enter_check_update` 版本握手与 `auth_change_event` 清缓存。完整说明见 [`changelog/v2.7.260-17.md`](./changelog/v2.7.260-17.md)。
 
-兼容目标是生产版 OpenClaw `2026.9.7`，同时保留 `2026.7.1-2` 作为兼容底线（仍须能编译、测试通过），一份构建同时运行在两条线上，不探测版本、不分叉；`devDependencies` 钉 `2026.9.7`，`npm run compat:check` 默认对基线、最新稳定版与 `2026.7.1-2` 各跑一遍 typecheck 与全量测试。`3.0.0-13` 在 2026.9.7 / 2026.7.1-2 各通过 886 个测试，两条线均不再需要类型补丁。注意：OpenClaw 9.7 自身要求 Node ≥ 22.22.3；9.7 在 Windows 上存在核心 bug（每条消息 `DataCloneError`），见 [`changelog/v3.0.0-13.md`](./changelog/v3.0.0-13.md)。`peerDependencies` 的 `^2026.6.11` 只表示安装兼容声明。
+只支持生产版 OpenClaw `2026.7.1-2`：`devDependencies` 钉这个版本，`npm run compat:check` 默认只对它跑 typecheck 与全量测试（需要评估升级时再显式传入其他版本）。`3.0.0-14` 在 2026.7.1-2 上全量通过。2026.9.7 曾短暂作为生产版，问题较多已回退；其 Windows `DataCloneError` 核心 bug 见 [`changelog/v3.0.0-13.md`](./changelog/v3.0.0-13.md)。`peerDependencies` 的 `^2026.6.11` 只表示安装兼容声明。
 
 **在 OpenClaw 2026.8.x 上运行必须放行会话钩子**：8.x 会拦截非内置插件的 `before_prompt_build` 钩子，而本插件的媒体、模板卡片与 `wecom-cli` 使用指引正是通过它注入的。安装向导已自动写入该配置；已安装的实例升级到 8.x 时请在 `openclaw.json` 补上：
 
@@ -62,7 +62,7 @@ node scripts/patch-wecom-long-message.mjs --check
 node scripts/patch-wecom-b3-merge-thinking.mjs --check
 npm run build
 npx vitest run
-npm run compat:check   # 对基线 2026.9.7、最新稳定版与兼容底线 2026.7.1-2 各跑一遍 typecheck + 全量测试（首次会下载到 ~/.cache/wecom-openclaw-compat/）
+npm run compat:check   # 对生产版 2026.7.1-2 跑 typecheck + 全量测试（首次会下载到 ~/.cache/wecom-openclaw-compat/）；评估升级时可传入其他版本
 ```
 
 如只改 README 等文档文件，可使用 `git diff --check` 做格式自检。
@@ -317,9 +317,22 @@ npm run compat:check   # 对基线 2026.9.7、最新稳定版与兼容底线 202
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
+#### 📌 3.0.0-14（2026-10-02，LinKy fork）
+
+生产回退到 OpenClaw 2026.7.1-2，此后只支持这一个版本，删除了只服务 9.x 的代码。对抗式检查与性能、稳定性提升：
+- 入站去重表只增不减，改为保留 30 分钟；
+- 重复送达的媒体消息不再留下永不关闭、每 5 分钟推送一次状态的回复；
+- 内部报错原文不再展示给用户；
+- 长任务最后一段正文不再因推送与最终回复撞车而发两遍；
+- WS SDK 放弃重连后只重启 WS 适配器（带退避），同账号的 agent 回调不受影响；
+- 思考片段不再逐条同步写日志；
+- 媒体在 1 秒合并窗口内提前下载。
+
+详见 [`changelog/v3.0.0-14.md`](./changelog/v3.0.0-14.md)。
+
 #### 📌 3.0.0-13（2026-10-01，LinKy fork）
 
-生产升级 OpenClaw 2026.9.7 的兼容修复：9.7 删除了 `onTurnAdopted`，被核心并入运行中任务的消息会被插件重发一次并收到「没有被处理」的假通知，现改读分发结果上的 `deferredToActiveRun`；离开 2026-10-01 后待删除的 `infra-runtime` 子路径；附件同时带上新的 `media` 字段；修复 9.7 下真实分发器测试互相干扰。移植官方 9.15 的 `wecomcli-doc` 新建流程（旧脚本依赖 OpenClaw 不设置的沙箱变量，必然失败）与 `wecomcli-sheet` 新建流程（本地生成 `.xlsx` 再导入，需要 Python + `openpyxl`）。`@wecom/cli` 保持 1.2.0。开发基线改为 9.7，7.1-2 作为兼容底线。9.7 在 Windows 上每条消息 `DataCloneError` 是 OpenClaw 核心 bug，不在插件修复。详见 [`changelog/v3.0.0-13.md`](./changelog/v3.0.0-13.md)。
+生产升级 OpenClaw 2026.9.7 的兼容修复：9.7 删除了 `onTurnAdopted`，被核心并入运行中任务的消息会被插件重发一次并收到「没有被处理」的假通知，现改读分发结果上的 `deferredToActiveRun`；离开 2026-10-01 后待删除的 `infra-runtime` 子路径；附件同时带上新的 `media` 字段；修复 9.7 下真实分发器测试互相干扰。移植官方 9.15 的 `wecomcli-doc` 新建流程（旧脚本依赖 OpenClaw 不设置的沙箱变量，必然失败）与 `wecomcli-sheet` 新建流程（本地生成 `.xlsx` 再导入，需要 Python + `openpyxl`）。`@wecom/cli` 保持 1.2.0。开发基线改为 9.7，7.1-2 作为兼容底线。9.7 在 Windows 上每条消息 `DataCloneError` 是 OpenClaw 核心 bug，不在插件修复。详见 [`changelog/v3.0.0-13.md`](./changelog/v3.0.0-13.md)。（生产已回退 7.1-2，本版的 9.x 专用代码已在 3.0.0-14 撤回，技能移植保留。）
 
 #### 📌 3.0.0-12（2026-09-29，LinKy fork）
 
@@ -588,13 +601,11 @@ openclaw plugins install @yanhaidao/wecom
 openclaw plugins enable wecom
 ```
 
-本 fork 的发布包是本地 tgz。OpenClaw 2026.9.7 安装本地归档时会先拒绝（不在 ClawHub 审核范围内），并要求确认插件能力，需要显式加两个参数；装完重启网关生效：
+本 fork 的发布包是本地 tgz，在生产版 OpenClaw 2026.7.1-2 上直接安装，装完重启网关生效：
 
 ```bash
-openclaw plugins install --force --accept-capabilities <yanhaidao-wecom-版本.tgz 的绝对路径>
+openclaw plugins install <yanhaidao-wecom-版本.tgz 的绝对路径>
 ```
-
-非内置插件的会话钩子仍需 `plugins.entries.wecom.hooks.allowConversationAccess=true`（见上文）；缺失时 `openclaw plugins inspect wecom --runtime` 会报 `typed hook "before_prompt_build" blocked`。
 
 ### 1.2 互动向导式初配 (适合个人开发者与极客)
 

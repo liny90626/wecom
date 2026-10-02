@@ -4,11 +4,10 @@
   "commit": "3b1cbe3e664352821758d99ae5907f5620fce26e",
   "packageVersion": "2026.9.15",
   "openclawCompatibility": {
-    "productionBaseline": "2026.9.7",
-    "compatibilityFloor": "2026.7.1-2",
-    "latestVerified": "2026.9.7"
+    "productionBaseline": "2026.7.1-2",
+    "latestVerified": "2026.7.1-2"
   },
-  "synchronizedAt": "2026-10-01",
+  "synchronizedAt": "2026-10-02",
   "trackedSurfaces": [
     "index.ts",
     "openclaw.plugin.json",

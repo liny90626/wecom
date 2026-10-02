@@ -1963,22 +1963,9 @@ export function createBotWsReplyHandle(params: {
   // only on a confirmed push, so a final resolving its remainder meanwhile
   // resends that text. Process-only pushes never move the bookmark and must
   // not hold the final back.
+  // Every chunk send is bounded by the reply send timeout and the chain
+  // catches its own errors, so awaiting it always settles.
   let previewExpiredNoticeTask: Promise<void> | undefined;
-  const awaitInFlightBodyPush = async (): Promise<void> => {
-    const task = previewExpiredNoticeTask;
-    if (!task) {
-      return;
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      task,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, WECOM_REPLY_SEND_TIMEOUT_MS);
-        timer.unref?.();
-      }),
-    ]);
-    clearTimeout(timer);
-  };
   let previewExpiredNoticeCancelled = false;
   let previewExpiredNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   // Only a cadence that has actually started may be deferred: arming one from
@@ -4018,6 +4005,14 @@ export function createBotWsReplyHandle(params: {
       notifyPeerActive();
       if (info.kind === "final") {
         clearPendingPreview();
+        // Let a dead-window body push still awaiting its ACK settle first: the
+        // remainder is resolved from the bookmark its confirmation advances,
+        // and resolving it now would push that text a second time. Waited
+        // before every supersede guard so they judge the state after it.
+        await previewExpiredNoticeTask;
+        if (runtimeRetired) {
+          return;
+        }
       }
 
       if (
@@ -4160,13 +4155,6 @@ export function createBotWsReplyHandle(params: {
         accumulatedText = mergeReplyText(accumulatedText, text);
         await deliverBlockPreview(accumulatedText);
         return;
-      }
-
-      if (info.kind === "final") {
-        // Let a dead-window body push still awaiting its ACK confirm first: the
-        // remainder below is resolved from the bookmark that confirmation
-        // advances, and resolving it now would push that text a second time.
-        await awaitInFlightBodyPush();
       }
 
       if (info.kind === "final" && supersededByNewInbound && suppressSupersededFinalPush) {

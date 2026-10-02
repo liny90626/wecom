@@ -26,16 +26,7 @@ export class WecomAccountRuntime {
   readonly auditLog = new WecomAuditLog();
   readonly statusRegistry = new WecomStatusRegistry();
   private readonly runtimeStatus: AccountRuntimeStatusSnapshot;
-  private reportFatal: (error: Error) => void = () => {};
-  /**
-   * Settles when a transport gives up for good (the WS SDK stops reconnecting
-   * after its retry budget or repeated auth failures). The account task then
-   * exits with that error so OpenClaw restarts it with backoff, instead of
-   * leaving it dead until the health monitor notices minutes later.
-   */
-  readonly transportFatal = new Promise<Error>((resolve) => {
-    this.reportFatal = resolve;
-  });
+  private readonly transportFatalListeners = new Set<(error: Error) => void>();
 
   constructor(
     readonly core: PluginRuntime,
@@ -66,8 +57,22 @@ export class WecomAccountRuntime {
     };
   }
 
+  /**
+   * A transport gave up for good (the WS SDK stops reconnecting after its retry
+   * budget or repeated auth failures). Its owner restarts just that transport;
+   * the rest of the account — agent callbacks, dedupe state — keeps running.
+   */
   reportTransportFatal(error: Error): void {
-    this.reportFatal(error);
+    for (const listener of this.transportFatalListeners) {
+      listener(error);
+    }
+  }
+
+  onTransportFatal(listener: (error: Error) => void): () => void {
+    this.transportFatalListeners.add(listener);
+    return () => {
+      this.transportFatalListeners.delete(listener);
+    };
   }
 
   get account() {

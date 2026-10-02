@@ -163,13 +163,7 @@ export async function monitorWecomProvider(
       `[${account.accountId}] runtime status health=${accountRuntime.buildRuntimeStatus().health} transports=${(accountRuntime.buildRuntimeStatus().transportSessions ?? []).join(" | ") || "none"}`,
     );
 
-    const fatal = await Promise.race([
-      waitForAbortSignal(ctx.abortSignal).then(() => undefined),
-      accountRuntime.transportFatal,
-    ]);
-    if (fatal) {
-      throw fatal;
-    }
+    await waitForAbortSignal(ctx.abortSignal);
   } finally {
     botService.stop();
     agentIngress.stop();

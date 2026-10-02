@@ -8041,6 +8041,46 @@ describe("createBotWsReplyHandle", () => {
     expect(pushes.filter((text: string) => text.includes("第二段"))).toHaveLength(1);
   });
 
+  it("waits out a slow multi-chunk body push before resolving the final's remainder", async () => {
+    let dead = false;
+    const client = {
+      replyStream: vi.fn(async () => {
+        if (dead) throw { errcode: 846608, errmsg: "stream message update expired" };
+        return {};
+      }),
+      // Each chunk takes 6 s to ACK: the push outlasts any single send timeout.
+      sendMessage: vi.fn(() => new Promise((resolve) => setTimeout(() => resolve({}), 6_000))),
+    } as unknown as WSClient;
+    const handle = createBotWsReplyHandle({
+      client,
+      frame: {
+        headers: { req_id: "race_multi_chunk_req" },
+        body: { msgid: "race_multi_chunk_msg", from: { userid: "u1" }, chattype: "single" },
+        cmd: "aibot_msg_callback",
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: true,
+    });
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    dead = true;
+    const first = `第一段：${"甲".repeat(100)}`;
+    const big = `第二段：${"乙".repeat(3400)}\n\n${"丙".repeat(3400)}尾巴结束`;
+    await handle.deliver({ text: first }, { kind: "block" });
+    await vi.advanceTimersByTimeAsync(25_000);
+    const lastBlock = handle.deliver({ text: big }, { kind: "block" });
+    await Promise.resolve();
+    const final = handle.deliver({ text: `${first}\n\n${big}` }, { kind: "final" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await lastBlock;
+    await final;
+
+    const pushes = (client.sendMessage as any).mock.calls.map((call: any[]) =>
+      String(call[1].markdown.content),
+    );
+    expect(pushes.filter((text: string) => text.includes("尾巴结束"))).toHaveLength(1);
+  });
+
   it("closes the bubble on the generic notice, never on an internal error message", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

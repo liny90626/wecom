@@ -42,6 +42,14 @@ describe("resolveWecomMergedMediaLocalRoots", () => {
     );
   });
 
+  it("expands a Windows-style ~\\ root to the home directory", () => {
+    const roots = resolveWecomMergedMediaLocalRoots({
+      cfg: { channels: { wecom: { media: { localRoots: ["~\\wecom-share"] } } } } as never,
+    });
+
+    expect(roots).toContain(path.resolve(`${os.homedir()}\\wecom-share`));
+  });
+
   it("keeps defaults, base roots, and configured roots without duplicates", () => {
     vi.stubEnv("OPENCLAW_STATE_DIR", "/tmp/wecom-state");
 

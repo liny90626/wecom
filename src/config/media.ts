@@ -30,7 +30,7 @@ function normalizeWecomLocalRoot(root: string): string | undefined {
   if (!trimmed) {
     return undefined;
   }
-  return path.resolve(trimmed.replace(/^~(?=\/|$)/, os.homedir()));
+  return path.resolve(trimmed.replace(/^~(?=[\\/]|$)/, os.homedir()));
 }
 
 function getWecomCommonUserMediaLocalRoots(): readonly string[] {

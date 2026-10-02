@@ -82,6 +82,38 @@ describe("WecomAccountRuntime", () => {
     });
   });
 
+  it("delivers reasoning without per-delta log lines or status emits, and logs a body once", async () => {
+    dispatchInboundEventMock.mockImplementation(async (params: { replyHandle: ReplyHandle }) => {
+      await params.replyHandle.deliver({ text: "思考中", isReasoning: true }, { kind: "block" });
+      await params.replyHandle.deliver({ text: "思考中，继续", isReasoning: true }, { kind: "block" });
+      await params.replyHandle.deliver({ text: "答案" }, { kind: "final" });
+    });
+    const info = vi.fn();
+    const statusSink = vi.fn();
+    const runtime = new WecomAccountRuntime(
+      {} as any,
+      {} as any,
+      { account: { accountId: "acct" } } as any,
+      { info },
+      statusSink,
+    );
+    const deliver = vi.fn().mockResolvedValue(undefined);
+
+    await runtime.handleEvent(makeEvent(), {
+      context: makeEvent().replyContext,
+      deliver,
+    });
+
+    expect(deliver).toHaveBeenCalledTimes(3);
+    const deliverLines = info.mock.calls
+      .map(([line]) => String(line))
+      .filter((line) => line.includes("deliver"));
+    expect(deliverLines).toHaveLength(1);
+    expect(deliverLines[0]).toContain("kind=final");
+    expect(deliverLines[0]).toContain("durationMs=");
+    expect(JSON.stringify(statusSink.mock.calls)).not.toContain("思考中");
+  });
+
   it("forwards reply activation through the runtime wrapper", async () => {
     let trackedReplyHandle: ReplyHandle | undefined;
     dispatchInboundEventMock.mockImplementation(async (params: { replyHandle: ReplyHandle }) => {

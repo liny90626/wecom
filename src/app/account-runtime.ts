@@ -97,22 +97,25 @@ export class WecomAccountRuntime {
         replyHandle.activate?.();
       },
       deliver: async (payload: ReplyPayload, info) => {
+        // Reasoning streams in one delivery per model delta, and every log line
+        // is a synchronous file write on the event loop (~1 ms each on the core
+        // logger). Its text is not an outbound summary either; the next body
+        // delivery refreshes the status.
+        if (info.kind === "block" && payload.isReasoning === true) {
+          await replyHandle.deliver(payload, info);
+          this.runtimeStatus.lastOutboundAt = Date.now();
+          return;
+        }
         const deliverStartedAt = Date.now();
-        const textLen = payload.text?.trim().length ?? 0;
-        const mediaCount = (payload.mediaUrls?.length ?? 0) + (payload.mediaUrl ? 1 : 0);
-        this.log.info?.(
-          `[wecom-runtime] deliver-start account=${event.accountId} transport=${replyHandle.context.transport} kind=${info.kind} messageId=${event.messageId} textLen=${textLen} mediaCount=${mediaCount} reasoning=${String(payload.isReasoning === true)}`,
-        );
         await replyHandle.deliver(payload, info);
         this.runtimeStatus.lastOutboundAt = Date.now();
         const outboundSummary =
           payload.text?.trim() || payload.mediaUrl || payload.mediaUrls?.[0] || info.kind;
         this.runtimeStatus.recentOutboundSummary = `${replyHandle.context.transport} ${outboundSummary.slice(0, 120)}`;
+        const textLen = payload.text?.trim().length ?? 0;
+        const mediaCount = (payload.mediaUrls?.length ?? 0) + (payload.mediaUrl ? 1 : 0);
         this.log.info?.(
-          `[wecom-runtime] outbound account=${event.accountId} transport=${replyHandle.context.transport} kind=${info.kind} messageId=${event.messageId} summary=${JSON.stringify(this.runtimeStatus.recentOutboundSummary)}`,
-        );
-        this.log.info?.(
-          `[wecom-runtime] deliver-done account=${event.accountId} transport=${replyHandle.context.transport} kind=${info.kind} messageId=${event.messageId} durationMs=${Date.now() - deliverStartedAt}`,
+          `[wecom-runtime] deliver-done account=${event.accountId} transport=${replyHandle.context.transport} kind=${info.kind} messageId=${event.messageId} textLen=${textLen} mediaCount=${mediaCount} durationMs=${Date.now() - deliverStartedAt} summary=${JSON.stringify(this.runtimeStatus.recentOutboundSummary)}`,
         );
         this.emitStatus();
       },

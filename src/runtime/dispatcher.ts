@@ -91,7 +91,7 @@ function adoptSupersededPendingInbound(
 ): UnifiedInboundEvent {
   const previousText = options.includeText ? previous.text.trim() : "";
   const nextText = next.text.trim();
-  // Newest attachment first: only the first one becomes MediaPath, and a
+  // Newest attachment first: the first one becomes MediaPath, and a
   // replacement upload should win over the one it replaced.
   const attachments = [...(next.attachments ?? []), ...(previous.attachments ?? [])];
   return {

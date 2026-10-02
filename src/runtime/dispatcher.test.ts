@@ -2576,6 +2576,50 @@ describe("dispatchInboundEvent", () => {
     expect(ctx.MediaPath).toBeUndefined();
   });
 
+  it("hands every attachment of the turn to the agent and keeps the rest when one fails", async () => {
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const event = {
+      ...makeEvent("msg-mixed-three-images", "看这几张图\n[image]\n[image]\n[image]"),
+      attachments: [
+        { name: "image" as const, remoteUrl: "https://example.com/1", aesKey: "k" },
+        { name: "image" as const, remoteUrl: "https://example.com/2", aesKey: "k" },
+        { name: "image" as const, remoteUrl: "https://example.com/3", aesKey: "k" },
+      ],
+    };
+    const downloadAttachment = vi.fn(async (_event: unknown, attachment: { remoteUrl: string }) => {
+      if (attachment.remoteUrl.endsWith("/2")) throw new Error("bad decrypt");
+      return { buffer: Buffer.from("3"), contentType: "image/jpeg" };
+    });
+
+    await dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: makeStore() as any,
+      auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+      mediaService: {
+        normalizeFirstAttachment: vi
+          .fn()
+          .mockResolvedValue({ buffer: Buffer.from("1"), contentType: "image/png" }),
+        downloadAttachment,
+        saveInboundAttachment: vi.fn(async (_event: unknown, media: { buffer: Buffer }) =>
+          `/media/${media.buffer.toString()}`,
+        ),
+      } as any,
+      event,
+      replyHandle: makeReplyHandle(),
+    });
+
+    expect(downloadAttachment).toHaveBeenCalledTimes(2);
+    const ctx = dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]![0].ctx;
+    expect(ctx.MediaPath).toBe("/media/1");
+    expect(ctx.MediaPaths).toEqual(["/media/1", "/media/3"]);
+    expect(ctx.MediaTypes).toEqual(["image/png", "image/jpeg"]);
+    expect(ctx.Body).toBe("看这几张图\n[image]\n[image]\n[image]\n[附件下载失败，未能读取]");
+  });
+
   it("does not let warm-session metadata stall core dispatch", async () => {
     let releaseMetadata!: () => void;
     const metadataTask = new Promise<void>((resolve) => {

@@ -133,11 +133,19 @@ export class WecomMediaService {
     return this.downloadFirstAttachment(event);
   }
 
-  private async downloadFirstAttachment(
+  private downloadFirstAttachment(
     event: UnifiedInboundEvent,
   ): Promise<NormalizedMediaAttachment | undefined> {
     const first = event.attachments?.[0];
-    if (!first?.remoteUrl) {
+    return first ? this.downloadAttachment(event, first) : Promise.resolve(undefined);
+  }
+
+  /** Downloads one of the event's attachments; the first goes through normalizeFirstAttachment. */
+  async downloadAttachment(
+    event: UnifiedInboundEvent,
+    attachment: NonNullable<UnifiedInboundEvent["attachments"]>[number],
+  ): Promise<NormalizedMediaAttachment | undefined> {
+    if (!attachment.remoteUrl) {
       return undefined;
     }
     // Keep fetch/decrypt/save on the same account-aware limit instead of falling back
@@ -145,14 +153,14 @@ export class WecomMediaService {
     const maxBytes = this.resolveInboundMaxBytes(event.accountId);
     try {
       // Bot-ws media is AES-encrypted; use decryption when aesKey is present
-      if (first.aesKey) {
+      if (attachment.aesKey) {
         return await this.downloadEncryptedMedia({
-          url: first.remoteUrl,
-          aesKey: first.aesKey,
+          url: attachment.remoteUrl,
+          aesKey: attachment.aesKey,
           maxBytes,
         });
       }
-      return await this.downloadRemoteMedia({ url: first.remoteUrl, maxBytes });
+      return await this.downloadRemoteMedia({ url: attachment.remoteUrl, maxBytes });
     } catch (error) {
       if (error instanceof ResponseBodyTooLargeError) {
         throw new WecomInboundMediaTooLargeError(maxBytes);

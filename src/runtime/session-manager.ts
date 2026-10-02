@@ -15,6 +15,8 @@ export type PreparedSession = {
 };
 
 const COLD_SESSION_METADATA_GRACE_MS = 1_000;
+/** Attachments past this many are left out of one turn, as on the webhook path. */
+const MAX_INBOUND_ATTACHMENTS = 8;
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
@@ -65,28 +67,47 @@ export async function prepareInboundSession(params: {
   const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(cfg);
   throwIfAborted(abortSignal);
 
-  let mediaPath: string | undefined;
-  let mediaType: string | undefined;
-  let rawBody = event.text;
-  try {
-    const firstAttachment = await mediaService.normalizeFirstAttachment(event);
-    throwIfAborted(abortSignal);
-    if (firstAttachment) {
-      mediaPath = await mediaService.saveInboundAttachment(event, firstAttachment);
-      mediaType = firstAttachment.contentType;
+  // Every attachment reaches the agent (a mixed message carries several images,
+  // a merged turn several files); the first may already be prefetched.
+  const downloads = await Promise.allSettled([
+    mediaService.normalizeFirstAttachment(event),
+    ...(event.attachments ?? [])
+      .slice(1, MAX_INBOUND_ATTACHMENTS)
+      .map((attachment) => mediaService.downloadAttachment(event, attachment)),
+  ]);
+  const media: Array<{ path: string; contentType?: string }> = [];
+  let failedCount = 0;
+  for (const download of downloads) {
+    try {
+      if (download.status === "rejected") {
+        throw download.reason;
+      }
+      throwIfAborted(abortSignal);
+      if (download.value) {
+        media.push({
+          path: await mediaService.saveInboundAttachment(event, download.value),
+          contentType: download.value.contentType,
+        });
+      }
+    } catch (error) {
+      // Too large is the user's to act on, and an abort is no failure: both still
+      // end the turn. Any other lost attachment must not take the text typed with
+      // it down too: the agent gets the text and learns the file was unreadable.
+      if (error instanceof WecomInboundMediaTooLargeError || abortSignal?.aborted) {
+        throw error;
+      }
+      console.warn(
+        `[wecom-media] inbound-attachment-failed account=${event.accountId} messageId=${event.messageId} error=${error instanceof Error ? error.message : String(error)}`,
+      );
+      failedCount += 1;
     }
-  } catch (error) {
-    // Too large is the user's to act on, and an abort is no failure: both still
-    // end the turn. Any other lost attachment must not take the text typed with
-    // it down too: the agent gets the text and learns the file was unreadable.
-    if (error instanceof WecomInboundMediaTooLargeError || abortSignal?.aborted) {
-      throw error;
-    }
-    console.warn(
-      `[wecom-media] inbound-attachment-failed account=${event.accountId} messageId=${event.messageId} error=${error instanceof Error ? error.message : String(error)}`,
-    );
-    rawBody = [event.text, "[附件下载失败，未能读取]"].filter((line) => line.trim()).join("\n");
   }
+  const rawBody =
+    failedCount > 0
+      ? [event.text, `[${failedCount > 1 ? `${failedCount} 个` : ""}附件下载失败，未能读取]`]
+          .filter((line) => line.trim())
+          .join("\n")
+      : event.text;
   throwIfAborted(abortSignal);
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "WeCom",
@@ -145,9 +166,16 @@ export async function prepareInboundSession(params: {
     OriginatingTo: originatingTo,
     MessageSid: event.messageId,
     CommandAuthorized: true,
-    MediaPath: mediaPath,
-    MediaUrl: mediaPath,
-    MediaType: mediaType,
+    MediaPath: media[0]?.path,
+    MediaUrl: media[0]?.path,
+    MediaType: media[0]?.contentType,
+    ...(media.length > 1
+      ? {
+          MediaPaths: media.map((item) => item.path),
+          MediaUrls: media.map((item) => item.path),
+          MediaTypes: media.map((item) => item.contentType ?? ""),
+        }
+      : {}),
   });
 
   if (source) {

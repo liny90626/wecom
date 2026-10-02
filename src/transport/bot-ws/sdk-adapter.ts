@@ -381,16 +381,18 @@ export class BotWsSdkAdapter {
       clearWecomMcpAccountCache(this.runtime.account.accountId);
       const normalizedReason = String(reason ?? "").toLowerCase();
       // SDK 1.0.7 words a handover as "New connection established, server
-      // disconnected this connection".
+      // disconnected this connection", right after the disconnected_event
+      // frame that already recorded it.
+      const handedOver = normalizedReason.includes("new connection");
       const kicked =
-        normalizedReason.includes("new connection") ||
+        handedOver ||
         normalizedReason.includes("kick") ||
         normalizedReason.includes("owner") ||
         normalizedReason.includes("replaced");
       this.log.warn?.(
         `[wecom-ws] disconnected account=${this.runtime.account.accountId} kicked=${String(kicked)} reason=${reason ?? "unknown"}`,
       );
-      if (kicked) {
+      if (kicked && !handedOver) {
         this.runtime.recordOperationalIssue({
           transport: "bot-ws",
           category: "ws-kicked",
@@ -603,7 +605,10 @@ export class BotWsSdkAdapter {
         this.log.info?.(
           `[wecom-ws] duplicate inbound ignored account=${event.accountId} messageId=${event.messageId}`,
         );
-        this.runtime.recordOperationalIssue({
+        // Audit only, like the dispatcher's own duplicate drop: a redelivery is
+        // not an account error.
+        this.runtime.auditLog.appendOperational({
+          accountId: event.accountId,
           transport: "bot-ws",
           category: "duplicate-inbound",
           summary: `redelivered ${event.inboundKind} ignored before dispatch`,

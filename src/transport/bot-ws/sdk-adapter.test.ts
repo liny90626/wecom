@@ -1727,6 +1727,7 @@ describe("BotWsSdkAdapter", () => {
 
     await waitForAsyncCallbacks();
 
+    expect(runtime.recordOperationalIssue).toHaveBeenCalledTimes(1);
     expect(runtime.recordOperationalIssue).toHaveBeenCalledWith(
       expect.objectContaining({
         transport: "bot-ws",
@@ -1866,6 +1867,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store,
+      auditLog: { appendOperational: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1895,9 +1897,11 @@ describe("BotWsSdkAdapter", () => {
 
     expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
     expect(runtime.handleEvent).not.toHaveBeenCalled();
-    expect(runtime.recordOperationalIssue).toHaveBeenCalledWith(
+    expect(runtime.auditLog.appendOperational).toHaveBeenCalledWith(
       expect.objectContaining({ category: "duplicate-inbound", messageId: "msg-image-1" }),
     );
+    // A redelivery is not an account error.
+    expect(runtime.recordOperationalIssue).not.toHaveBeenCalled();
   });
 
   it("tags an active push with the conversation kind, and omits it when unknown", async () => {

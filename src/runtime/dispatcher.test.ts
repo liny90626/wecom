@@ -88,17 +88,14 @@ function makeCore(
 function makeStore() {
   const seen = new Set<string>();
   return {
+    hasSeenInbound: (event: UnifiedInboundEvent) => seen.has(event.messageId),
     markInboundSeen: (event: UnifiedInboundEvent) => {
       if (seen.has(event.messageId)) return false;
       seen.add(event.messageId);
       return true;
     },
-    writeReplyContext: vi.fn(),
-    readReplyContext: vi.fn(),
     writeTransportSession: vi.fn(),
     readTransportSession: vi.fn(),
-    writeDeliveryTask: vi.fn(),
-    readDeliveryTask: vi.fn(),
   };
 }
 

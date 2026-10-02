@@ -585,6 +585,23 @@ export class BotWsSdkAdapter {
         account: botAccount,
         frame,
       });
+      // A redelivered message must not open a second bubble: the dispatcher drops
+      // it as a duplicate, and nothing would ever close that bubble again — it
+      // kept pushing long-task status until the gateway restarted. Media frames
+      // open theirs before dispatch, and a redelivered text would swallow a new
+      // media frame into a merged event that is dropped as a whole.
+      if (this.runtime.store.hasSeenInbound(event)) {
+        this.log.info?.(
+          `[wecom-ws] duplicate inbound ignored account=${event.accountId} messageId=${event.messageId}`,
+        );
+        this.runtime.recordOperationalIssue({
+          transport: "bot-ws",
+          category: "duplicate-inbound",
+          summary: `redelivered ${event.inboundKind} ignored before dispatch`,
+          messageId: event.messageId,
+        });
+        return;
+      }
       const callbackStreamOwnerToken = crypto.randomUUID();
       const forcedActivePushReason = this.resolveForcedActivePushReason(
         frame.headers.req_id ?? "",

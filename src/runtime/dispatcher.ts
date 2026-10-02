@@ -448,7 +448,6 @@ export async function dispatchInboundEvent(params: {
     summary: buildRawEnvelopeSummary(event),
     raw: event.raw,
   });
-  store.writeReplyContext(event.messageId, event.replyContext);
   const abortController = new AbortController();
   let obsoleteDispatch = false;
   let previousSupersedeDrain: Promise<void> | undefined;

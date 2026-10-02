@@ -49,6 +49,7 @@ vi.mock("@wecom/aibot-node-sdk", () => ({
 }));
 
 import { BotWsSdkAdapter } from "./sdk-adapter.js";
+import { InMemoryRuntimeStore } from "../../store/memory-store.js";
 import { getBotWsPushHandle, unregisterBotWsPushHandle } from "../../app/index.js";
 import { getTemplateCardFromCache } from "../../capability/card/manager.js";
 import { WecomGatewaySim } from "../../test-utils/wecom-gateway-sim.js";
@@ -89,6 +90,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockRejectedValue(new Error("frame exploded")),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -152,6 +154,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (_event, replyHandle) => {
         expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
         replyHandle.activate?.();
@@ -193,6 +196,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (_event, handle) => {
         replyHandle = handle;
       }),
@@ -247,6 +251,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandles.push(replyHandle);
       }),
@@ -354,6 +359,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandles.push(replyHandle);
       }),
@@ -418,6 +424,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandles.push(replyHandle);
       }),
@@ -480,6 +487,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandles.push(replyHandle);
       }),
@@ -546,6 +554,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandle.markDispatchSettled = markDispatchSettled;
       }),
@@ -584,6 +593,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -650,6 +660,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (event, replyHandle) => {
         const waitForNextAgentUpdate = () =>
           new Promise<void>((resolve) => setTimeout(resolve, 700));
@@ -781,6 +792,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (event, replyHandle) => {
         expect(event).toMatchObject({
           messageId: "msg-mixed-cumulative",
@@ -873,6 +885,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -931,6 +944,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -989,6 +1003,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1062,6 +1077,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1127,6 +1143,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1187,6 +1204,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1239,6 +1257,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1299,6 +1318,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi
         .fn()
         .mockImplementationOnce(() => firstDispatch)
@@ -1357,6 +1377,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi
         .fn()
         .mockImplementationOnce(() => firstDispatch)
@@ -1434,6 +1455,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandle.activate?.();
         await replyHandle.deliver({ text: "旧连接的最终答案" }, { kind: "final" });
@@ -1471,6 +1493,7 @@ describe("BotWsSdkAdapter", () => {
     oldAdapter.stop();
     const replacementRuntime = {
       ...oldRuntime,
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(),
     };
     const replacementAdapter = new BotWsSdkAdapter(replacementRuntime as any, {} as any);
@@ -1501,6 +1524,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandle.onTransportRetired?.(transportRetired);
         replyHandle.activate?.();
@@ -1552,6 +1576,7 @@ describe("BotWsSdkAdapter", () => {
           },
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1605,6 +1630,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1646,6 +1672,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1701,6 +1728,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1732,6 +1760,56 @@ describe("BotWsSdkAdapter", () => {
     expect(unhandledRejections).toHaveLength(0);
   });
 
+  it("ignores a redelivered media frame without opening a bubble it could never close", async () => {
+    // A media frame opens its placeholder before dispatch; if the dispatcher
+    // then drops it as a duplicate, nothing settles that handle and it pushed
+    // long-task status every five minutes until the gateway restarted.
+    const store = new InMemoryRuntimeStore();
+    const runtime = {
+      account: {
+        accountId: "acc-redelivered",
+        bot: {
+          accountId: "acc-redelivered",
+          wsConfigured: true,
+          ws: { botId: "bot-1", secret: "secret-1" },
+          config: {},
+        },
+      },
+      store,
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+    store.markInboundSeen({
+      accountId: "acc-redelivered",
+      transport: "bot-ws",
+      messageId: "msg-image-1",
+    } as any);
+    sdkMockState.client?.replyStream.mockClear();
+
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-image-redelivered" },
+      body: {
+        msgid: "msg-image-1",
+        msgtype: "image",
+        chattype: "single",
+        from: { userid: "user-1" },
+        image: { url: "https://example.com/a.png", aeskey: "k" },
+      },
+    });
+    await waitForAsyncCallbacks();
+
+    expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
+    expect(runtime.handleEvent).not.toHaveBeenCalled();
+    expect(runtime.recordOperationalIssue).toHaveBeenCalledWith(
+      expect.objectContaining({ category: "duplicate-inbound", messageId: "msg-image-1" }),
+    );
+  });
+
   it("tags an active push with the conversation kind, and omits it when unknown", async () => {
     const runtime = {
       account: {
@@ -1742,6 +1820,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1770,6 +1849,7 @@ describe("BotWsSdkAdapter", () => {
         accountId: "acc-card",
         bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1799,6 +1879,7 @@ describe("BotWsSdkAdapter", () => {
         accountId: "acc-card-fail",
         bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1827,6 +1908,7 @@ describe("BotWsSdkAdapter", () => {
         accountId: "acc-1",
         bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1854,6 +1936,7 @@ describe("BotWsSdkAdapter", () => {
         accountId: "acc-1",
         bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1882,6 +1965,7 @@ describe("BotWsSdkAdapter", () => {
         accountId: "acc-1",
         bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1919,6 +2003,7 @@ describe("BotWsSdkAdapter", () => {
           config: {},
         },
       },
+      store: new InMemoryRuntimeStore(),
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),

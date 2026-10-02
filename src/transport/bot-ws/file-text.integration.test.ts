@@ -123,6 +123,7 @@ async function runScenario(params: ScenarioParams): Promise<ScenarioResult> {
   const contexts: ScenarioResult["contexts"] = [];
   const seen = new Set<string>();
   const store = {
+    hasSeenInbound: (event: UnifiedInboundEvent) => seen.has(event.messageId),
     markInboundSeen: (event: UnifiedInboundEvent) => {
       if (seen.has(event.messageId)) {
         return false;
@@ -130,12 +131,8 @@ async function runScenario(params: ScenarioParams): Promise<ScenarioResult> {
       seen.add(event.messageId);
       return true;
     },
-    writeReplyContext: vi.fn(),
-    readReplyContext: vi.fn(),
     writeTransportSession: vi.fn(),
     readTransportSession: vi.fn(),
-    writeDeliveryTask: vi.fn(),
-    readDeliveryTask: vi.fn(),
   };
   let dispatchCount = 0;
   const dispatcher = vi.fn(async (dispatchParams: any) => {
@@ -212,6 +209,7 @@ async function runScenario(params: ScenarioParams): Promise<ScenarioResult> {
   };
   const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
   const runtime = {
+    store,
     account: {
       accountId,
       bot: {

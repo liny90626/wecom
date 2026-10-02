@@ -1,6 +1,6 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
-import { resolveWecomMediaMaxBytes } from "../config/index.js";
+import { resolveWecomMediaDownloadTimeoutMs, resolveWecomMediaMaxBytes } from "../config/index.js";
 import { ResponseBodyTooLargeError } from "../http.js";
 import { decryptWecomMediaWithMeta } from "../media.js";
 import type { UnifiedInboundEvent } from "../types/index.js";
@@ -70,6 +70,9 @@ export class WecomMediaService {
   }): Promise<NormalizedMediaAttachment> {
     const decrypted = await decryptWecomMediaWithMeta(params.url, params.aesKey, {
       maxBytes: params.maxBytes,
+      // The same media.downloadTimeoutMs (30 s default) the webhook path honours;
+      // the bare 15 s default was too short for a large file on a slow line.
+      http: { timeoutMs: resolveWecomMediaDownloadTimeoutMs(this.cfg) },
     });
     return {
       buffer: decrypted.buffer,

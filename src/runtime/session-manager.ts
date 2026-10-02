@@ -1,6 +1,6 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
-import type { WecomMediaService } from "../shared/media-service.js";
+import { WecomInboundMediaTooLargeError, type WecomMediaService } from "../shared/media-service.js";
 import type { UnifiedInboundEvent } from "../types/index.js";
 import { getPeerContextToken } from "../context-store.js";
 import { recordInboundSessionSettled } from "../shared/inbound-session.js";
@@ -64,20 +64,37 @@ export async function prepareInboundSession(params: {
   });
   const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(cfg);
   throwIfAborted(abortSignal);
+
+  let mediaPath: string | undefined;
+  let mediaType: string | undefined;
+  let rawBody = event.text;
+  try {
+    const firstAttachment = await mediaService.normalizeFirstAttachment(event);
+    throwIfAborted(abortSignal);
+    if (firstAttachment) {
+      mediaPath = await mediaService.saveInboundAttachment(event, firstAttachment);
+      mediaType = firstAttachment.contentType;
+    }
+  } catch (error) {
+    // Too large is the user's to act on, and an abort is no failure: both still
+    // end the turn. Any other lost attachment must not take the text typed with
+    // it down too: the agent gets the text and learns the file was unreadable.
+    if (error instanceof WecomInboundMediaTooLargeError || abortSignal?.aborted) {
+      throw error;
+    }
+    console.warn(
+      `[wecom-media] inbound-attachment-failed account=${event.accountId} messageId=${event.messageId} error=${error instanceof Error ? error.message : String(error)}`,
+    );
+    rawBody = [event.text, "[附件下载失败，未能读取]"].filter((line) => line.trim()).join("\n");
+  }
+  throwIfAborted(abortSignal);
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "WeCom",
     from: `${event.conversation.peerKind}:${event.conversation.peerId}`,
     previousTimestamp,
     envelope: envelopeOptions,
-    body: event.text,
+    body: rawBody,
   });
-
-  const firstAttachment = await mediaService.normalizeFirstAttachment(event);
-  throwIfAborted(abortSignal);
-  const mediaPath = firstAttachment
-    ? await mediaService.saveInboundAttachment(event, firstAttachment)
-    : undefined;
-  throwIfAborted(abortSignal);
   const defaultOriginatingTo =
     event.conversation.peerKind === "group"
       ? `wecom:group:${event.conversation.peerId}`
@@ -105,7 +122,7 @@ export async function prepareInboundSession(params: {
 
   const ctx = core.channel.reply.finalizeInboundContext({
     Body: body,
-    RawBody: event.text,
+    RawBody: rawBody,
     CommandBody: event.text,
     From:
       event.conversation.peerKind === "group"
@@ -130,7 +147,7 @@ export async function prepareInboundSession(params: {
     CommandAuthorized: true,
     MediaPath: mediaPath,
     MediaUrl: mediaPath,
-    MediaType: firstAttachment?.contentType,
+    MediaType: mediaType,
   });
 
   if (source) {

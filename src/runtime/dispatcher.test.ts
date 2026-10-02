@@ -9,6 +9,7 @@ const openClawHandoffState = vi.hoisted(() => ({
 vi.mock("openclaw/plugin-sdk/agent-harness", () => openClawHandoffState);
 
 import { dispatchInboundEvent } from "./dispatcher.js";
+import { WecomInboundMediaTooLargeError } from "../shared/media-service.js";
 import type { ReplyHandle, UnifiedInboundEvent } from "../types/index.js";
 import {
   getActiveBotWsReplyHandle,
@@ -2522,7 +2523,7 @@ describe("dispatchInboundEvent", () => {
   });
 
   it("fails an activated Bot WS reply once when prepare rejects before core starts", async () => {
-    const prepareError = new Error("attachment prepare failed");
+    const prepareError = new WecomInboundMediaTooLargeError(20 * 1024 * 1024);
     const fail = vi.fn().mockResolvedValue(undefined);
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn();
     const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
@@ -2545,6 +2546,34 @@ describe("dispatchInboundEvent", () => {
     expect(fail).toHaveBeenCalledOnce();
     expect(fail).toHaveBeenCalledWith(prepareError);
     expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+  });
+
+  it("keeps the text of a turn whose attachment download fails", async () => {
+    const fail = vi.fn().mockResolvedValue(undefined);
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+
+    await dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: makeStore() as any,
+      auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+      mediaService: {
+        normalizeFirstAttachment: vi.fn().mockRejectedValue(new Error("bad decrypt")),
+        saveInboundAttachment: vi.fn(),
+      } as any,
+      event: makeEvent("msg-media-download-failed", "[file]\n请总结这个文件"),
+      replyHandle: makeReplyHandle(vi.fn(), { fail }),
+    });
+
+    expect(fail).not.toHaveBeenCalled();
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
+    const ctx = dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]![0].ctx;
+    expect(ctx.Body).toBe("[file]\n请总结这个文件\n[附件下载失败，未能读取]");
+    expect(ctx.CommandBody).toBe("[file]\n请总结这个文件");
+    expect(ctx.MediaPath).toBeUndefined();
   });
 
   it("does not let warm-session metadata stall core dispatch", async () => {

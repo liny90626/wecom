@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const decryptWecomMediaWithMeta = vi.hoisted(() => vi.fn());
+vi.mock("../media.js", () => ({ decryptWecomMediaWithMeta }));
+
 import { ResponseBodyTooLargeError } from "../http.js";
 import { WecomInboundMediaTooLargeError, WecomMediaService } from "./media-service.js";
 
@@ -108,6 +112,24 @@ describe("WecomMediaService", () => {
       36 * 1024 * 1024,
       "ops.pdf",
     );
+  });
+
+  it("downloads encrypted media with the configured media timeout", async () => {
+    decryptWecomMediaWithMeta.mockResolvedValue({ buffer: Buffer.from("x") });
+    const core = { channel: { media: { fetchRemoteMedia, saveMediaBuffer } } } as never;
+
+    await new WecomMediaService(core, {} as never).downloadEncryptedMedia({
+      url: "https://example.com/a",
+      aesKey: "k",
+      maxBytes: 10,
+    });
+    await new WecomMediaService(core, {
+      channels: { wecom: { media: { downloadTimeoutMs: 90_000 } } },
+    } as never).downloadEncryptedMedia({ url: "https://example.com/b", aesKey: "k", maxBytes: 10 });
+
+    expect(decryptWecomMediaWithMeta.mock.calls.map((call) => call[2].http.timeoutMs)).toEqual([
+      30_000, 90_000,
+    ]);
   });
 
   it("turns an oversized download into a limit the user can act on", async () => {

@@ -21,13 +21,13 @@ Fork 维护与修复贡献：**LinKy**
 
 ## Fork 修改说明
 
-本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-14`，生产基线为 OpenClaw `2026.7.1-2`（2026-10-02 从 9.7 回退，此后只支持这一个版本）；版本规则为 `3.0.0-<构建号>`。
+本 fork 基于原作者 [`YanHaidao/wecom`](https://github.com/Yanhaidao/wecom)，由 **LinKy** 维护兼容性修复、问题复现、回归验证和文档。当前版本为 `3.0.0-15`，生产基线为 OpenClaw `2026.7.1-2`（2026-10-02 从 9.7 回退，此后只支持这一个版本）；版本规则为 `3.0.0-<构建号>`。
 
 维护重点：Bot WS 长任务可靠投递（合并接管、ACK/流窗口兜底、分片与去重）、Bot/Agent 双通道、多账号隔离、企业微信协作能力，以及媒体白名单、运行时上下文围栏和生产配置回归。上游官方仓库是独立架构重建，本 fork 只移植经过验证的改动，不整树替换。版本详情见 [`changelog/`](./changelog/)。
 
 本轮收口 `wecom_mcp` 的 `851003 no authority`。根因是**结构性**的：`aibot_get_mcp_config` 签发的是 `/mcp/robot-doc`（「企微机器人文档 MCP」，**只有机器人自身作用域**），而后台「查看使用方式」的 apikey 签发的是 `/mcp/v2/bot/<biz_type>`（「动态文档 MCP」，**内嵌授权真人用户**）——不是授权没生效，是产品定位不同。因此新增 **`bot.mcpServers`** 配置项：按 `biz_type` 直接配后台地址，八个能力全部可用。同时严格对齐官方 MCP 实现（身份头、官方 UA、官方错误码分工、文档授权引导卡片），`tools/list` 按实测体积限幅，并与官方插件仓库同步了事件白名单、`enter_check_update` 版本握手与 `auth_change_event` 清缓存。完整说明见 [`changelog/v2.7.260-17.md`](./changelog/v2.7.260-17.md)。
 
-只支持生产版 OpenClaw `2026.7.1-2`：`devDependencies` 钉这个版本，`npm run compat:check` 默认只对它跑 typecheck 与全量测试（需要评估升级时再显式传入其他版本）。`3.0.0-14` 在 2026.7.1-2 上全量通过。2026.9.7 曾短暂作为生产版，问题较多已回退；其 Windows `DataCloneError` 核心 bug 见 [`changelog/v3.0.0-13.md`](./changelog/v3.0.0-13.md)。`peerDependencies` 的 `^2026.6.11` 只表示安装兼容声明。
+只支持生产版 OpenClaw `2026.7.1-2`：`devDependencies` 钉这个版本，`npm run compat:check` 默认只对它跑 typecheck 与全量测试（需要评估升级时再显式传入其他版本）。`3.0.0-15` 在 2026.7.1-2 上全量通过。2026.9.7 曾短暂作为生产版，问题较多已回退；其 Windows `DataCloneError` 核心 bug 见 [`changelog/v3.0.0-13.md`](./changelog/v3.0.0-13.md)。`peerDependencies` 的 `^2026.6.11` 只表示安装兼容声明。
 
 **在 OpenClaw 2026.8.x 上运行必须放行会话钩子**：8.x 会拦截非内置插件的 `before_prompt_build` 钩子，而本插件的媒体、模板卡片与 `wecom-cli` 使用指引正是通过它注入的。安装向导已自动写入该配置；已安装的实例升级到 8.x 时请在 `openclaw.json` 补上：
 
@@ -317,22 +317,30 @@ npm run compat:check   # 对生产版 2026.7.1-2 跑 typecheck + 全量测试（
 
 > 以下展示本 fork 的近期维护修复与实验性改动；原仓库历史版本仍保留在 [changelog/ 目录](./changelog/) 中，便于回溯。
 
-#### 📌 3.0.0-14（2026-10-02，LinKy fork）
+#### 📌 3.0.0-15（2026-10-02，LinKy fork）
 
-生产回退到 OpenClaw 2026.7.1-2，此后只支持这一个版本，删除了只服务 9.x 的代码。对抗式检查与性能、稳定性提升：
+生产回退到 OpenClaw 2026.7.1-2，此后只支持这一个版本，删除了只服务 9.x 的代码（`3.0.0-14` 只是验收候选包，未发布，内容并入本版）。对照官方插件补齐：
+- 一条消息的多个附件（图文消息里的多张图、合并进同一轮的多个文件）全部交给 agent，最多 8 个；
+- 附件下载失败不再吞掉整轮，文字照常交给 agent 并注明附件读取失败；加密附件下载超时改用 `media.downloadTimeoutMs`；
+- 加密媒体 URL 不再写进给模型的正文；
+- 文档授权变更事件会告诉 agent 授予了哪些权限、能否继续文档操作；
+- Windows 下 `~\` 开头的 `media.localRoots` 能正确展开。
+
+对抗式检查与性能、稳定性提升：
 - 入站去重表只增不减，改为保留 30 分钟；
 - 重复送达的媒体消息不再留下永不关闭、每 5 分钟推送一次状态的回复；
 - 内部报错原文不再展示给用户；
 - 长任务最后一段正文不再因推送与最终回复撞车而发两遍；
 - WS SDK 放弃重连后只重启 WS 适配器（带退避），同账号的 agent 回调不受影响；
 - 思考片段不再逐条同步写日志；
-- 媒体在 1 秒合并窗口内提前下载。
+- 媒体在 1 秒合并窗口内提前下载；
+- 同一次顶号只记录一次，重复送达不再显示为账号错误。
 
-详见 [`changelog/v3.0.0-14.md`](./changelog/v3.0.0-14.md)。
+详见 [`changelog/v3.0.0-15.md`](./changelog/v3.0.0-15.md)。
 
 #### 📌 3.0.0-13（2026-10-01，LinKy fork）
 
-生产升级 OpenClaw 2026.9.7 的兼容修复：9.7 删除了 `onTurnAdopted`，被核心并入运行中任务的消息会被插件重发一次并收到「没有被处理」的假通知，现改读分发结果上的 `deferredToActiveRun`；离开 2026-10-01 后待删除的 `infra-runtime` 子路径；附件同时带上新的 `media` 字段；修复 9.7 下真实分发器测试互相干扰。移植官方 9.15 的 `wecomcli-doc` 新建流程（旧脚本依赖 OpenClaw 不设置的沙箱变量，必然失败）与 `wecomcli-sheet` 新建流程（本地生成 `.xlsx` 再导入，需要 Python + `openpyxl`）。`@wecom/cli` 保持 1.2.0。开发基线改为 9.7，7.1-2 作为兼容底线。9.7 在 Windows 上每条消息 `DataCloneError` 是 OpenClaw 核心 bug，不在插件修复。详见 [`changelog/v3.0.0-13.md`](./changelog/v3.0.0-13.md)。（生产已回退 7.1-2，本版的 9.x 专用代码已在 3.0.0-14 撤回，技能移植保留。）
+生产升级 OpenClaw 2026.9.7 的兼容修复：9.7 删除了 `onTurnAdopted`，被核心并入运行中任务的消息会被插件重发一次并收到「没有被处理」的假通知，现改读分发结果上的 `deferredToActiveRun`；离开 2026-10-01 后待删除的 `infra-runtime` 子路径；附件同时带上新的 `media` 字段；修复 9.7 下真实分发器测试互相干扰。移植官方 9.15 的 `wecomcli-doc` 新建流程（旧脚本依赖 OpenClaw 不设置的沙箱变量，必然失败）与 `wecomcli-sheet` 新建流程（本地生成 `.xlsx` 再导入，需要 Python + `openpyxl`）。`@wecom/cli` 保持 1.2.0。开发基线改为 9.7，7.1-2 作为兼容底线。9.7 在 Windows 上每条消息 `DataCloneError` 是 OpenClaw 核心 bug，不在插件修复。详见 [`changelog/v3.0.0-13.md`](./changelog/v3.0.0-13.md)。（生产已回退 7.1-2，本版的 9.x 专用代码已在 3.0.0-15 撤回，技能移植保留。）
 
 #### 📌 3.0.0-12（2026-09-29，LinKy fork）
 

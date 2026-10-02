@@ -1,19 +1,19 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-10-02（3.0.0-14）
+> 最后更新：2026-10-02（3.0.0-15）
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
-- 当前发布版本 **3.0.0-14**：生产 OpenClaw 在 9.7 上问题较多，**已回退到 2026.7.1-2，此后只支持这一个版本**，其他版本不考虑兼容。本版撤掉 9.x 专用代码，并做了一轮对抗式检查与性能、稳定性提升（见 2.-14）。
+- 当前发布版本 **3.0.0-15**：生产 OpenClaw 在 9.7 上问题较多，**已回退到 2026.7.1-2，此后只支持这一个版本**，其他版本不考虑兼容。本版撤掉 9.x 专用代码，做了一轮对抗式检查与性能、稳定性提升，并对照官方补齐多附件、附件下载失败降级等（见 2.-15）。`3.0.0-14` 只是发给维护者的验收候选包，未打 tag、未发布，内容全部并入 3.0.0-15。
 - 上一版 **3.0.0-13**：曾把生产升级到 2026.9.7（见 2.-13，已作废，仅留作 9.x 资料）。
 - 上一版 **3.0.0-12**：主动出口（`message` 工具、cron announce）支持模板卡片，不再把卡片 JSON 当 markdown 发出（见 2.-12），现网验收通过。
 - 上一版 **3.0.0-11**（同版本号重新发布，tag 已移动）：现网 3.0.0-10 两条反馈的修复（「新指令冲突」通知只在核心确有活跃 run 时发出、空正文仅思考的 final 改发「本轮没有生成正文回复」、通知类 final 不再追加标记，见 2.-11）+ 对 3.0.0-7 至 -10 的审核跟进（见 2.-10）。生产 OpenClaw 为 `2026.7.1-2`，现网在 3.0.0-10；-11 待部署验收。
 - 3.0.0-5、3.0.0-v1、3.0.0-v2 均已取代或撤回，相关 tag 已删除，不要安装；历史说明保留在 changelog 文件中。
 - **2026-09-05 的 v3.0.0 事故（改架构前必读）**：Codex 按「同步上游」把整棵树换成上游 `v3.0.0`（腾讯官方插件的重建），我核对后以 `3.0.0-v1` 发布；现网（2026.7.1-2，四账号嵌套 `bot`/`agent`，顶层遗留 `mediaMaxMb`/`streaming`）被新 schema 拒绝启动，`3.0.0-v2` 放宽 schema 也装不上——`plugins install` 启动时先用已装的 v1 校验配置。用户决定回退，**只手动合并 v3 的精华，不整树替换**。三个候选 tag 已删除，包不要装。教训写在 changelog/v3.0.0-5.md 第一、三节：未知配置键不得阻止启动；上游 v3 是重建，不是可 merge 的增量；发版前必须用生产配置形状自检（`src/config/production-shape.test.ts`）。
 - 上游 `YanHaidao/wecom` 与官方 `WecomTeam/wecom-openclaw-plugin` 的对账基线：官方 HEAD `3b1cbe3`（2026.8.17）此后无新提交；`npm run upstream:check` 可随时复核（只读 `official` 远端）。
-- 兼容目标：**只有 OpenClaw 2026.7.1-2**（生产、devDependency 基线）。`npm run compat:check` 无参数时只跑这一个版本，评估升级时再显式传版本。真实分发器用例需要 Node ≥ 22.22.3（22.22.2 内置的 SQLite 会被 OpenClaw 拒绝）。发布验证记录见 changelog/v3.0.0-14.md；高负载时使用单 worker。
+- 兼容目标：**只有 OpenClaw 2026.7.1-2**（生产、devDependency 基线）。`npm run compat:check` 无参数时只跑这一个版本，评估升级时再显式传版本。真实分发器用例需要 Node ≥ 22.22.3（22.22.2 内置的 SQLite 会被 OpenClaw 拒绝）。发布验证记录见 changelog/v3.0.0-15.md；高负载时使用单 worker。
 - 2.7.260-26 之后、随 3.0.0-5 一起发布的两个修复：
   - 5bcbd05 **运行时上下文围栏**：两条线的核心都把 `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>…<<<END_OPENCLAW_INTERNAL_CONTEXT>>>` 作为 display:false 的载体消息喂给模型——模型看见它是设计使然，8.2 只是把头部指令写严了。插件侧两处缺口：①过程步骤（CLI 后端 commentary）与推理由核心**原样**转来，模型复述该块时会进气泡 / 推送 / 思考块；②三条入站车道的用户文本未转义，独占成行的围栏块会被核心 `resolveRuntimeContextPromptParts` 提取为可信上下文（伪造）。修在 `src/shared/internal-runtime-context.ts`：入站转义成核心自己用的 `[[OPENCLAW_INTERNAL_CONTEXT_BEGIN]]` 形态，出站 preamble / reasoning 剥围栏块；final 与 block 核心已净化，不重复。
   - c39ace2 **compat 工作区移出仓库树**（`~/.cache/wecom-openclaw-compat/`）：原先放在仓库内时 TypeScript 沿祖先 node_modules 找到钉住的 7.1-2 声明，8.2 缺 .d.ts 的子路径实际按 7.1-2 类型检查——2.7.260-26 汇报的「8.2 typecheck PASS」在 `file-access-runtime` 这一个子路径上不严谨（运行时验证不受影响，两版签名相同）。移出后复验：0 错误、0 次回落到仓库 node_modules。
@@ -39,9 +39,9 @@
 
 ### 当前 Git 状态
 
-- 发布分支：main。3.0.0-14 由开发分支 `claude/determined-volta-4z4i1m`（从 3.0.0-13 的 main 重建）按提交合入；3.0.0-13 同样按提交合入；3.0.0-12 = `00dd962` 功能提交 + `e38d2fd` 发版提交。
+- 发布分支：main。3.0.0-15 由开发分支 `claude/determined-volta-4z4i1m`（从 3.0.0-13 的 main 重建）按提交合入；3.0.0-13 同样按提交合入；3.0.0-12 = `00dd962` 功能提交 + `e38d2fd` 发版提交。
 - 3.0.0-11 的内容提交：`e728924`（空流收尾改收「（回复完毕）」）、`506f71a`（测试修正）、`eaa2d5d`（审核文档）、`744f1bb`（首次发版提交）、`d7446ac`（现网通知修复，见 2.-11）；重新发版提交见 tag `released/3.0.0-11`（已从 744f1bb 移动）。
-- 发布节点以 `released/3.0.0-14` 为准；上一个已发布节点为 `released/3.0.0-13`（`bf2de2e`），再上一个为 `released/3.0.0-12`（`e38d2fd`）。注意：云端会话推不了 tag，`released/3.0.0-12` 至 `released/3.0.0-14` 需在本地打并推送。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返。
+- 发布节点以 `released/3.0.0-15` 为准；上一个已发布节点为 `released/3.0.0-13`（`bf2de2e`），再上一个为 `released/3.0.0-12`（`e38d2fd`）；没有 `released/3.0.0-14`。注意：云端会话推不了 tag，`released/3.0.0-12`、`-13`、`-15` 需在本地打并推送。历史上 main 经过 v3.0.0 整树替换再回退，`git log` 里能看到这段往返。
 - 维护远端：fork = git@github.com:liny90626/wecom.git
 - 上游远端：origin = https://github.com/YanHaidao/wecom.git（v3.0.0 = 官方插件重建，见第 8 节）；官方远端：official = https://github.com/WecomTeam/wecom-openclaw-plugin.git，push URL 为 DISABLED，只供 `npm run upstream:check`
 - 允许推送的目标只有 fork；禁止向 origin 推送。
@@ -59,15 +59,24 @@
 
 ### 发布状态
 
-- 当前版本号 `3.0.0-14`，包文件为 `yanhaidao-wecom-3.0.0-14.tgz`（指纹见第 7 节）。上一版 `3.0.0-12` 的包与现网验收包逐字节一致（SHA-256 `9a247864…deea4`）。
-- `released/3.0.0-6` 至 `released/3.0.0-11` 已推送 fork；`released/3.0.0-12` 至 `released/3.0.0-14` 需在本地打 tag 推送（云端会话无权推 tag）。
+- 当前版本号 `3.0.0-15`，包文件为 `yanhaidao-wecom-3.0.0-15.tgz`（指纹见第 7 节）。上一版 `3.0.0-12` 的包与现网验收包逐字节一致（SHA-256 `9a247864…deea4`）。
+- `released/3.0.0-6` 至 `released/3.0.0-11` 已推送 fork；`released/3.0.0-12`、`-13`、`-15` 需在本地打 tag 推送（云端会话无权推 tag）；`3.0.0-14` 不打 tag。
 - `released/3.0.0-5`、`released/3.0.0-v1`、`released/3.0.0-v2` 已从本地与 fork 删除。
 - 版本规则：`3.0.0-<构建号>`，构建号递增；tag `released/<版本>`；只推 fork。
 - origin 停在 `133773f`（上游 v3.0.0，2026-09-05 对账，见第 8 节），无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
 
-### 2.-14 回退 7.1-2、对抗式检查与性能稳定性（3.0.0-14）
+### 2.-15 对照官方补齐与回归复查（3.0.0-15）
+
+- **多附件**（`src/runtime/session-manager.ts`）：最多 8 个附件并行下载，首个仍走 `normalizeFirstAttachment`（可命中预取），其余走 `mediaService.downloadAttachment(event, attachment, abortSignal)`；多于 1 个时才传 `MediaPaths` / `MediaUrls` / `MediaTypes`，单附件上下文与原来一致。合并顶替时上一条的附件排在后面，若它被预取过会重新下载一次（只浪费带宽，未处理）。
+- **下载失败降级**：中止、或**首个**附件超限时仍结束本轮（超限提示原样展示）；其他失败只记 `[wecom-media] inbound-attachment-failed` 日志，并在正文后附「[附件读取失败]」/「[N 个附件读取失败]」。加密下载超时 = `min(resolveWecomMediaDownloadTimeoutMs, 45s)`：注意它会回落到 `network.timeoutMs`，45 秒上限是为了不撞 dispatcher 的 60 秒准备超时，不要去掉。
+- **正文**：Bot WS 调 `buildInboundBody(msg, { omitMediaUrls: true })`，不再写加密 URL；webhook 车道调用不变。
+- **auth_change_event**：`inbound.ts` 的 `describeAuthChangeEvent` 生成权限说明与操作指引（措辞取自官方）。
+- **状态**：同一次顶号只记一次 ws-kicked（`disconnected_event` 帧记，随后 "New connection" 断线不再重复记）；入口丢弃重复送达只写审计日志，不设 lastError。
+- **官方有、我们不跟进**：Bot WS 的 dmPolicy / groupPolicy / 配对（生产依赖 Bot WS 不校验发送者，照搬会拦掉现有用户；`channel.ts` 状态里报告的 `dmPolicy: "pairing"` 对 Bot WS 并不生效）；鉴权失败不重试、被顶号后挂起账号；reqid 持久化、会话排队。
+
+### 2.-14 回退 7.1-2、对抗式检查与性能稳定性（3.0.0-15 的前半部分；-14 为未发布候选）
 
 - **回退**：生产回到 7.1-2。2.-13 里只有 9.x 才走到的代码（`deferredToActiveRun` 分支、附件 `media` 字段、测试共用状态目录）已删除；`temp-path` 与 doc/sheet 技能移植保留。devDependency 锁回 7.1-2，compat:check 默认只跑它。
 - **去重存储**（`src/store/memory-store.ts`）：消息 id 只保留 30 分钟（按到达顺序清理，键不会被重复写入）；从未被读取的 replyContexts / deliveryTasks 已删除。适配层在创建回复句柄**之前**用 `store.hasSeenInbound` 丢弃重复帧：媒体帧在分发前就会打开占位气泡，之前被分发器判为重复后，这个句柄永远不会结束，会一直推「长任务处理中」。改适配层前务必保留这个顺序。
@@ -78,7 +87,7 @@
 - **性能**：思考片段（`kind=block && isReasoning`）不写日志、不刷状态，其余投递只写一行 `deliver-done`；媒体帧进入 1 秒合并窗口时就调用 `mediaService.prefetchFirstAttachment` 开始下载（key 为账号 + URL，只取用一次，60 秒后释放）。
 - **待维护者决定**：Bot WS 车道的分块阈值（核心默认最少 800 字才出首段，测算首屏晚 6–12 秒）；建议在 OpenClaw 配置里设 `media.ttlHours`（插件自己的 `media.retentionHours` 等配置项没有任何代码读取）；agent 回调的 context-store 每条同步写入、重启后从不读回（只影响上下游企业场景），未改。
 
-### 2.-13 生产升级 OpenClaw 2026.9.7（3.0.0-13，已作废：生产已回退 7.1-2，9.x 专用代码在 3.0.0-14 删除）
+### 2.-13 生产升级 OpenClaw 2026.9.7（3.0.0-13，已作废：生产已回退 7.1-2，9.x 专用代码在 3.0.0-15 删除）
 
 - **`onTurnAdopted` 在 9.7 被删除**（类型与运行时都是 0 处引用）。9.7 改在分发结果上报 `deferredToActiveRun: "steer"|"followup"`，且这时不设 `noVisibleReplyFallbackEligible`。旧代码会落到无标记零结果分支：重发同一条消息，再推「没有被处理 / 任务冲突」。现在 `reply-orchestrator.ts` 在无标记分支先判 `deferredToActiveRun` 并发「已并入」。**`deliberateSilentTerminalReply` 不要拿来当受理证据**：群聊 `silentReply.group="allow"` 时，被拒的消息（admission skipped/active-run）也会标成 silent。我们传的其他回复回调在 9.7 运行时仍被调用（已逐个核对）。
 - **不要传 `turnAdoptionLifecycle`**（官方社区 PR #188）。在 9.7，只要带上它，`dispatch-from-config` 对忙碌的会话就返回 ready，把新消息 steer 进旧任务或排到后面，这与本 fork「新消息接管」（drainLingeringOpenClawRunBeforeDispatch）相反。
@@ -376,11 +385,11 @@ src/transport/bot-ws/sdk-adapter.ts
 
 ## 7. 当前验证证据
 
-### 3.0.0-14 发布验证（2026-10-02）
+### 3.0.0-15 发布验证（2026-10-02）
 
-- 7.1-2（Node 24.21.0）：tsc 0 错误，68 文件 / 896 用例通过；B1 / B2 / B3 READY；diff check 通过。每项修复都配有敏感性用例。
-- 两次 `npm pack` 一致：258 个文件、624,091 bytes，SHA-256 `0b071fdc8bfbe97f16c550c6464d5889061ee9cb798179e647c015d9150cf3f1`，npm shasum `67250fd6f4b4b86642c7a03c41e7760ef63685c0`。
-- 7.1-2 隔离安装：`plugins install <tgz>` 不需要额外参数；双账号生产形状配置 `config validate` PASS；`plugins inspect --runtime` 3.0.0-14 / loaded / diagnostics=[]；`channels list` 两个账号均 enabled。未启动网关；真实企微客户端未验收。
+- 7.1-2（Node 24.21.0）：tsc 0 错误，68 文件 / 901 用例通过；B1 / B2 / B3 READY；diff check 通过。每项修复都配有敏感性用例（逐提交回退源码验证）。
+- 两次 `npm pack` 一致：258 个文件、626,541 bytes，SHA-256 `cbe00b28eabca13ec06610d8758f1c5bc7cfd252c4712bec4dad2987da7a0a43`，npm shasum `0843ae797d7a33e46d09f79a08d26c937c31f132`。未发布的 3.0.0-14 候选包（SHA-256 `0b071fdc…cf3f1`）已作废。
+- 7.1-2 隔离安装：`plugins install <tgz>` 不需要额外参数；双账号生产形状配置 `config validate` PASS；`plugins inspect --runtime` 3.0.0-15 / loaded / diagnostics=[]；`channels list` 两个账号均 enabled。未启动网关；真实企微客户端未验收。
 
 ### 3.0.0-13 发布验证（2026-10-01）
 
@@ -533,6 +542,7 @@ npx vitest run \
 - openclaw-compat.ts：官方用于跨 SDK 版本探测导出。本 fork 的做法不同：只用两条线都存在的子路径，静态守卫加 compat 矩阵，不做运行时探测。
 - 上游同步度：官方 git HEAD 之后没有我们未同步的功能提交。
 - 2026-10-01 复核：git HEAD 仍是 3b1cbe3；npm 有 **2026.9.15**（未推送到 git），dist 与 8.17 相同，只改了 `wecomcli-doc`（已移植，见 2.-13）与 `wecomcli-sheet`（已移植；新建表格需要生产机有 Python + openpyxl，维护者已确认）。`check-official-updates` 只看 git，发版前另用 `npm view @wecom/wecom-openclaw-plugin` 复核。官方对 OpenClaw 9.x 零适配。社区 PR #188（`turnAdoptionLifecycle`）不移植，原因见 2.-13。`@wecom/cli` 1.3.x 不升级：1.3.0 给 CLI 加了读写沙箱（只能访问工作目录 + 系统临时目录），我们以私有状态目录作为 CLI 工作目录，agent 工作区文件会被拒绝；另外 1.3.0 修了遥测携带 JSON 载荷原文的隐私问题。升级需先重新设计 CLI 的工作目录。**2026-10-01 用户决定保持 1.2.0（精确锁定）**。以后要升级的前提：1.3 沙箱的可读写范围固定为「进程 cwd + 固定临时目录（Unix `/tmp`，Windows `LocalAppData\Temp`，刻意不读 TMP/TEMP）」，配置目录一律拒绝，且**没有任何环境变量或参数可以扩展**（见 wecom-cli 源码 `crates/wecom-cli/src/config.rs` 的 `pinned_temp_dir`，以及 e2e 用例 `sandbox_paths/002`、`008`）。唯一可行的做法是让 `runCli` 以会话的 agent 工作区为 cwd（工具上下文 `OpenClawPluginToolContext.workspaceDir`，7.1-2 与 9.7 都有），并核对入站附件的落盘位置是否在 cwd 或固定临时目录之内。
+- 2026-10-02 复核：git HEAD 仍是 3b1cbe3，npm 最新仍是 2026.9.15。逐项对照官方运行代码后补齐了多附件、附件下载失败降级（含超时配置）、正文不带加密 URL、`auth_change_event` 说明、Windows `~\` 路径（见 2.-15）；不跟进的项及原因同见 2.-15。
 - 2026-09-02 对账 YanHaidao/wecom（origin）自分叉点 b4e297a 起的 25 个提交：Bot WS 车道没有必须补的修复；已移植 0d85ccb（Agent 车道字节切分）与 b28611d（1100ms 分片节流）；markdown.format 系列是 Agent 车道新功能、Bot WS 不需要；上游对 2026.8.x 零适配。
 - 2026-09-05 对账上游 `v3.0.0`（133773f）：它是以官方 2026.8.17 为主线的整体重建，不是增量。取了治理层三件（THIRD_PARTY_NOTICES、UPSTREAM_BASELINE、upstream:check）；未取的及原因见 changelog/v3.0.0-5.md 第三节（官方车道、schema 严格化、setup contract、wecom diagnose、结构化日志）。要再取时逐项评估、单独立项，不整树替换。
 

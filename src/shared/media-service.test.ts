@@ -164,4 +164,55 @@ describe("WecomMediaService", () => {
     ).rejects.toThrow(WecomInboundMediaTooLargeError);
     expect(saveMediaBuffer).not.toHaveBeenCalled();
   });
+
+  describe("prefetch during the merge window", () => {
+    const makeService = () =>
+      new WecomMediaService(
+        { channel: { media: { fetchRemoteMedia, saveMediaBuffer } } } as never,
+        { channels: { wecom: { mediaMaxMb: 24 } } } as never,
+      );
+    const event = (url = "https://example.com/a.pdf") =>
+      ({ accountId: "default", attachments: [{ remoteUrl: url }] }) as never;
+
+    it("starts the download at prefetch time and hands the same result over once", async () => {
+      fetchRemoteMedia.mockResolvedValue({ buffer: Buffer.from("a"), contentType: "application/pdf" });
+      const service = makeService();
+
+      service.prefetchFirstAttachment(event());
+      expect(fetchRemoteMedia).toHaveBeenCalledTimes(1);
+      const attachment = await service.normalizeFirstAttachment(event());
+
+      expect(fetchRemoteMedia).toHaveBeenCalledTimes(1);
+      expect(attachment?.buffer.toString()).toBe("a");
+      // Consumed once: a later identical request downloads again.
+      await service.normalizeFirstAttachment(event());
+      expect(fetchRemoteMedia).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps the oversize mapping and the failure for the consumer", async () => {
+      fetchRemoteMedia.mockRejectedValue(new ResponseBodyTooLargeError(1));
+      const service = makeService();
+
+      service.prefetchFirstAttachment(event());
+
+      await expect(service.normalizeFirstAttachment(event())).rejects.toBeInstanceOf(
+        WecomInboundMediaTooLargeError,
+      );
+    });
+
+    it("drops a prefetch nobody consumed without an unhandled rejection", async () => {
+      vi.useFakeTimers();
+      try {
+        fetchRemoteMedia.mockRejectedValue(new Error("network down"));
+        const service = makeService();
+
+        service.prefetchFirstAttachment(event());
+        await vi.advanceTimersByTimeAsync(61_000);
+
+        expect((service as unknown as { prefetched: Map<string, unknown> }).prefetched.size).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

@@ -24,7 +24,15 @@ export class WecomInboundMediaTooLargeError extends Error {
   }
 }
 
+/** A prefetch nobody consumed (dropped or superseded frame) is released after this. */
+const PREFETCH_TTL_MS = 60_000;
+
 export class WecomMediaService {
+  private readonly prefetched = new Map<
+    string,
+    { download: Promise<NormalizedMediaAttachment | undefined>; expiry: ReturnType<typeof setTimeout> }
+  >();
+
   constructor(
     private readonly core: PluginRuntime,
     private readonly cfg: OpenClawConfig,
@@ -90,7 +98,39 @@ export class WecomMediaService {
     return saved.path;
   }
 
+  /**
+   * Starts downloading the first attachment now, for a frame parked in the
+   * media/text merge window: without it the download waited out the whole
+   * window before it began. normalizeFirstAttachment picks the result up.
+   */
+  prefetchFirstAttachment(event: UnifiedInboundEvent): void {
+    const key = prefetchKey(event);
+    if (!key || this.prefetched.has(key)) {
+      return;
+    }
+    const download = this.downloadFirstAttachment(event);
+    // Observed by the consumer; a prefetch nobody consumes must not surface
+    // as an unhandled rejection.
+    download.catch(() => {});
+    const expiry = setTimeout(() => this.prefetched.delete(key), PREFETCH_TTL_MS);
+    expiry.unref?.();
+    this.prefetched.set(key, { download, expiry });
+  }
+
   async normalizeFirstAttachment(
+    event: UnifiedInboundEvent,
+  ): Promise<NormalizedMediaAttachment | undefined> {
+    const key = prefetchKey(event);
+    const prefetched = key ? this.prefetched.get(key) : undefined;
+    if (key && prefetched) {
+      this.prefetched.delete(key);
+      clearTimeout(prefetched.expiry);
+      return prefetched.download;
+    }
+    return this.downloadFirstAttachment(event);
+  }
+
+  private async downloadFirstAttachment(
     event: UnifiedInboundEvent,
   ): Promise<NormalizedMediaAttachment | undefined> {
     const first = event.attachments?.[0];
@@ -117,4 +157,9 @@ export class WecomMediaService {
       throw error;
     }
   }
+}
+
+function prefetchKey(event: UnifiedInboundEvent): string | undefined {
+  const url = event.attachments?.[0]?.remoteUrl;
+  return url ? `${event.accountId}:${url}` : undefined;
 }

@@ -196,6 +196,7 @@ async function runScenario(params: ScenarioParams): Promise<ScenarioResult> {
     },
   };
   const mediaService = {
+    prefetchFirstAttachment: vi.fn(),
     normalizeFirstAttachment: vi.fn(async (event: UnifiedInboundEvent) =>
       event.attachments?.length
         ? {
@@ -210,6 +211,7 @@ async function runScenario(params: ScenarioParams): Promise<ScenarioResult> {
   const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
   const runtime = {
     store,
+    mediaService,
     account: {
       accountId,
       bot: {

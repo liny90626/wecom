@@ -91,6 +91,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockRejectedValue(new Error("frame exploded")),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -155,6 +156,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (_event, replyHandle) => {
         expect(sdkMockState.client?.replyStream).not.toHaveBeenCalled();
         replyHandle.activate?.();
@@ -197,6 +199,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (_event, handle) => {
         replyHandle = handle;
       }),
@@ -252,6 +255,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandles.push(replyHandle);
       }),
@@ -360,6 +364,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandles.push(replyHandle);
       }),
@@ -425,6 +430,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandles.push(replyHandle);
       }),
@@ -488,6 +494,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandles.push(replyHandle);
       }),
@@ -555,6 +562,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandle.markDispatchSettled = markDispatchSettled;
       }),
@@ -594,6 +602,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -661,6 +670,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (event, replyHandle) => {
         const waitForNextAgentUpdate = () =>
           new Promise<void>((resolve) => setTimeout(resolve, 700));
@@ -793,6 +803,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (event, replyHandle) => {
         expect(event).toMatchObject({
           messageId: "msg-mixed-cumulative",
@@ -886,6 +897,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -945,6 +957,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1004,6 +1017,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1078,6 +1092,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1144,6 +1159,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1205,6 +1221,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1258,6 +1275,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1319,6 +1337,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi
         .fn()
         .mockImplementationOnce(() => firstDispatch)
@@ -1378,6 +1397,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi
         .fn()
         .mockImplementationOnce(() => firstDispatch)
@@ -1456,6 +1476,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandle.activate?.();
         await replyHandle.deliver({ text: "旧连接的最终答案" }, { kind: "final" });
@@ -1494,6 +1515,7 @@ describe("BotWsSdkAdapter", () => {
     const replacementRuntime = {
       ...oldRuntime,
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(),
     };
     const replacementAdapter = new BotWsSdkAdapter(replacementRuntime as any, {} as any);
@@ -1525,6 +1547,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn(async (_event, replyHandle) => {
         replyHandle.onTransportRetired?.(transportRetired);
         replyHandle.activate?.();
@@ -1577,6 +1600,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1631,6 +1655,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1673,6 +1698,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1729,6 +1755,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1760,6 +1787,42 @@ describe("BotWsSdkAdapter", () => {
     expect(unhandledRejections).toHaveLength(0);
   });
 
+  it("starts the attachment download when a media frame parks for the merge window", async () => {
+    const prefetchFirstAttachment = vi.fn();
+    const runtime = {
+      account: {
+        accountId: "acc-prefetch",
+        bot: { accountId: "acc-prefetch", wsConfigured: true, ws: { botId: "bot-1", secret: "s" }, config: {} },
+      },
+      store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment },
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+
+    sdkMockState.client?.emit("message", {
+      cmd: "aibot_msg_callback",
+      headers: { req_id: "req-image-prefetch" },
+      body: {
+        msgid: "msg-image-prefetch",
+        msgtype: "image",
+        chattype: "single",
+        from: { userid: "user-1" },
+        image: { url: "https://example.com/p.png", aeskey: "k" },
+      },
+    });
+    await waitForAsyncCallbacks();
+
+    expect(prefetchFirstAttachment).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "msg-image-prefetch" }),
+    );
+    expect(runtime.handleEvent).not.toHaveBeenCalled();
+  });
+
   it("reports only the SDK's give-up errors as fatal to the account", async () => {
     const runtime = {
       account: {
@@ -1767,6 +1830,7 @@ describe("BotWsSdkAdapter", () => {
         bot: { accountId: "acc-fatal", wsConfigured: true, ws: { botId: "bot-1", secret: "s" }, config: {} },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1847,6 +1911,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1876,6 +1941,7 @@ describe("BotWsSdkAdapter", () => {
         bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1906,6 +1972,7 @@ describe("BotWsSdkAdapter", () => {
         bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1935,6 +2002,7 @@ describe("BotWsSdkAdapter", () => {
         bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1963,6 +2031,7 @@ describe("BotWsSdkAdapter", () => {
         bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -1992,6 +2061,7 @@ describe("BotWsSdkAdapter", () => {
         bot: { wsConfigured: true, ws: { botId: "bot-1", secret: "secret-1" }, config: {} },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),
@@ -2030,6 +2100,7 @@ describe("BotWsSdkAdapter", () => {
         },
       },
       store: new InMemoryRuntimeStore(),
+      mediaService: { prefetchFirstAttachment: vi.fn() },
       handleEvent: vi.fn().mockResolvedValue(undefined),
       updateTransportSession: vi.fn(),
       touchTransportSession: vi.fn(),

@@ -700,6 +700,8 @@ export class BotWsSdkAdapter {
         // silent bubble for its whole duration is the slowest thing the user
         // can see after uploading a file.
         replyHandle.startPlaceholder?.();
+        // The window is pure waiting for the download too: start it now.
+        this.runtime.mediaService.prefetchFirstAttachment(event);
         let nextPending: PendingMergeFrame;
         const timer = setTimeout(() => {
           void flushPendingMergeFrame(peerKey, nextPending);

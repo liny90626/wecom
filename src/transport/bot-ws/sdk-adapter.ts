@@ -418,6 +418,11 @@ export class BotWsSdkAdapter {
       this.log.error?.(
         `[wecom-ws] error account=${this.runtime.account.accountId} message=${error.message}`,
       );
+      // The SDK has stopped for good after these two; only a restart of the
+      // account brings the connection back.
+      if (error.name === "WSReconnectExhaustedError" || error.name === "WSAuthFailureError") {
+        this.runtime.reportTransportFatal(error);
+      }
       this.runtime.updateTransportSession(
         createBotWsSessionSnapshot({
           accountId: this.runtime.account.accountId,

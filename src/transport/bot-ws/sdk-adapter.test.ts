@@ -1760,6 +1760,32 @@ describe("BotWsSdkAdapter", () => {
     expect(unhandledRejections).toHaveLength(0);
   });
 
+  it("reports only the SDK's give-up errors as fatal to the account", async () => {
+    const runtime = {
+      account: {
+        accountId: "acc-fatal",
+        bot: { accountId: "acc-fatal", wsConfigured: true, ws: { botId: "bot-1", secret: "s" }, config: {} },
+      },
+      store: new InMemoryRuntimeStore(),
+      handleEvent: vi.fn().mockResolvedValue(undefined),
+      updateTransportSession: vi.fn(),
+      touchTransportSession: vi.fn(),
+      recordOperationalIssue: vi.fn(),
+      reportTransportFatal: vi.fn(),
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    new BotWsSdkAdapter(runtime as any, log as any).start();
+
+    sdkMockState.client?.emit("error", new Error("socket hang up"));
+    expect(runtime.reportTransportFatal).not.toHaveBeenCalled();
+
+    for (const name of ["WSReconnectExhaustedError", "WSAuthFailureError"]) {
+      const error = Object.assign(new Error(name), { name });
+      sdkMockState.client?.emit("error", error);
+      expect(runtime.reportTransportFatal).toHaveBeenLastCalledWith(error);
+    }
+  });
+
   it("ignores a redelivered media frame without opening a bubble it could never close", async () => {
     // A media frame opens its placeholder before dispatch; if the dispatcher
     // then drops it as a duplicate, nothing settles that handle and it pushed

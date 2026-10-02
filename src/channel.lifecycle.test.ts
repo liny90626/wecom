@@ -11,7 +11,7 @@ import { computeWecomMsgSignature, encryptWecomPlaintext } from "./crypto.js";
 import { wecomPlugin } from "./channel.js";
 import { handleWecomWebhookRequest } from "./monitor.js";
 import { monitorState } from "./monitor/state.js";
-import { setWecomRuntime } from "./runtime.js";
+import { getAccountRuntime, setWecomRuntime } from "./runtime.js";
 import type { ResolvedWecomAccount } from "./types/index.js";
 
 function createMockRequest(params: {
@@ -170,6 +170,27 @@ describe("wecomPlugin gateway lifecycle", () => {
     abortController.abort();
     await startPromise;
     expect(resolved).toBe(true);
+  });
+
+  it("exits with the transport error when a transport gives up, so OpenClaw restarts it", async () => {
+    const cfg = createWebhookBotConfig({
+      token: "token",
+      encodingAESKey: "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+    });
+    const abortController = new AbortController();
+    const ctx = createCtx({ cfg, abortController });
+
+    const startPromise = wecomPlugin.gateway!.startAccount!(ctx);
+    await Promise.resolve();
+    await Promise.resolve();
+    const fatal = Object.assign(new Error("Max reconnect attempts exceeded (10)"), {
+      name: "WSReconnectExhaustedError",
+    });
+    getAccountRuntime("default")!.reportTransportFatal(fatal);
+
+    await expect(startPromise).rejects.toBe(fatal);
+    expect(ctx.statusUpdates.at(-1)).toMatchObject({ running: false });
+    expect(getAccountRuntime("default")).toBeUndefined();
   });
 
   it("unregisters webhook targets after abort", async () => {

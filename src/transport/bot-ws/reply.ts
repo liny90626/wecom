@@ -131,7 +131,7 @@ const OPEN_THINK_TAG_RE = /<think>/gi;
 const CLOSE_THINK_TAG_RE = /<\/think>/gi;
 const B3_SUPERSEDED_NOTICE_TEXT = "已收到新消息，合并思考。✅";
 const B3_SUPERSEDED_UNMERGED_NOTICE_TEXT =
-  "已收到新消息，本条尚未开始处理，如仍需要请重新发送。";
+  "已收到新消息，本条未处理完，如仍需要请重新发送。";
 const B3_MEDIA_SUPERSEDED_NOTE = "本次回复包含文件，因会话已合并，文件请在新消息中重新发送或确认后重试。";
 
 type PreviewSuffixParams = {

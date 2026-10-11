@@ -101,6 +101,13 @@ function adoptSupersededPendingInbound(
   };
 }
 
+// Frames WeCom sends on its own (enter_chat on the first visit of the day,
+// auth_change_event). They share the user's peer but are not something the
+// user typed, so they must never take a chat turn's place.
+function isSystemInbound(event: UnifiedInboundEvent): boolean {
+  return event.inboundKind === "welcome" || event.inboundKind === "event";
+}
+
 function createPrepareTimeoutError(timeoutMs: number): Error {
   const error = new Error(`WeCom inbound session prepare timed out after ${timeoutMs}ms`);
   error.name = "WeComPrepareTimeoutError";
@@ -565,11 +572,26 @@ export async function dispatchInboundEvent(params: {
   };
 
   let inboundEvent = event;
+  // Set when this inbound takes the peer from a turn whose content it does not
+  // carry along; that turn is then told so instead of "merged".
+  let previousPendingDropped = false;
   if (pendingReplyKey) {
+    const previousPending = pendingBotWsInboundsByPeer.get(pendingReplyKey);
+    if (previousPending && isSystemInbound(event) && !isSystemInbound(previousPending.event)) {
+      // The user's turn is still preparing or running. Letting this frame in
+      // would supersede it — the bubble turns into the "merged" notice, the run
+      // is aborted — and then answer with a welcome nobody can see: the reply
+      // the user was waiting for never arrives.
+      console.info(
+        `[wecom-b3] system-inbound-skipped account=${event.accountId} messageId=${event.messageId} kind=${event.inboundKind} activeMessageId=${previousPending.event.messageId} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
+      );
+      unregisterTransportRetire?.();
+      markReplyDispatchSettled();
+      return;
+    }
     console.info(
       `[wecom-b3] dispatch-pending-register account=${event.accountId} messageId=${event.messageId} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
     );
-    const previousPending = pendingBotWsInboundsByPeer.get(pendingReplyKey);
     if (previousPending && previousPending.handle !== activeReplyHandle) {
       const mergeable = canAdoptSupersededPendingInbound(previousPending.event, inboundEvent);
       // An attachment is an INPUT the new instruction needs, so it always
@@ -585,6 +607,7 @@ export async function dispatchInboundEvent(params: {
           includeText: adoptText,
         });
       }
+      previousPendingDropped = !adopted;
       console.info(
         `[wecom-b3] pending-inbound-${adopted ? "adopted" : "dropped"} account=${event.accountId} messageId=${event.messageId} previousMessageId=${previousPending.event.messageId} dispatched=${String(previousPending.dispatched)} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
       );
@@ -665,6 +688,22 @@ export async function dispatchInboundEvent(params: {
           peerKind: event.conversation.peerKind,
           peerId: event.conversation.peerId,
         });
+        if (previousPendingDropped) {
+          // The registry below always reports a merge. A handle keeps the first
+          // reason it is given, so say "not merged" before it does.
+          try {
+            previousHandle?.supersedeByNewInbound?.({
+              accountId: event.accountId,
+              peerKind: event.conversation.peerKind,
+              peerId: event.conversation.peerId,
+              reason: "new-inbound-unmerged",
+            });
+          } catch (error) {
+            console.warn(
+              `[wecom-b3] supersede-notify-failed account=${event.accountId} peer=${event.conversation.peerKind}:${event.conversation.peerId} error=${String(error)}`,
+            );
+          }
+        }
         const supersededPrevious = registerActiveBotWsReplyHandle({
           accountId: event.accountId,
           sessionKey,

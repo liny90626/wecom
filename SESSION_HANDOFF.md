@@ -1,12 +1,13 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-10-02（3.0.0-15）
+> 最后更新：2026-10-11（3.0.0-16）
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
-- 当前发布版本 **3.0.0-15**：生产 OpenClaw 在 9.7 上问题较多，**已回退到 2026.7.1-2，此后只支持这一个版本**，其他版本不考虑兼容。本版撤掉 9.x 专用代码，做了一轮对抗式检查与性能、稳定性提升，并对照官方补齐多附件、附件下载失败降级等（见 2.-15）。`3.0.0-14` 只是发给维护者的验收候选包，未打 tag、未发布，内容全部并入 3.0.0-15。
+- 当前发布版本 **3.0.0-16**：修复气泡偶发变成「已收到新消息，合并思考」后再无回复（企微系统事件帧抢占用户回合，见 2.-16）。已打 tag、已打包，**生产未部署**，现网保持原样。
+- 上一版 **3.0.0-15**：生产 OpenClaw 在 9.7 上问题较多，**已回退到 2026.7.1-2，此后只支持这一个版本**，其他版本不考虑兼容。本版撤掉 9.x 专用代码，做了一轮对抗式检查与性能、稳定性提升，并对照官方补齐多附件、附件下载失败降级等（见 2.-15）。`3.0.0-14` 只是发给维护者的验收候选包，未打 tag、未发布，内容全部并入 3.0.0-15。
 - 上一版 **3.0.0-13**：曾把生产升级到 2026.9.7（见 2.-13，已作废，仅留作 9.x 资料）。
 - 上一版 **3.0.0-12**：主动出口（`message` 工具、cron announce）支持模板卡片，不再把卡片 JSON 当 markdown 发出（见 2.-12），现网验收通过。
 - 上一版 **3.0.0-11**（同版本号重新发布，tag 已移动）：现网 3.0.0-10 两条反馈的修复（「新指令冲突」通知只在核心确有活跃 run 时发出、空正文仅思考的 final 改发「本轮没有生成正文回复」、通知类 final 不再追加标记，见 2.-11）+ 对 3.0.0-7 至 -10 的审核跟进（见 2.-10）。生产 OpenClaw 为 `2026.7.1-2`，现网在 3.0.0-10；-11 待部署验收。
@@ -59,13 +60,22 @@
 
 ### 发布状态
 
-- 当前版本号 `3.0.0-15`，包文件为 `yanhaidao-wecom-3.0.0-15.tgz`（指纹见第 7 节）。上一版 `3.0.0-12` 的包与现网验收包逐字节一致（SHA-256 `9a247864…deea4`）。
+- 当前版本号 `3.0.0-16`，包文件为 `yanhaidao-wecom-3.0.0-16.tgz`（指纹见第 7 节），tag `released/3.0.0-16` 已推送 fork，生产未部署。上一版 `3.0.0-15`（tag 已推送）。上一版 `3.0.0-12` 的包与现网验收包逐字节一致（SHA-256 `9a247864…deea4`）。
 - `released/3.0.0-6` 至 `released/3.0.0-11` 已推送 fork；`released/3.0.0-12`、`-13`、`-15` 需在本地打 tag 推送（云端会话无权推 tag）；`3.0.0-14` 不打 tag。
 - `released/3.0.0-5`、`released/3.0.0-v1`、`released/3.0.0-v2` 已从本地与 fork 删除。
 - 版本规则：`3.0.0-<构建号>`，构建号递增；tag `released/<版本>`；只推 fork。
 - origin 停在 `133773f`（上游 v3.0.0，2026-09-05 对账，见第 8 节），无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-16 系统事件帧抢占用户回合（3.0.0-16）
+
+- **现象**：气泡变成「已收到新消息，合并思考。✅」后再无回复，用户并未连发消息；升级以来 3 次，现场日志未保留。
+- **根因**（代码路径复现，非日志对证）：`enter_chat`（inboundKind `welcome`）与 `auth_change_event`（`event`）和用户消息共用 peer，进入 `dispatchInboundEvent` 后：用户回合未派发时按 pending 路径 supersede；已派发时 `drainLingeringOpenClawRunBeforeDispatch` 中止其 run，`claimPeerHandoff` → `registerActiveBotWsReplyHandle` 以写死的 `new-inbound` 通知旧 handle。`canAdoptSupersededPendingInbound` 对这两类 kind 返回 false，用户内容不并入；welcome 回合的回复走 `replyWelcome`，受企微 5 秒限制。
+- **修复**（`src/runtime/dispatcher.ts`）：`isSystemInbound(event)` 且 peer 上有非系统的 pending 回合时直接返回（先 `unregisterTransportRetire`、`markReplyDispatchSettled`），日志 `[wecom-b3] system-inbound-skipped`。前驱内容未被并入（`previousPendingDropped`）时，`claimPeerHandoff` 在调用 `registerActiveBotWsReplyHandle` 之前先以 `new-inbound-unmerged` 通知旧 handle（handle 只认第一次收到的原因）。`src/app/index.ts` 里写死的 `reason: "new-inbound"` 是 B3 门禁匹配的字面量，不要改。未合并文案改为「已收到新消息，本条未处理完，如仍需要请重新发送。」。
+- **不要改回**：系统事件帧永远不能中止用户回合；`template-card-event` 是用户操作，仍可接管。
+- **排查入口**：再出现时在日志里找同一 peer、同一时刻的 `[wecom-ws] frame … cmd=aibot_event_callback` 与 `system-inbound-skipped` / `superseded … reason=`。若没有事件帧而仍出现「合并思考」，说明还有别的接管来源，需保留该时段完整日志。
+- **未改**：未配置静态 `welcomeText` 时 `enter_chat` 仍会跑一轮 agent，回复大概率超过 5 秒发不出去；不影响用户消息。
 
 ### 2.-15 对照官方补齐与回归复查（3.0.0-15）
 
@@ -323,7 +333,7 @@ lastDeliveredBodySourceText / previewFrozenDeliveredSourceText 全部失效，�
 
 这些不是本轮声称已解决的内容：
 
-1. 群聊中不同成员接管任务时，旧回合提示仍偏向“合并思考”，文案没有完全区分跨成员场景。
+1. （3.0.0-16 已处理）群聊中不同成员接管任务时，旧回合现在显示「本条未处理完，如仍需要请重新发送」，不再显示“合并思考”。
 2. 流仍健康但预览已冻结（5 分钟或 5000 字）时，冻结之后的新正文要等到 final 才显示，这是刻意的：气泡活着时 final 会整帧替换它，提前推送余量只会在 final 到达时重复。死窗后的余量自 2.7.260-26 起按 20 秒推送；但冻结后正文块不再发帧，死窗要靠步骤帧 / 90 秒工具心跳 / 8 分钟状态帧撞出来（见 2.-4）。
 3. 回合前 120 秒内流就失效且此前没有成功预览时，后台通知存在窄场景被取消的可能。
 4. ambiguous 主动推送重试仍有有限重复风险，当前上限为 3 次；这是“宁可有限重复，不静默丢答案”的明确取舍。
@@ -385,6 +395,13 @@ src/transport/bot-ws/sdk-adapter.ts
 - 不在渲染层做模糊语义去重；判断重复前先区分同一 item 快照、跨 item flush、真实模型重复和重复投递。
 
 ## 7. 当前验证证据
+
+### 3.0.0-16 发布验证（2026-10-11）
+
+- 7.1-2：tsc 0 错误，68 文件 / 906 用例通过；B1 / B2 / B3 READY；diff check 通过。新增 4 个用例修复前全部失败。
+- 两次 `npm pack` 一致：258 个文件、628,032 bytes，SHA-256 `76cb69987b5e8427581836859a832017cc070b89b1dfbce71c2e448714103929`，npm shasum `ae0ad431f241b13858bc9ee316241172f68cbf97`。
+- 未重跑隔离安装（本版不涉及打包内容、配置 schema 与依赖）；真实企微客户端未验收；生产未部署。
+- `npm run upstream:check`：官方 HEAD 仍为 `3b1cbe3`，npm `2026.9.15`；`@wecom/aibot-node-sdk` 1.0.7；`@wecom/cli` 最新 1.3.4，继续锁定 1.2.0。
 
 ### 3.0.0-15 发布验证（2026-10-02）
 

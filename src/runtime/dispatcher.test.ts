@@ -854,6 +854,176 @@ describe("dispatchInboundEvent", () => {
     expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["welcome", "event"] as const)(
+    "does not let a %s frame take over a chat turn that is still running",
+    async (inboundKind) => {
+      // Field report 2026-10: the reply bubble turned into 「已收到新消息，合并思考」
+      // and nothing followed, although the user had sent nothing else. WeCom's
+      // own frames (enter_chat on the first visit of the day, auth_change_event)
+      // share the user's peer, so they superseded the turn, killed its run and
+      // then answered nothing the user could see.
+      let firstAbortSignal: AbortSignal | undefined;
+      let resolveFirst!: (value: unknown) => void;
+      const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementationOnce((params) => {
+        firstAbortSignal = params.replyOptions?.abortSignal;
+        return new Promise((resolve) => {
+          resolveFirst = resolve;
+        });
+      });
+      const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+      const store = makeStore();
+      const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+      const mediaService = {
+        normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+        saveInboundAttachment: vi.fn(),
+      };
+      const userSupersede = vi.fn();
+      const systemSettled = vi.fn();
+
+      const userTurn = dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: mediaService as any,
+        event: makeEvent("msg-user", "算一下这单综合毛利率"),
+        replyHandle: makeReplyHandle(userSupersede),
+      });
+      await vi.waitFor(() =>
+        expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1),
+      );
+
+      await dispatchInboundEvent({
+        core: core as any,
+        cfg: {} as any,
+        store: store as any,
+        auditLog: auditLog as any,
+        mediaService: mediaService as any,
+        event: { ...makeEvent("msg-system", `[event:${inboundKind}]`), inboundKind },
+        replyHandle: makeReplyHandle(vi.fn(), { markDispatchSettled: systemSettled }),
+      });
+
+      expect(userSupersede).not.toHaveBeenCalled();
+      expect(firstAbortSignal?.aborted).toBe(false);
+      expect(openClawHandoffState.abortAgentHarnessRun).not.toHaveBeenCalled();
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+      // The skipped frame must still release its transport-owner tracking.
+      expect(systemSettled).toHaveBeenCalledTimes(1);
+
+      resolveFirst({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+      await userTurn;
+    },
+  );
+
+  it("does not let a system frame take over a chat turn that is still preparing", async () => {
+    let releasePrepare!: () => void;
+    const recordInboundSession = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releasePrepare = resolve;
+        }),
+    );
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValue({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher, recordInboundSession);
+    const store = makeStore();
+    const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const mediaService = {
+      normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+      saveInboundAttachment: vi.fn(),
+    };
+    const userSupersede = vi.fn();
+
+    const userTurn = dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: mediaService as any,
+      event: makeEvent("msg-user-prepare", "你好"),
+      replyHandle: makeReplyHandle(userSupersede),
+    });
+    await vi.waitFor(() => expect(recordInboundSession).toHaveBeenCalledTimes(1));
+
+    await dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: mediaService as any,
+      event: { ...makeEvent("msg-enter", "[event:enter_chat]"), inboundKind: "welcome" },
+      replyHandle: makeReplyHandle(),
+    });
+    releasePrepare();
+    await userTurn;
+
+    expect(userSupersede).not.toHaveBeenCalled();
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("tells a running turn its content was dropped when the successor cannot adopt it", async () => {
+    // A card click (or another group member) takes the peer over without
+    // carrying the old message along; "合并思考" would promise a merge that
+    // never happens.
+    let firstAbortSignal: AbortSignal | undefined;
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementationOnce((params) => {
+        firstAbortSignal = params.replyOptions?.abortSignal;
+        return new Promise((_resolve, reject) => {
+          firstAbortSignal?.addEventListener(
+            "abort",
+            () => reject(firstAbortSignal?.reason ?? new Error("aborted")),
+            { once: true },
+          );
+        });
+      })
+      .mockResolvedValueOnce({ queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } });
+    const core = makeCore(dispatchReplyWithBufferedBlockDispatcher);
+    const store = makeStore();
+    const auditLog = { appendOperational: vi.fn(), appendInbound: vi.fn() };
+    const mediaService = {
+      normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+      saveInboundAttachment: vi.fn(),
+    };
+    const oldSupersede = vi.fn();
+
+    const first = dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: mediaService as any,
+      event: makeEvent("msg-before-card", "帮我发起投票"),
+      replyHandle: makeReplyHandle(oldSupersede),
+    });
+    await vi.waitFor(() =>
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1),
+    );
+
+    await dispatchInboundEvent({
+      core: core as any,
+      cfg: {} as any,
+      store: store as any,
+      auditLog: auditLog as any,
+      mediaService: mediaService as any,
+      event: {
+        ...makeEvent("msg-card", "[企业微信模板卡片回调]"),
+        inboundKind: "template-card-event",
+      },
+      replyHandle: makeReplyHandle(),
+    });
+    await first;
+
+    expect(oldSupersede).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "new-inbound-unmerged" }),
+    );
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+    const secondCtx = dispatchReplyWithBufferedBlockDispatcher.mock.calls[1]?.[0]?.ctx;
+    expect(String(secondCtx?.RawBody ?? secondCtx?.Body ?? "")).not.toContain("帮我发起投票");
+  });
+
   it("aborts an active core dispatch when its Bot WS runtime retires", async () => {
     let retireTransport!: () => void;
     let coreAbortSignal: AbortSignal | undefined;

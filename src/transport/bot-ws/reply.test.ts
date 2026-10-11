@@ -7465,7 +7465,7 @@ describe("createBotWsReplyHandle", () => {
     await flushPromises();
 
     const noticeCall = mockClient.replyStream.mock.calls.at(-1);
-    expect(String(noticeCall?.[2] ?? "")).toContain("尚未开始处理");
+    expect(String(noticeCall?.[2] ?? "")).toContain("本条未处理完");
     expect(noticeCall?.[3]).toBe(true);
   });
 

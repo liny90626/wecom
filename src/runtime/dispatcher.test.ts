@@ -283,6 +283,7 @@ describe("dispatchInboundEvent", () => {
       expect.objectContaining({
         attachments: [expect.objectContaining({ remoteUrl: "https://wecom/report.pdf" })],
       }),
+      expect.any(AbortSignal),
     );
   });
 
@@ -354,6 +355,7 @@ describe("dispatchInboundEvent", () => {
         expect.objectContaining({
           attachments: [expect.objectContaining({ remoteUrl: "https://wecom/report.pdf" })],
         }),
+        expect.any(AbortSignal),
       );
     } finally {
       releaseTextRun();
@@ -433,6 +435,7 @@ describe("dispatchInboundEvent", () => {
         expect.objectContaining({
           attachments: [expect.objectContaining({ remoteUrl: "https://wecom/report.pdf" })],
         }),
+        expect.any(AbortSignal),
       );
     } finally {
       releaseTextRun();
@@ -502,6 +505,7 @@ describe("dispatchInboundEvent", () => {
         expect.objectContaining({
           attachments: [expect.objectContaining({ remoteUrl: "https://wecom/report.pdf" })],
         }),
+        expect.any(AbortSignal),
       );
       // The file's own label must not come along as if it were an instruction.
       expect(
@@ -914,6 +918,35 @@ describe("dispatchInboundEvent", () => {
       await userTurn;
     },
   );
+
+  it("does not let a system frame abort a core run no pending turn owns", async () => {
+    // A deferred continuation, cron or announce run has no pending Bot WS turn,
+    // so the pending guard cannot see it; the pre-dispatch drain would abort it.
+    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-in-progress");
+    openClawHandoffState.abortAgentHarnessRun.mockClear();
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn();
+    const settled = vi.fn();
+    try {
+      await dispatchInboundEvent({
+        core: makeCore(dispatchReplyWithBufferedBlockDispatcher) as any,
+        cfg: {} as any,
+        store: makeStore() as any,
+        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
+        mediaService: {
+          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
+          saveInboundAttachment: vi.fn(),
+        } as any,
+        event: { ...makeEvent("msg-auth-change", "[event:auth_change_event]"), inboundKind: "event" },
+        replyHandle: makeReplyHandle(vi.fn(), { markDispatchSettled: settled }),
+      });
+    } finally {
+      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
+    }
+
+    expect(openClawHandoffState.abortAgentHarnessRun).not.toHaveBeenCalled();
+    expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    expect(settled).toHaveBeenCalledTimes(1);
+  });
 
   it("does not let a system frame take over a chat turn that is still preparing", async () => {
     let releasePrepare!: () => void;

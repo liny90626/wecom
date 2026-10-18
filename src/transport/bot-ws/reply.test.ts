@@ -2336,6 +2336,40 @@ describe("createBotWsReplyHandle", () => {
     expect(pushed.at(-1)).not.toContain("&lt;think&gt;");
   });
 
+  it("paints a block that landed inside the throttle window once the window closes", async () => {
+    // The block before a tool call or a pause used to stay off the bubble until
+    // the next event — often the final — because the throttle dropped it and
+    // nothing came back for it.
+    const handle = createBotWsReplyHandle({
+      client: mockClient,
+      frame: {
+        headers: { req_id: "req-block-trailing-edge" },
+        body: { from: { userid: "alice" }, chattype: "single" },
+      } as unknown as ReplyHandleParams["frame"],
+      accountId: "default",
+      inboundKind: "text",
+      autoSendPlaceholder: false,
+    });
+
+    await handle.deliver({ text: "第一段正文。" }, { kind: "block" });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(300);
+    await handle.deliver({ text: "第二段正文，紧接着就去调用工具。" }, { kind: "block" });
+    await flushPromises();
+    const lastFrame = () => String(mockClient.replyStream.mock.calls.at(-1)?.[2] ?? "");
+    expect(lastFrame()).not.toContain("第二段正文");
+
+    await vi.advanceTimersByTimeAsync(1_200);
+    await flushPromises();
+    expect(lastFrame()).toContain("第二段正文");
+    const framesAfterTrailing = mockClient.replyStream.mock.calls.length;
+
+    // A single trailing paint, not a repeating one.
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flushPromises();
+    expect(mockClient.replyStream.mock.calls.length).toBe(framesAfterTrailing);
+  });
+
   it("does not treat an ordinary code block as a card", async () => {
     const handle = createBotWsReplyHandle({
       client: mockClient,

@@ -136,6 +136,31 @@ describe("WecomAccountRuntime", () => {
     expect(trackedReplyHandle?.closeDeferred).toBeUndefined();
   });
 
+  it("logs a transport session only when its state changes", () => {
+    // Each block deliver and inbound frame touches the session to bump a
+    // timestamp; one synchronous log write per block was pure reply latency.
+    const info = vi.fn();
+    const runtime = new WecomAccountRuntime(
+      {} as any,
+      {} as any,
+      { account: { accountId: "acct" } } as any,
+      { info },
+      vi.fn(),
+    );
+    const sessionLines = () =>
+      info.mock.calls.filter((call) => String(call[0]).includes("[wecom-runtime] session")).length;
+
+    runtime.touchTransportSession("bot-ws", { running: true, connected: true, authenticated: true });
+    expect(sessionLines()).toBe(1);
+    runtime.touchTransportSession("bot-ws", { lastOutboundAt: Date.now() });
+    runtime.touchTransportSession("bot-ws", { lastInboundAt: Date.now() });
+    expect(sessionLines()).toBe(1);
+    runtime.touchTransportSession("bot-ws", { lastError: "socket closed" });
+    expect(sessionLines()).toBe(2);
+    runtime.touchTransportSession("bot-ws", { connected: false });
+    expect(sessionLines()).toBe(3);
+  });
+
   it("forwards transport lifecycle hooks through the runtime wrapper", async () => {
     let trackedReplyHandle: ReplyHandle | undefined;
     dispatchInboundEventMock.mockImplementation(async (params: { replyHandle: ReplyHandle }) => {

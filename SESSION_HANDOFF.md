@@ -1,11 +1,12 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-10-11（3.0.0-16）
+> 最后更新：2026-10-18（3.0.0-16 + main 上未发版的对抗式检查修复，见 2.-17）
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
+- **main 领先 `released/3.0.0-16`**：2026-10-18 对抗式检查的 8 项稳定性 / 速度修复已提交并推 fork，未改版本号、未打包、未打 tag，等真机反馈后一起发版（见 2.-17）。
 - 当前发布版本 **3.0.0-16**：修复气泡偶发变成「已收到新消息，合并思考」后再无回复（企微系统事件帧抢占用户回合，见 2.-16）。已打 tag、已打包，**生产未部署**，现网保持原样。
 - 上一版 **3.0.0-15**：生产 OpenClaw 在 9.7 上问题较多，**已回退到 2026.7.1-2，此后只支持这一个版本**，其他版本不考虑兼容。本版撤掉 9.x 专用代码，做了一轮对抗式检查与性能、稳定性提升，并对照官方补齐多附件、附件下载失败降级等（见 2.-15）。`3.0.0-14` 只是发给维护者的验收候选包，未打 tag、未发布，内容全部并入 3.0.0-15。
 - 上一版 **3.0.0-13**：曾把生产升级到 2026.9.7（见 2.-13，已作废，仅留作 9.x 资料）。
@@ -67,6 +68,34 @@
 - origin 停在 `133773f`（上游 v3.0.0，2026-09-05 对账，见第 8 节），无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
+
+### 2.-17 对抗式检查：稳定性与速度（main，未发版）
+
+2026-10-18。三个仓库都没有新提交：fork 与本地 main 一致；origin 仍是 `133773f`；官方 git `3b1cbe3`、npm `2026.9.15`；`@wecom/aibot-node-sdk` 1.0.7；`@wecom/cli` 最新 1.3.4（继续锁 1.2.0）；OpenClaw extended-stable `2026.9.33`（不跟进，只支持 7.1-2）。
+
+三路只读审查（Bot WS 回复链路 / 入站与媒体 / CLI·MCP·Agent API·运行时）后，逐项读代码核实，修了 8 项。每项都有「去掉修复即失败」的用例（已逐项回退源码验证）：
+
+1. **WS 重启 10 次后永久放弃**（`src/capability/bot/service.ts`）：断网约 55 分钟以上（SDK 自身 10 次 + 插件 10 次退避）后该账号 Bot WS 一直不回来，agent 回调让账号看起来仍活着，没人重启。现在去掉次数上限，延迟仍封顶 5 分钟，一直重试。
+2. **节流窗口内的正文块要等下一个事件才显示**（`reply.ts` `armBlockPreviewTrailingEdge`）：200/600 分块下块间隔常小于 1.5 s，工具调用前的最后一段被节流丢掉，往往拖到 final 才出现。现在窗口一关就补画一帧（同时只有一个定时器、取触发时的 accumulatedText、`settleStream` 清理；冻结后不走这条）。
+3. **入站媒体内存**：`readResponseBodyAsBuffer` 的 `Buffer.from` 逐块复制去掉（峰值 3N → 2N）；解密 `final()` 为空时不再 concat；`!res.ok` 时先 `res.body.cancel()` 释放连接。
+4. **大小上限边界**：加密体比文件多最多 32 字节 PKCS#7 填充，原先按文件上限限制加密体，恰好在上限的文件被判超限。现按 `maxBytes + 32` 下载、解密后按文件大小精确判断（与 webhook 车道一致）。
+5. **首个附件下载不受中止信号控制**：其余附件早就传了 `abortSignal`，首个没有，被接管或准备超时后还会在后台下 45 s。现在非预取路径也传信号（预取仍按 60 s TTL 自行结束）。
+6. **Agent API token 失效后最多两小时全部失败**（`src/transport/agent-api/core.ts`）：缓存键不含 secret，也没人处理 40001/40014/42001。现在缓存键带 secret 指纹；`withFreshAccessToken` 遇到这三个码丢弃 token、重取后重发一次（这三个码说明请求没被执行，重发安全）。`sendText` / `sendMedia` / `uploadMedia` / doc / calendar 都走它。上游企业 token（`getUpstreamAccessToken`）未改。
+7. **doc / calendar 盲目重试写操作**：所有错误都重试 3 次（含超时、业务错误码），超时但服务端已执行的 `create_doc`、`schedule/add` 会建出 2~3 份。现在不再盲重试，只有 token 被拒才重发一次。代价：读接口的瞬时网络错误不再自动重试，由模型重新调用。
+8. **系统事件帧中止无人认领的 run**（`dispatcher.ts`）：2.-16 的守卫只看 pending 的 Bot WS 回合；deferred continuation、cron、announce 这类 run 没有 pending 记录，`auth_change_event` 仍会走预派发 drain 把它中止。现在系统帧遇到会话里有活跃 run 时直接跳过（同一日志 `system-inbound-skipped`，带 `activeRunSessionId`）。
+
+另：`[wecom-runtime] session …` 日志只在 running / owner / connected / authenticated / lastError 变化时写（原先每个 block 投递、每条入站都写一行同步日志）；状态上报 `emitStatus` 照旧每次都发。
+
+**核实后未改**（风险低或依赖配置，留作记录）：
+- 一轮最多 8 个附件、每个按完整 `mediaMaxMb`（默认 80 MB）下载，全部下完才逐个保存，没有整轮预算（webhook 车道有）。
+- `Content-Length` 已超限时仍先下到上限才拒；未核实企微 CDN 是否返回该头。
+- 不同 peer 共用一个 sessionKey（如 `session.dmScope="main"`）时，B 的消息会中止 A 的 run 而 A 的气泡不被接管。生产若每个 peer 独立会话则不适用。
+- 适配器 `stop()` 时丢弃 1 秒合并窗口里的媒体帧，气泡停在「正在思考中」；只在重连失败替换适配器时发生。
+- 系统帧在用户回合结束、final 推送重试尚未完成的窗口里到达，仍会经 `activate` 取消剩余分片重试。生产配了 `welcomeText`，只剩 `auth_change_event` 可能触发。
+- `markExternalActivity` 缺 `isEvent` 守卫（卡片事件回合上会空转一个 3 秒轮询直到 settle）。
+- Agent 媒体上传 / 下载固定 15 s 超时、不读 `media.downloadTimeoutMs`；长回复某一段失败后仍继续发后续段；网关 stop 等待凭据预热；MCP 地址缓存对 HTTP 401/403 不失效；webhook 车道多附件串行下载。
+
+验证：见第 7 节「main（2026-10-18）」。
 
 ### 2.-16 系统事件帧抢占用户回合（3.0.0-16）
 
@@ -395,6 +424,11 @@ src/transport/bot-ws/sdk-adapter.ts
 - 不在渲染层做模糊语义去重；判断重复前先区分同一 item 快照、跨 item flush、真实模型重复和重复投递。
 
 ## 7. 当前验证证据
+
+### main（2026-10-18，未发版）
+
+- 7.1-2：tsc 0 错误，69 文件 / 916 用例通过；B1 / B2 / B3 READY；build、verify-dist、diff check 通过。新增 10 个用例、改写 1 个（WS 重启不再放弃），逐项回退源码确认会失败。
+- 未打包、未做隔离安装、未在真实企微客户端验收。
 
 ### 3.0.0-16 发布验证（2026-10-11）
 

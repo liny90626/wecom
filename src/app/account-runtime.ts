@@ -198,9 +198,21 @@ export class WecomAccountRuntime {
     const previous = this.store.readTransportSession(snapshot.accountId, snapshot.transport);
     this.store.writeTransportSession(snapshot);
     this.statusRegistry.write(snapshot);
-    this.log.info?.(
-      `[wecom-runtime] session account=${snapshot.accountId} transport=${snapshot.transport} running=${snapshot.running} owner=${snapshot.ownerId ?? "none"} connected=${String(snapshot.connected ?? false)} authenticated=${String(snapshot.authenticated ?? false)} error=${snapshot.lastError ?? "none"}`,
-    );
+    // Every inbound frame, push and block deliver touches the session to bump a
+    // timestamp. Logging each one was a synchronous file write per block on the
+    // reply path; only a change in state is worth a line.
+    if (
+      !previous ||
+      previous.running !== snapshot.running ||
+      previous.ownerId !== snapshot.ownerId ||
+      previous.connected !== snapshot.connected ||
+      previous.authenticated !== snapshot.authenticated ||
+      previous.lastError !== snapshot.lastError
+    ) {
+      this.log.info?.(
+        `[wecom-runtime] session account=${snapshot.accountId} transport=${snapshot.transport} running=${snapshot.running} owner=${snapshot.ownerId ?? "none"} connected=${String(snapshot.connected ?? false)} authenticated=${String(snapshot.authenticated ?? false)} error=${snapshot.lastError ?? "none"}`,
+      );
+    }
     if (
       previous?.ownerId &&
       snapshot.ownerId &&

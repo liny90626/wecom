@@ -154,5 +154,7 @@ export async function readResponseBodyAsBuffer(res: Response, maxBytes?: number)
     chunks.push(value);
   }
 
-  return Buffer.concat(chunks.map((c) => Buffer.from(c)));
+  // Buffer.concat takes Uint8Array as is; wrapping each chunk in Buffer.from
+  // copied it, so a large download sat in memory three times at the peak.
+  return Buffer.concat(chunks, total);
 }

@@ -8,7 +8,6 @@ import { startBotWebhookTransport } from "../../transport/bot-webhook/http-handl
 /** Backoff for restarting a WS transport the SDK gave up on: 5 s doubling to 5 min. */
 const WS_RESTART_BASE_MS = 5_000;
 const WS_RESTART_MAX_MS = 5 * 60_000;
-const WS_RESTART_MAX_ATTEMPTS = 10;
 /** A transport that ran this long before failing starts a fresh attempt budget. */
 const WS_STABLE_RUN_MS = 10 * 60_000;
 
@@ -91,18 +90,16 @@ export class WecomBotCapabilityService {
     }
     this.wsRestartAttempts += 1;
     const accountId = this.runtime.account.accountId;
-    if (this.wsRestartAttempts > WS_RESTART_MAX_ATTEMPTS) {
-      this.runtimeEnv.error?.(
-        `[wecom-ws] restart-gave-up account=${accountId} attempts=${WS_RESTART_MAX_ATTEMPTS} error=${error.message}`,
-      );
-      return;
-    }
+    // No attempt cap: giving up after ten tries left the account's Bot WS down
+    // for good after a long network outage (agent callbacks kept the account
+    // looking alive, so nothing else restarted it). The delay is already capped,
+    // so an outage costs one attempt per WS_RESTART_MAX_MS.
     const delayMs = Math.min(
       WS_RESTART_BASE_MS * 2 ** (this.wsRestartAttempts - 1),
       WS_RESTART_MAX_MS,
     );
     this.runtimeEnv.error?.(
-      `[wecom-ws] restart-scheduled account=${accountId} attempt=${this.wsRestartAttempts}/${WS_RESTART_MAX_ATTEMPTS} delayMs=${delayMs} error=${error.message}`,
+      `[wecom-ws] restart-scheduled account=${accountId} attempt=${this.wsRestartAttempts} delayMs=${delayMs} error=${error.message}`,
     );
     this.wsRestartTimer = setTimeout(() => {
       this.wsRestartTimer = undefined;

@@ -671,6 +671,28 @@ export async function dispatchInboundEvent(params: {
       previousSupersedeDrain = undefined;
     }
 
+    if (isBotWsReplySession && isSystemInbound(event) && sessionKey) {
+      // The pending-turn guard above only sees runs a Bot WS inbound still owns.
+      // A run nobody is waiting on here (a deferred continuation, a cron or
+      // announce run) would otherwise be aborted below for a frame the user
+      // never typed.
+      let activeRunSessionId: string | undefined;
+      try {
+        activeRunSessionId = resolveActiveEmbeddedRunSessionId(sessionKey) ?? undefined;
+      } catch (error) {
+        console.warn(
+          `[wecom-b3] system-inbound-run-lookup-failed sessionKey=${sessionKey} error=${String(error)}`,
+        );
+      }
+      if (activeRunSessionId) {
+        console.info(
+          `[wecom-b3] system-inbound-skipped account=${event.accountId} messageId=${event.messageId} kind=${event.inboundKind} activeRunSessionId=${activeRunSessionId} peer=${event.conversation.peerKind}:${event.conversation.peerId}`,
+        );
+        clearPendingReply();
+        return;
+      }
+    }
+
     if (isBotWsReplySession) {
       let sessionReady = false;
       // Claiming the peer is what tells the previous dispatch it was superseded,

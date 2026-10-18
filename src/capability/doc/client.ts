@@ -1,5 +1,5 @@
 import type { ResolvedAgentAccount } from "../../types/index.js";
-import { getAccessToken } from "../../transport/agent-api/core.js";
+import { throwIfAccessTokenRejected, withFreshAccessToken } from "../../transport/agent-api/core.js";
 import { wecomFetch } from "../../http.js";
 import { resolveWecomEgressProxyUrlFromNetwork } from "../../config/index.js";
 import { LIMITS } from "../../types/constants.js";
@@ -141,6 +141,7 @@ async function parseJsonResponse(res: Response, actionLabel: string): Promise<an
         }
         return payload;
     }
+    throwIfAccessTokenRejected(payload, `WeCom ${actionLabel} failed`);
     if (Number(payload.errcode ?? 0) !== 0) {
         throw new Error(
             `WeCom ${actionLabel} failed: ${String(payload.errmsg || "unknown error")} (errcode ${String(payload.errcode)})`,
@@ -158,30 +159,22 @@ export class WecomDocClient {
     }): Promise<any> {
         const { path, actionLabel, agent, body } = params;
 
-        const token = await getAccessToken(agent);
-        const url = `https://qyapi.weixin.qq.com${path}?access_token=${encodeURIComponent(token)}`;
         const proxyUrl = resolveWecomEgressProxyUrlFromNetwork(agent.network);
-
-        let lastErr: any;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-                const res = await wecomFetch(url, {
-                    method: "POST",
-                    headers: {
-                        "content-type": "application/json",
-                    },
-                    body: JSON.stringify(body ?? {}),
-                }, { proxyUrl, timeoutMs: LIMITS.REQUEST_TIMEOUT_MS });
-
-                return await parseJsonResponse(res, actionLabel);
-            } catch (err) {
-                lastErr = err;
-                if (attempt < 3) {
-                    await new Promise(r => setTimeout(r, 1000));
-                }
-            }
-        }
-        throw lastErr;
+        // No blind retries: every doc API is a POST and most of them create or
+        // change something, so retrying a call that timed out after WeCom ran it
+        // made two or three documents. A rejected token is the one failure that
+        // proves the call did not run, and that one is retried with a new token.
+        return withFreshAccessToken(agent, async (token) => {
+            const url = `https://qyapi.weixin.qq.com${path}?access_token=${encodeURIComponent(token)}`;
+            const res = await wecomFetch(url, {
+                method: "POST",
+                headers: {
+                    "content-type": "application/json",
+                },
+                body: JSON.stringify(body ?? {}),
+            }, { proxyUrl, timeoutMs: LIMITS.REQUEST_TIMEOUT_MS });
+            return parseJsonResponse(res, actionLabel);
+        });
     }
 
     async createDoc(params: { agent: ResolvedAgentAccount; docName: string; docType?: unknown; spaceId?: string; fatherId?: string; adminUsers?: string[] }) {

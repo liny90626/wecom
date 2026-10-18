@@ -72,19 +72,22 @@ describe("WecomBotCapabilityService WS restart", () => {
     expect(runtime.listenerCount()).toBe(0);
   });
 
-  it("gives up after ten failed restarts and logs it", async () => {
+  it("keeps restarting at the capped delay however long the outage lasts", async () => {
+    // It used to give up after ten restarts (~55 min of outage counting the
+    // SDK's own reconnects), leaving the account's Bot WS down until someone
+    // restarted the gateway by hand.
     const runtime = makeRuntime();
     const error = vi.fn();
     const service = new WecomBotCapabilityService(runtime as any, {} as any, { error } as any);
     service.start();
 
-    for (let attempt = 1; attempt <= 11; attempt += 1) {
+    for (let attempt = 1; attempt <= 15; attempt += 1) {
       runtime.fatal();
       await vi.advanceTimersByTimeAsync(5 * 60_000);
     }
 
-    expect(adapters).toHaveLength(11);
-    expect(String(error.mock.calls.at(-1)?.[0])).toContain("restart-gave-up");
+    expect(adapters).toHaveLength(16);
+    expect(String(error.mock.calls.at(-1)?.[0])).toContain("attempt=15 delayMs=300000");
     service.stop();
   });
 });

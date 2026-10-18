@@ -49,6 +49,17 @@ describe("decryptWecomMedia", () => {
         );
     });
 
+    it("releases the connection of a failed download before throwing", async () => {
+        // An unread error body pins the connection until GC or the timeout.
+        const response = new Response("expired", { status: 403 });
+        const cancel = vi.spyOn(response.body!, "cancel");
+        undiciFetch.mockResolvedValue(response);
+        await expect(
+            decryptWecomMedia("http://mock.url/expired", "jWmYm7qr5nMoCAstdRmNjt3p7vsH8HkK+qiJqQ0aaaa="),
+        ).rejects.toThrow("failed to download media: 403");
+        expect(cancel).toHaveBeenCalledTimes(1);
+    });
+
     it("should fail if key is invalid", async () => {
         await expect(decryptWecomMedia("http://url", "invalid-key")).rejects.toThrow();
     });

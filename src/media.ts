@@ -81,6 +81,9 @@ export async function decryptWecomMediaWithMeta(
     // 1. Download encrypted content
     const res = await wecomFetch(url, undefined, { ...params?.http, timeoutMs: params?.http?.timeoutMs ?? 15_000 });
     if (!res.ok) {
+        // Release the connection now: an unread body keeps it from going back to
+        // the pool until GC or the timeout gets to it.
+        await res.body?.cancel().catch(() => undefined);
         throw new Error(`failed to download media: ${res.status}`);
     }
     const sourceContentType = normalizeMime(res.headers.get("content-type"));
@@ -95,10 +98,12 @@ export async function decryptWecomMediaWithMeta(
     // 3. Decrypt
     const decipher = crypto.createDecipheriv("aes-256-cbc", aesKey, iv);
     decipher.setAutoPadding(false); // We handle padding manually
-    const decryptedPadded = Buffer.concat([
-        decipher.update(encryptedData),
-        decipher.final(),
-    ]);
+    // With autoPadding off final() only returns what update() could not; for a
+    // block-aligned body that is nothing, so skip the concat and its full copy.
+    const decryptedHead = decipher.update(encryptedData);
+    const decryptedTail = decipher.final();
+    const decryptedPadded =
+        decryptedTail.length === 0 ? decryptedHead : Buffer.concat([decryptedHead, decryptedTail]);
 
     // 4. Unpad
     // Note: Unlike msg bodies, usually removing PKCS#7 padding is enough for media files.

@@ -70,7 +70,7 @@ export async function prepareInboundSession(params: {
   // Every attachment reaches the agent (a mixed message carries several images,
   // a merged turn several files); the first may already be prefetched.
   const downloads = await Promise.allSettled([
-    mediaService.normalizeFirstAttachment(event),
+    mediaService.normalizeFirstAttachment(event, abortSignal),
     ...(event.attachments ?? [])
       .slice(1, MAX_INBOUND_ATTACHMENTS)
       .map((attachment) => mediaService.downloadAttachment(event, attachment, abortSignal)),

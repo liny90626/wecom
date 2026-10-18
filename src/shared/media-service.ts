@@ -1,6 +1,7 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { resolveWecomMediaDownloadTimeoutMs, resolveWecomMediaMaxBytes } from "../config/index.js";
+import { WECOM_PKCS7_BLOCK_SIZE } from "../crypto.js";
 import { ResponseBodyTooLargeError } from "../http.js";
 import { decryptWecomMediaWithMeta } from "../media.js";
 import type { UnifiedInboundEvent } from "../types/index.js";
@@ -76,7 +77,9 @@ export class WecomMediaService {
     signal?: AbortSignal;
   }): Promise<NormalizedMediaAttachment> {
     const decrypted = await decryptWecomMediaWithMeta(params.url, params.aesKey, {
-      maxBytes: params.maxBytes,
+      // The limit is on the file, the body carries up to one block of PKCS#7
+      // padding on top: a file right at the limit was refused as too large.
+      maxBytes: params.maxBytes + WECOM_PKCS7_BLOCK_SIZE,
       // The same media.downloadTimeoutMs (30 s default) the webhook path honours;
       // the bare 15 s default was too short for a large file on a slow line.
       http: {
@@ -84,6 +87,9 @@ export class WecomMediaService {
         signal: params.signal,
       },
     });
+    if (decrypted.buffer.length > params.maxBytes) {
+      throw new ResponseBodyTooLargeError(params.maxBytes);
+    }
     return {
       buffer: decrypted.buffer,
       contentType: decrypted.sourceContentType,
@@ -132,6 +138,7 @@ export class WecomMediaService {
 
   async normalizeFirstAttachment(
     event: UnifiedInboundEvent,
+    signal?: AbortSignal,
   ): Promise<NormalizedMediaAttachment | undefined> {
     const key = prefetchKey(event);
     const prefetched = key ? this.prefetched.get(key) : undefined;
@@ -140,14 +147,18 @@ export class WecomMediaService {
       clearTimeout(prefetched.expiry);
       return prefetched.download;
     }
-    return this.downloadFirstAttachment(event);
+    // Same signal as the other attachments: a superseded or timed-out turn left
+    // this download running for up to 45 s, holding the file in memory and the
+    // bandwidth the next turn's downloads need.
+    return this.downloadFirstAttachment(event, signal);
   }
 
   private downloadFirstAttachment(
     event: UnifiedInboundEvent,
+    signal?: AbortSignal,
   ): Promise<NormalizedMediaAttachment | undefined> {
     const first = event.attachments?.[0];
-    return first ? this.downloadAttachment(event, first) : Promise.resolve(undefined);
+    return first ? this.downloadAttachment(event, first, signal) : Promise.resolve(undefined);
   }
 
   /**

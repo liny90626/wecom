@@ -137,6 +137,28 @@ describe("WecomMediaService", () => {
     ]);
   });
 
+  it("accepts a file right at the limit although its encrypted body is padded past it", async () => {
+    // AES-CBC with PKCS#7 makes the body up to one block larger than the file;
+    // treating the file limit as the body limit refused a file exactly at it.
+    decryptWecomMediaWithMeta.mockResolvedValue({ buffer: Buffer.alloc(10) });
+    const service = new WecomMediaService(
+      { channel: { media: { fetchRemoteMedia, saveMediaBuffer } } } as never,
+      {} as never,
+    );
+    const result = await service.downloadEncryptedMedia({
+      url: "https://example.com/at-limit",
+      aesKey: "k",
+      maxBytes: 10,
+    });
+    expect(result.buffer.length).toBe(10);
+    expect(decryptWecomMediaWithMeta.mock.calls.at(-1)?.[2].maxBytes).toBe(10 + 32);
+
+    decryptWecomMediaWithMeta.mockResolvedValue({ buffer: Buffer.alloc(11) });
+    await expect(
+      service.downloadEncryptedMedia({ url: "https://example.com/over", aesKey: "k", maxBytes: 10 }),
+    ).rejects.toBeInstanceOf(ResponseBodyTooLargeError);
+  });
+
   it("turns an oversized download into a limit the user can act on", async () => {
     // The raw failure is `response body too large (>25165824 bytes)`, which
     // names neither the limit nor where to change it.
@@ -190,6 +212,22 @@ describe("WecomMediaService", () => {
       }),
     ).rejects.toThrow(WecomInboundMediaTooLargeError);
     expect(saveMediaBuffer).not.toHaveBeenCalled();
+  });
+
+  it("cancels the first encrypted attachment's download when the turn is abandoned", async () => {
+    // Only attachments 2-8 got the turn's signal; the first kept downloading for
+    // up to 45 s after a supersede or prepare timeout.
+    decryptWecomMediaWithMeta.mockResolvedValue({ buffer: Buffer.from("x") });
+    const service = new WecomMediaService(
+      { channel: { media: { fetchRemoteMedia, saveMediaBuffer } } } as never,
+      {} as never,
+    );
+    const controller = new AbortController();
+    await service.normalizeFirstAttachment(
+      { accountId: "default", attachments: [{ remoteUrl: "https://example.com/e", aesKey: "k" }] } as never,
+      controller.signal,
+    );
+    expect(decryptWecomMediaWithMeta.mock.calls.at(-1)?.[2].http.signal).toBe(controller.signal);
   });
 
   describe("prefetch during the merge window", () => {

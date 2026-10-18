@@ -1655,6 +1655,10 @@ export function createBotWsReplyHandle(params: {
   const settleStream = () => {
     if (streamSettled) return;
     streamSettled = true;
+    if (blockPreviewTrailingTimer) {
+      clearTimeout(blockPreviewTrailingTimer);
+      blockPreviewTrailingTimer = undefined;
+    }
     stopPlaceholderKeepalive();
     stopPreviewFreezeTimeout();
     stopPreviewStatusInterval();
@@ -1940,6 +1944,7 @@ export function createBotWsReplyHandle(params: {
   let lastPreviewText = "";
   let lastDeliveredBodySourceText = "";
   let lastPreviewUpdateAt = 0;
+  let blockPreviewTrailingTimer: ReturnType<typeof setTimeout> | undefined;
   // The status line has three possible painters — the bubble heartbeat, the
   // frozen-preview refresh and the background push — and they used to keep
   // three independent timers, each re-armed by whatever unrelated event
@@ -3707,6 +3712,7 @@ export function createBotWsReplyHandle(params: {
     }
     const now = Date.now();
     if (!shouldSendPreview(text, now)) {
+      armBlockPreviewTrailingEdge(text, now);
       return;
     }
     const preview = renderPreviewFrame(text, now);
@@ -3719,6 +3725,28 @@ export function createBotWsReplyHandle(params: {
     if (delivered && !previewFrozen) {
       schedulePreviewFreezeTimeout(now);
     }
+  };
+
+  /**
+   * A block that lands inside the 1.5 s throttle window used to be dropped from
+   * the bubble until the NEXT event painted it — and the block before a tool
+   * call or any other pause has no next event, so its text only showed up with
+   * the final. Paint it once the window closes instead. One timer at a time;
+   * it reads accumulatedText when it fires, so a burst costs one frame.
+   */
+  const armBlockPreviewTrailingEdge = (text: string, now: number): void => {
+    if (blockPreviewTrailingTimer || previewFrozen || !lastPreviewText || text === lastPreviewText) {
+      return;
+    }
+    const delayMs = lastPreviewUpdateAt + BLOCK_PREVIEW_MIN_UPDATE_MS - now;
+    if (delayMs <= 0) {
+      return;
+    }
+    blockPreviewTrailingTimer = setTimeout(() => {
+      blockPreviewTrailingTimer = undefined;
+      void deliverBlockPreview(accumulatedText);
+    }, delayMs);
+    blockPreviewTrailingTimer.unref?.();
   };
 
   const closeSupersededPlaceholder = (): void => {

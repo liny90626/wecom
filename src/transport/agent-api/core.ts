@@ -13,6 +13,57 @@ type TokenCache = {
 
 const tokenCaches = new Map<string, TokenCache>();
 
+/**
+ * WeCom answers these when the access token itself is no good (revoked, expired
+ * early, issued for a rotated secret). The request was refused, not executed,
+ * so it is safe to fetch a new token and send it once more.
+ */
+const ACCESS_TOKEN_ERRCODES = new Set([40001, 40014, 42001]);
+
+export class WecomAccessTokenRejectedError extends Error {
+  constructor(readonly errcode: number, message: string) {
+    super(message);
+    this.name = "WecomAccessTokenRejectedError";
+  }
+}
+
+export function throwIfAccessTokenRejected(json: { errcode?: unknown; errmsg?: unknown } | null | undefined, label: string): void {
+  const errcode = Number(json?.errcode);
+  if (ACCESS_TOKEN_ERRCODES.has(errcode)) {
+    throw new WecomAccessTokenRejectedError(errcode, `${label}: ${errcode} ${String(json?.errmsg ?? "")}`);
+  }
+}
+
+// The secret is part of the key: after the corp secret is rotated in config the
+// token issued for the old one must not be reused until it expires (~2 h).
+function accessTokenCacheKey(agent: ResolvedAgentAccount): string {
+  const secretTag = crypto.createHash("sha256").update(agent.corpSecret ?? "").digest("hex").slice(0, 12);
+  return `${agent.corpId}:${String(agent.agentId ?? "na")}:${secretTag}`;
+}
+
+/**
+ * Runs a token-authenticated call; if WeCom rejects the token, drops it and
+ * runs the call once more with a fresh one. Before this a dead token was kept
+ * until its nominal expiry, so every agent reply failed for up to two hours.
+ */
+export async function withFreshAccessToken<T>(
+  agent: ResolvedAgentAccount,
+  run: (token: string) => Promise<T>,
+): Promise<T> {
+  try {
+    return await run(await getAccessToken(agent));
+  } catch (error) {
+    if (!(error instanceof WecomAccessTokenRejectedError)) {
+      throw error;
+    }
+    tokenCaches.delete(accessTokenCacheKey(agent));
+    console.warn(
+      `[wecom-agent-api] access-token-rejected account=${agent.accountId} errcode=${error.errcode} — refetching once`,
+    );
+    return run(await getAccessToken(agent));
+  }
+}
+
 function truncateForLog(raw: string, maxChars = 180): string {
   const compact = raw.replace(/\s+/g, " ").trim();
   if (compact.length <= maxChars) return compact;
@@ -88,7 +139,7 @@ function requireAgentId(agent: ResolvedAgentAccount): number {
  * 使用 corpid + corpsecret
  */
 export async function getAccessToken(agent: ResolvedAgentAccount): Promise<string> {
-  const cacheKey = `${agent.corpId}:${String(agent.agentId ?? "na")}`;
+  const cacheKey = accessTokenCacheKey(agent);
   let cache = tokenCaches.get(cacheKey);
 
   if (!cache) {
@@ -221,21 +272,24 @@ export async function getUpstreamAccessToken(params: {
   return cache.refreshPromise;
 }
 
-export async function sendText(params: {
+export function sendText(params: Parameters<typeof sendTextWithToken>[0]): Promise<void> {
+  return withFreshAccessToken(params.agent, (token) => sendTextWithToken(params, token));
+}
+
+async function sendTextWithToken(params: {
   agent: ResolvedAgentAccount;
   toUser?: string;
   toParty?: string;
   toTag?: string;
   chatId?: string;
   text: string;
-}): Promise<void> {
+}, token: string): Promise<void> {
   const { agent, toUser, toParty, toTag, chatId, text } = params;
   console.log(
     `[wecom-agent-api] sendText request account=${agent.accountId} agentId=${String(agent.agentId ?? "N/A")} corpId=${agent.corpId} ` +
       `toUser=${toUser ?? ""} toParty=${toParty ?? ""} toTag=${toTag ?? ""} chatId=${chatId ?? ""} ` +
       `textLen=${text.length} textPreview=${JSON.stringify(truncateForLog(text))}`,
   );
-  const token = await getAccessToken(agent);
 
   const useChat = Boolean(chatId);
   const url = useChat
@@ -277,6 +331,7 @@ export async function sendText(params: {
       `invaliduser=${json?.invaliduser ?? ""} invalidparty=${json?.invalidparty ?? ""} invalidtag=${json?.invalidtag ?? ""}`,
   );
 
+  throwIfAccessTokenRejected(json, "send failed");
   if (json?.errcode !== 0) {
     throw new Error(`send failed: ${json?.errcode} ${json?.errmsg}`);
   }
@@ -293,15 +348,18 @@ export async function sendText(params: {
   }
 }
 
-export async function uploadMedia(params: {
+export function uploadMedia(params: Parameters<typeof uploadMediaWithToken>[0]): Promise<string> {
+  return withFreshAccessToken(params.agent, (token) => uploadMediaWithToken(params, token));
+}
+
+async function uploadMediaWithToken(params: {
   agent: ResolvedAgentAccount;
   type: "image" | "voice" | "video" | "file";
   buffer: Buffer;
   filename: string;
-}): Promise<string> {
+}, token: string): Promise<string> {
   const { agent, type, buffer, filename } = params;
   const safeFilename = normalizeUploadFilename(filename);
-  const token = await getAccessToken(agent);
   const proxyUrl = resolveWecomEgressProxyUrlFromNetwork(agent.network);
   const url = `${API_ENDPOINTS.UPLOAD_MEDIA}?access_token=${encodeURIComponent(token)}&type=${encodeURIComponent(type)}&debug=1`;
 
@@ -338,6 +396,7 @@ export async function uploadMedia(params: {
 
   const preferredContentType = guessUploadContentType(safeFilename);
   let json = await uploadOnce(preferredContentType);
+  throwIfAccessTokenRejected(json, "upload failed");
 
   if (!json?.media_id && preferredContentType !== "application/octet-stream") {
     console.warn(
@@ -352,7 +411,11 @@ export async function uploadMedia(params: {
   return json.media_id;
 }
 
-export async function sendMedia(params: {
+export function sendMedia(params: Parameters<typeof sendMediaWithToken>[0]): Promise<void> {
+  return withFreshAccessToken(params.agent, (token) => sendMediaWithToken(params, token));
+}
+
+async function sendMediaWithToken(params: {
   agent: ResolvedAgentAccount;
   toUser?: string;
   toParty?: string;
@@ -362,9 +425,8 @@ export async function sendMedia(params: {
   mediaType: "image" | "voice" | "video" | "file";
   title?: string;
   description?: string;
-}): Promise<void> {
+}, token: string): Promise<void> {
   const { agent, toUser, toParty, toTag, chatId, mediaId, mediaType, title, description } = params;
-  const token = await getAccessToken(agent);
 
   const useChat = Boolean(chatId);
   const url = useChat
@@ -400,6 +462,7 @@ export async function sendMedia(params: {
     invalidtag?: string;
   };
 
+  throwIfAccessTokenRejected(json, `send ${mediaType} failed`);
   if (json?.errcode !== 0) {
     throw new Error(`send ${mediaType} failed: ${json?.errcode} ${json?.errmsg}`);
   }

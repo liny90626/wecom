@@ -3,7 +3,7 @@
 // 严格遵循企业微信官方 API 文档：https://developer.work.weixin.qq.com/document/path/93329
 // ============================================================================
 import type { ResolvedAgentAccount } from "../../types/index.js";
-import { getAccessToken } from "../../transport/agent-api/core.js";
+import { throwIfAccessTokenRejected, withFreshAccessToken } from "../../transport/agent-api/core.js";
 import { wecomFetch } from "../../http.js";
 import { resolveWecomEgressProxyUrlFromNetwork } from "../../config/index.js";
 import { LIMITS } from "../../types/constants.js";
@@ -256,6 +256,7 @@ async function parseResponse<T>(res: Response, label: string): Promise<T> {
         return json as T;
     }
 
+    throwIfAccessTokenRejected(json, label);
     const errCode = Number(json.errcode ?? 0);
     if (errCode !== 0) {
         throw new Error(`${label}: ${json.errmsg || "failed"} (${errCode})`);
@@ -279,31 +280,23 @@ export class WecomCalendarClient {
             throw new Error(`${label}: 账号配置不完整，需要 corpId 和 corpSecret`);
         }
 
-        const token = await getAccessToken(agent);
-        const url = `https://qyapi.weixin.qq.com${path}?access_token=${encodeURIComponent(token)}`;
         const proxyUrl = resolveWecomEgressProxyUrlFromNetwork(agent.network);
-
-        let lastError: Error | undefined;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-                const res = await wecomFetch(
-                    url,
-                    {
-                        method: "POST",
-                        headers: { "content-type": "application/json" },
-                        body: JSON.stringify(body || {}),
-                    },
-                    { proxyUrl, timeoutMs: LIMITS.REQUEST_TIMEOUT_MS }
-                );
-                return await parseResponse<T>(res, label);
-            } catch (e) {
-                lastError = e instanceof Error ? e : new Error(String(e));
-                if (attempt < 3) {
-                    await new Promise(r => setTimeout(r, 1000 * attempt));
-                }
-            }
-        }
-        throw lastError || new Error(`${label}: 请求失败`);
+        // No blind retries: a schedule/add that timed out after WeCom ran it was
+        // created up to three times. Only a rejected token proves the call did
+        // not run; that one is retried once with a new token.
+        return withFreshAccessToken(agent, async (token) => {
+            const url = `https://qyapi.weixin.qq.com${path}?access_token=${encodeURIComponent(token)}`;
+            const res = await wecomFetch(
+                url,
+                {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify(body || {}),
+                },
+                { proxyUrl, timeoutMs: LIMITS.REQUEST_TIMEOUT_MS }
+            );
+            return parseResponse<T>(res, label);
+        });
     }
 
     // ========================================================================

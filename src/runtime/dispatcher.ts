@@ -29,7 +29,13 @@ const PREPARE_INBOUND_SESSION_TIMEOUT_MS = 60_000;
 const SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS = 500;
 const SUPERSEDED_RUN_DRAIN_TIMEOUT_MS = 5_000;
 const SUPERSEDED_HANDOFF_WAIT_TIMEOUT_MS = 5_000;
-const PRE_DISPATCH_RUN_DRAIN_SETTLE_MS = 1_000;
+// How long an accepted abort may take to release the session before this
+// inbound is dispatched anyway. Dispatching into a session that still has a run
+// makes OpenClaw queue the inbound as a follow-up (see enteredBehindActiveRun),
+// so its answer arrives later as a separate message instead of in this bubble.
+// The field's file+text pairs hit the old 1 s often. Stays under the 5 s bound
+// boundDrainWait puts around the whole pre-dispatch drain.
+const PRE_DISPATCH_RUN_DRAIN_SETTLE_MS = 4_000;
 const PRE_DISPATCH_RUN_RELEASE_WAIT_MS = 3_000;
 // A released session is a Map lookup, so poll tightly: this interval is pure
 // handoff latency on every follow-up message that lands on a busy session.
@@ -353,12 +359,35 @@ async function dispatchRuntimeReplyWithHandoffRetry(params: {
         },
       }
     : replyHandle;
+  const sessionKey = params.session.ctx.SessionKey ?? params.session.route.sessionKey;
+  // A flagless zero result is retried below because a refused or deduped
+  // inbound never ran. An inbound that entered while the session still had a
+  // run was not refused: OpenClaw queued it as a follow-up, which runs on its
+  // own once that run ends. Retrying it answered the same message twice — the
+  // retry in this bubble, then the queued copy as a separate message that
+  // called itself a repeat of the question just answered.
+  let behindRunSessionId: string | undefined;
+  if (retryHandoff && sessionKey) {
+    try {
+      behindRunSessionId = resolveActiveEmbeddedRunSessionId(sessionKey) ?? undefined;
+    } catch (error) {
+      console.warn(
+        `[wecom-b3] dispatch-run-lookup-failed sessionKey=${sessionKey} error=${String(error)}`,
+      );
+    }
+  }
+  if (behindRunSessionId) {
+    console.info(
+      `[wecom-b3] dispatch-behind-active-run sessionKey=${sessionKey} sessionId=${behindRunSessionId}`,
+    );
+  }
   let retryReason: "busy-result" | "init-conflict" | undefined;
   try {
     await dispatchRuntimeReply({
       ...dispatchParams,
       replyHandle: firstAttemptHandle,
-      retryFlaglessBusy: retryHandoff,
+      retryFlaglessBusy: retryHandoff && !behindRunSessionId,
+      enteredBehindActiveRun: Boolean(behindRunSessionId),
     });
     return;
   } catch (error) {
@@ -377,13 +406,13 @@ async function dispatchRuntimeReplyWithHandoffRetry(params: {
       throw error;
     }
     console.warn(
-      `[wecom-b3] dispatch-handoff-retry reason=${retryReason} delayMs=${SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS} sessionKey=${params.session.ctx.SessionKey ?? params.session.route.sessionKey}`,
+      `[wecom-b3] dispatch-handoff-retry reason=${retryReason} delayMs=${SUPERSEDED_INIT_CONFLICT_RETRY_DELAY_MS} sessionKey=${sessionKey}`,
     );
   }
   if (retryReason === "init-conflict") {
     await boundDrainWait(
       drainSupersededOpenClawRun({
-        sessionKey: params.session.ctx.SessionKey ?? params.session.route.sessionKey,
+        sessionKey,
         sessionId: resolvePreparedSessionId(params.session.ctx),
       }),
       "init-conflict-run-drain",

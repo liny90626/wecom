@@ -66,6 +66,12 @@ export const BOT_WS_BUSY_INBOUND_NOTICE_TEXT =
 // copy on an idle session with no answer ever arriving.
 export const BOT_WS_UNPROCESSED_INBOUND_NOTICE_TEXT =
   "（这条消息没有被处理，可能与上一轮收尾冲突或被判为重复，请重新发送）";
+// OpenClaw found the session still running when this inbound arrived and put
+// it in its follow-up queue: it WILL run, on its own, once the old run is gone,
+// and its answer arrives as a separate message. Resending it — or retrying it
+// here — answers it twice.
+export const BOT_WS_QUEUED_INBOUND_NOTICE_TEXT =
+  "⏳ 上一轮任务还在收尾，本条消息已排队，稍后单独回复，请勿重复发送。";
 const BOT_WS_ABSORBED_INBOUND_NOTICE_TEXT =
   "⏳ 上一轮任务仍在进行，本条消息已并入当前任务，完成后一并回复；若长时间未收到回复，请重新发送。";
 
@@ -113,8 +119,16 @@ export async function dispatchRuntimeReply(params: {
   replyHandle: ReplyHandle;
   abortSignal?: AbortSignal;
   retryFlaglessBusy?: boolean;
+  /**
+   * The session still had a run when this dispatch started. OpenClaw (default
+   * queue mode "steer") then queues the inbound as a follow-up and returns the
+   * same flagless zero result as a refusal — so here that result means
+   * "queued", never "retry".
+   */
+  enteredBehindActiveRun?: boolean;
 }): Promise<void> {
-  const { core, cfg, session, replyHandle, abortSignal, retryFlaglessBusy } = params;
+  const { core, cfg, session, replyHandle, abortSignal, retryFlaglessBusy, enteredBehindActiveRun } =
+    params;
   const isBotWsReply = replyHandle.context.transport === "bot-ws";
   const sessionKey = String(session.ctx.SessionKey ?? session.route?.sessionKey ?? "");
   let visibleBodySeen = false;
@@ -398,7 +412,10 @@ export async function dispatchRuntimeReply(params: {
 
   const deliverHandoffNotice = async (notice: {
     text: string;
-    logEvent: "dispatch-absorbed-by-active-run" | "dispatch-busy-not-accepted";
+    logEvent:
+      | "dispatch-absorbed-by-active-run"
+      | "dispatch-busy-not-accepted"
+      | "dispatch-queued-behind-active-run";
     runSessionId?: string;
     throwForRetry?: boolean;
   }): Promise<void> => {
@@ -735,6 +752,14 @@ export async function dispatchRuntimeReply(params: {
       return;
     }
 
+    if (enteredBehindActiveRun) {
+      await deliverHandoffNotice({
+        text: BOT_WS_QUEUED_INBOUND_NOTICE_TEXT,
+        logEvent: "dispatch-queued-behind-active-run",
+        runSessionId: resolveActiveRunSessionId(sessionKey),
+      });
+      return;
+    }
     // Both reply-operation admission refusal and inbound dedupe return the
     // same flagless zero result. The active-operation registry can be released
     // between that return and this check, so its current value is diagnostic

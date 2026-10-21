@@ -1,12 +1,11 @@
 # SESSION HANDOFF - OpenClaw WeCom 插件维护
 
-> 最后更新：2026-10-21（3.0.0-17 + main 上未发版的 2.-18）
+> 最后更新：2026-10-19（3.0.0-17）
 >
 > 本文件只保留当前可执行信息。早期版本流水账、已经关闭的排查过程和旧测试数字不再重复；需要历史细节时查看 git log 与 changelog。
 
 ## 0. 先读结论
 
-- **main 领先 `released/3.0.0-17`**：文件+文字时同一条消息被答两遍的修复（见 2.-18），未改版本号、未打包、未打 tag。
 - 当前发布版本 **3.0.0-17**：对抗式检查后的 8 项稳定性 / 速度修复（见 2.-17）。已打 tag、已打包，**生产未部署**，现网保持原样。
 - 上一版 **3.0.0-16**：修复气泡偶发变成「已收到新消息，合并思考」后再无回复（企微系统事件帧抢占用户回合，见 2.-16）。已打 tag、已打包，未部署。
 - 上一版 **3.0.0-15**：生产 OpenClaw 在 9.7 上问题较多，**已回退到 2026.7.1-2，此后只支持这一个版本**，其他版本不考虑兼容。本版撤掉 9.x 专用代码，做了一轮对抗式检查与性能、稳定性提升，并对照官方补齐多附件、附件下载失败降级等（见 2.-15）。`3.0.0-14` 只是发给维护者的验收候选包，未打 tag、未发布，内容全部并入 3.0.0-15。
@@ -69,16 +68,6 @@
 - origin 停在 `133773f`（上游 v3.0.0，2026-09-05 对账，见第 8 节），无本仓库的 tag；始终只读，从未推送。
 
 ## 2. 当前候选改动
-
-### 2.-18 同一条消息被答两遍（main，未发版）
-
-- **现象**（3.0.0-17 现网，文件+文字时概率较高）：上一条气泡变成「已收到新消息，合并思考。✅」，新气泡正常回答；随后又来一条**不带思考**的独立消息，开头是「这条和上一条是同一个问题，上面刚回过」。
-- **根因**（读 7.1-2 核心代码 + 截图推断，未拿到现场日志）：第三条是第二次独立的模型运行，由核心 follow-up 队列经 origin 路由（插件 outbound 主动推送）送出，所以没有思考块。核心默认队列模式 `steer`（`resolveQueueSettings`），`runReplyAgent` 发现会话仍有 run 且 steer 被拒时走 `enqueue-followup`，**返回零结果、不触发 `onAgentRunStart` / `onTurnAdopted`**——与「被拒 / 去重」的零结果一模一样。插件对这种零结果固定重发一次（`busy-result`），重发那次正常跑完（气泡里的回答），队列里那份在上一轮退出后又跑一遍。触发条件：接管时 abort 被接受，但上一轮 1 秒内没退干净就派发了——文件下载、工具调用中的 run 退出常超过 1 秒。
-- **修复**（`src/runtime/dispatcher.ts`、`src/runtime/reply-orchestrator.ts`）：① abort 被接受后等会话真正释放最多 4 秒（原 1 秒，`PRE_DISPATCH_RUN_DRAIN_SETTLE_MS`，仍在外层 5 秒界内）再派发；② 派发前会话仍有 run（日志 `dispatch-behind-active-run`）时，零结果按「已排队」处理：不重发，气泡收尾为「⏳ 上一轮任务还在收尾，本条消息已排队，稍后单独回复，请勿重复发送。」（日志 `dispatch-queued-behind-active-run`），答案随后以独立消息到达。派发时空闲的零结果仍照旧重发一次。
-- **用例**：`answers once when the session is still busy at dispatch`（取代原「continues admission when the old run accepted abort but is still draining」——那条用例把重发当成期望，正是这个缺陷）、`waits for an aborted run to release the session before dispatching`；两条在旧代码上均失败。`fails once when the post-retry busy notice cannot be delivered` 的 mock 多给一次「空闲」，因为派发前多查了一次。
-- **未改**：被接管的上一条若已进入核心（run 已开始），它的文字已写进会话记录，又被并入下一条（`adoptSupersededPendingInbound`），模型会看到同一句话两次；本次截图的第二条回答没有受影响，未动这条既有取舍。走 `noVisibleReplyFallbackEligible` 分支时排队的消息仍显示「已并入当前任务」的旧文案。
-- **线索**：5.10「新指令冲突 / 消息未被处理」的零结果，也可能是同一机制——消息其实已排队，稍后仍会被回答。再出现时看有无 `dispatch-behind-active-run`。
-- **同期另一问题未定案**：只有思考的气泡后面跟一条单独的「（回复完毕）」（「你回复他下即可」→ agent 去给 swzy 发消息）。可能的路径有好几条（死窗推送、延后收尾、外部投递收尾），只凭截图无法区分，等现场日志。
 
 ### 2.-17 对抗式检查：稳定性与速度（3.0.0-17）
 

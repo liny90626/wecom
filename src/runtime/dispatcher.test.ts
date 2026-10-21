@@ -2052,18 +2052,25 @@ describe("dispatchInboundEvent", () => {
     }
   });
 
-  it("answers once when the session is still busy at dispatch", async () => {
-    // OpenClaw queues an inbound that meets a still-running session as a
-    // follow-up and returns a flagless zero result. Retrying it ran the same
-    // message twice: once here, once from the queue as a separate message
-    // ("这条和上一条是同一个问题").
+  it("continues admission when the old run accepted abort but is still draining", async () => {
     vi.useFakeTimers();
     openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReturnValue("run-aborting");
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockResolvedValue({
-      queuedFinal: false,
-      counts: { block: 0, final: 0, tool: 0 },
+    openClawHandoffState.abortAndDrainAgentHarnessRun.mockResolvedValue({
+      aborted: true,
+      drained: false,
+      forceCleared: false,
     });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockResolvedValueOnce({
+        queuedFinal: false,
+        counts: { block: 0, final: 0, tool: 0 },
+      })
+      .mockImplementationOnce(async (params) => {
+        await params.dispatcherOptions.deliver({ text: "新任务已接管" }, { kind: "final" });
+        return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
+      });
 
     try {
       const operation = dispatchInboundEvent({
@@ -2078,60 +2085,13 @@ describe("dispatchInboundEvent", () => {
         event: makeEvent("msg-abort-accepted", "新消息"),
         replyHandle: makeReplyHandle(vi.fn(), { deliver }),
       });
-      // The accepted abort still owns the handoff after the settle wait runs out.
-      await vi.advanceTimersByTimeAsync(6_000);
-      await operation;
-
-      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
-      expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver).toHaveBeenCalledWith(
-        expect.objectContaining({ text: expect.stringContaining("本条消息已排队") }),
-        { kind: "final" },
-      );
-    } finally {
-      openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
-      openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
-      openClawHandoffState.abortAgentHarnessRun.mockReset();
-      openClawHandoffState.abortAgentHarnessRun.mockReturnValue(true);
-      vi.useRealTimers();
-    }
-  });
-
-  it("waits for an aborted run to release the session before dispatching", async () => {
-    // Dispatching 1 s after the abort, while the old run was still unwinding,
-    // is what sent the field's file+text pairs into OpenClaw's follow-up queue.
-    vi.useFakeTimers();
-    let activeRun: string | undefined = "run-aborting";
-    openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockImplementation(() => activeRun);
-    setTimeout(() => {
-      activeRun = undefined;
-    }, 2_500);
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const dispatchReplyWithBufferedBlockDispatcher = vi.fn(async (params) => {
-      await params.dispatcherOptions.deliver({ text: "答复" }, { kind: "final" });
-      return { queuedFinal: true, counts: { block: 0, final: 1, tool: 0 } };
-    });
-
-    try {
-      const operation = dispatchInboundEvent({
-        core: makeCore(dispatchReplyWithBufferedBlockDispatcher) as any,
-        cfg: {} as any,
-        store: makeStore() as any,
-        auditLog: { appendOperational: vi.fn(), appendInbound: vi.fn() } as any,
-        mediaService: {
-          normalizeFirstAttachment: vi.fn().mockResolvedValue(undefined),
-          saveInboundAttachment: vi.fn(),
-        } as any,
-        event: makeEvent("msg-wait-release", "新消息"),
-        replyHandle: makeReplyHandle(vi.fn(), { deliver }),
-      });
+      // The accepted abort owns the handoff; the bounded settle wait for the
+      // old run to disappear must not turn into a refusal.
       await vi.advanceTimersByTimeAsync(2_000);
-      expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(1_000);
       await operation;
 
-      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
-      expect(deliver).toHaveBeenCalledWith({ text: "答复" }, { kind: "final" });
+      expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+      expect(deliver).toHaveBeenCalledWith({ text: "新任务已接管" }, { kind: "final" });
     } finally {
       openClawHandoffState.resolveActiveEmbeddedRunSessionId.mockReset();
       openClawHandoffState.abortAndDrainAgentHarnessRun.mockReset();
@@ -2235,9 +2195,7 @@ describe("dispatchInboundEvent", () => {
 
   it("fails once when the post-retry busy notice cannot be delivered", async () => {
     vi.useFakeTimers();
-    // Idle for the pre-dispatch drain and the dispatch itself; busy by triage.
     openClawHandoffState.resolveActiveEmbeddedRunSessionId
-      .mockReturnValueOnce(undefined)
       .mockReturnValueOnce(undefined)
       .mockReturnValue("run-still-busy");
     // 2026.7.1 refuses abort while a run commits its terminal outcome.
